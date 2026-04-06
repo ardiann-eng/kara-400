@@ -1,0 +1,51 @@
+version: '3.9'
+
+services:
+  # KARA Bot (Paper mode by default)
+  kara-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kara-bot
+    environment:
+      KARA_MODE: paper
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: 8000
+      LOG_LEVEL: INFO
+    env_file:
+      - .env
+    volumes:
+      - ./kara_data.db:/app/kara_data.db
+      - ./kara.log:/app/kara.log
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    networks:
+      - kara-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # Redis (optional, for caching)
+  redis:
+    image: redis:7-alpine
+    container_name: kara-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - kara-network
+    restart: unless-stopped
+
+networks:
+  kara-network:
+    driver: bridge
+
+volumes:
+  redis-data:
