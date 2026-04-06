@@ -138,7 +138,7 @@ class RiskManager:
                 return False, f"📌 Already have an open position on {signal.asset}"
 
         # ── Daily loss limit (mode-specific) ───────────────────────────
-        daily_pnl_pct = self._daily_pnl / max(account.balance, 1)
+        daily_pnl_pct = self._daily_pnl / max(account.total_equity, 1)
         daily_hard = cfg.daily_loss_hard_pct if hasattr(cfg, 'daily_loss_hard_pct') else RISK.daily_loss_hard_pct
 
         if abs(daily_pnl_pct) >= daily_hard and self._daily_pnl < 0:
