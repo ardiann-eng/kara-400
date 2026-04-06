@@ -4,7 +4,7 @@ All data models used across the bot.
 """
 
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, validator
@@ -66,7 +66,7 @@ class FundingData(BaseModel):
     premium:         float          # mark vs index
     predicted_rate:  Optional[float] = None
     hourly_trend:    List[float] = Field(default_factory=list)  # last 8 hourly rates
-    timestamp:       datetime = Field(default_factory=datetime.utcnow)
+    timestamp:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def is_extreme(self) -> bool:
@@ -90,7 +90,7 @@ class OIData(BaseModel):
     oi_change_24h:   float          # vs 24h ago
     oracle_price:    float = 0.0    # from ctx.oraclePx
     long_short_ratio: Optional[float] = None
-    timestamp:       datetime = Field(default_factory=datetime.utcnow)
+    timestamp:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class LiquidationLevel(BaseModel):
@@ -106,7 +106,7 @@ class LiquidationMap(BaseModel):
     levels:          List[LiquidationLevel] = Field(default_factory=list)
     nearest_liq_pct: float = 0.0    # % to nearest big liq cluster
     cascade_risk:    float = 0.0    # 0-1 score, cascade probability
-    timestamp:       datetime = Field(default_factory=datetime.utcnow)
+    timestamp:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class OrderbookSnapshot(BaseModel):
@@ -118,7 +118,7 @@ class OrderbookSnapshot(BaseModel):
     bid_ask_imbalance: float           # -1 (all asks) to +1 (all bids)
     vwap:            float
     vwap_deviation_pct: float          # (mid - vwap) / vwap
-    timestamp:       datetime = Field(default_factory=datetime.utcnow)
+    timestamp:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ──────────────────────────────────────────────
@@ -170,7 +170,7 @@ class TradeSignal(BaseModel):
     suggested_contracts: Optional[float] = None
 
     # Meta
-    timestamp:        datetime = Field(default_factory=datetime.utcnow)
+    timestamp:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expiry:           Optional[datetime] = None   # signal expires if not acted on
     confirmed:        bool = False                # user confirmed (semi-auto)
     auto_executed:    bool = False                # full-auto bypass
@@ -229,8 +229,8 @@ class Order(BaseModel):
     filled_size:      float = 0.0
     avg_fill_price:   float = 0.0
     fee_paid:         float = 0.0
-    created_at:       datetime = Field(default_factory=datetime.utcnow)
-    updated_at:       datetime = Field(default_factory=datetime.utcnow)
+    created_at:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     signal_id:        Optional[str] = None
     is_paper:         bool = True
 
@@ -261,7 +261,7 @@ class Position(BaseModel):
 
     # Meta
     signal_id:        Optional[str] = None
-    opened_at:        datetime = Field(default_factory=datetime.utcnow)
+    opened_at:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at:        Optional[datetime] = None
     is_paper:         bool = True
 
@@ -298,7 +298,7 @@ class AccountState(BaseModel):
     execution_mode:   ExecutionMode = ExecutionMode.SEMI_AUTO
     is_paused:        bool = False
     kill_switch_active: bool = False
-    updated_at:       datetime = Field(default_factory=datetime.utcnow)
+    updated_at:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ──────────────────────────────────────────────
@@ -326,7 +326,7 @@ class User(BaseModel):
     chat_id:           str
     username:          str = ""
     paper_balance_usd: float               # internally USD
-    created_at:        datetime = Field(default_factory=datetime.utcnow)
+    created_at:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     config:            UserConfig = Field(default_factory=UserConfig)
     
     # Live mode auth

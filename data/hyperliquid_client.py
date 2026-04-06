@@ -351,7 +351,7 @@ class HyperliquidClient:
                     "high_24h": 43200,
                     "low_24h": 41000,
                     "candles": [],
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": utcnow().isoformat()
                 }
 
             # Get 1-hour candles (last 24 = ~24 hours of data)
@@ -387,7 +387,7 @@ class HyperliquidClient:
                 "high_24h": round(high_24h, 8),
                 "low_24h": round(low_24h, 8),
                 "candles": candles or [],
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utcnow().isoformat()
             }
 
             log.debug(f"BTC real-time: ${current_price:,.2f} (H: ${high_24h:,.2f}, L: ${low_24h:,.2f})")
