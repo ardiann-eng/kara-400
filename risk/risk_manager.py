@@ -242,7 +242,7 @@ class RiskManager:
         return contracts * signal.entry_price * sl_pct
 
     # ──────────────────────────────────────────
-    # DYNAMIC TP (Solution 2)
+    # DYNAMIC TP & ATR (Opsi B Implementation)
     # ──────────────────────────────────────────
 
     def get_dynamic_tp_levels(
@@ -253,9 +253,6 @@ class RiskManager:
     ) -> Tuple[float, float]:
         """
         Calculate dynamic TP1/TP2 based on OI and Volatility.
-        - OI < $50M: TP1 0.8%, TP2 1.5%
-        - OI >= $50M: Use defaults (1.5%/4% paper, 4%/8% live)
-        - HIGH_VOL/EXTREME: Reduce TP by 20%
         """
         # 1. Base levels based on OI
         if oi_usd < RISK.dynamic_tp_oi_threshold:
@@ -263,7 +260,6 @@ class RiskManager:
             tp2 = RISK.small_cap_tp2_pct
             log.debug(f"[RISK] {coin} identified as Small Cap (OI: {format_usd(oi_usd)})")
         else:
-            # Defaults - detect if paper or live via config
             if MODE == "paper":
                 tp1 = RISK.paper_tp1_pct
                 tp2 = RISK.paper_tp2_pct
@@ -272,13 +268,36 @@ class RiskManager:
                 tp2 = RISK.tp2_pct
 
         # 2. Volatility multiplier
-        # Expecting enum value strings from MarketRegime
         if volatility_regime in ("high_vol", "extreme", "volatile"):
             tp1 *= RISK.vol_tp_multiplier
             tp2 *= RISK.vol_tp_multiplier
             log.debug(f"[RISK] {coin} TP reduced by {int((1-RISK.vol_tp_multiplier)*100)}% due to {volatility_regime} volatility")
 
-        return round(tp1, 4), round(tp2, 4)
+        return round(tp1, 6), round(tp2, 6)
+
+    def calculate_atr(self, candles: List[Dict[str, Any]]) -> float:
+        """
+        Standard ATR calculation (Average True Range).
+        Requires at least 2 candles. 
+        Candle expected: {'h': high, 'l': low, 'c': close}
+        """
+        if not candles or len(candles) < 2:
+            return 0.0
+        
+        trs = []
+        for i in range(1, len(candles)):
+            curr = candles[i]
+            prev = candles[i-1]
+            
+            # True Range components
+            tr1 = float(curr["h"]) - float(curr["l"])
+            tr2 = abs(float(curr["h"]) - float(prev["c"]))
+            tr3 = abs(float(curr["l"]) - float(prev["c"]))
+            
+            trs.append(max(tr1, tr2, tr3))
+            
+        if not trs: return 0.0
+        return sum(trs) / len(trs)
 
     # ──────────────────────────────────────────
     # PARTIAL TP & TRAILING STOP

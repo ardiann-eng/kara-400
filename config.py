@@ -131,6 +131,11 @@ class RiskConfig:
     # Partial TP ratios
     tp1_close_ratio:         float = 0.40
     tp2_close_ratio:         float = 0.35
+    # ATR-Based (Opsi B) Calibration
+    enable_atr_sl:           bool  = True     # Use volatility-based SL
+    atr_multiplier:          float = 2.0      # ATR lookback buffer
+    atr_lookback:            int   = 14       # candles for calculation
+    
     # remaining 25% uses trailing stop
 
 RISK = RiskConfig()

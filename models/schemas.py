@@ -175,8 +175,11 @@ class TradeSignal(BaseModel):
     confirmed:        bool = False                # user confirmed (semi-auto)
     auto_executed:    bool = False                # full-auto bypass
 
-    def localize_for_user(self, mode: str):
-        """Dynamic adjustment of TP/SL/Lev based on user's trading mode."""
+    def localize_for_user(self, mode: str, atr_value: float = 0.0):
+        """
+        Localize signal parameters (SL/TP/Leverage) based on user mode.
+        If atr_value provided, uses dynamic ATR-based SL (Opsi B).
+        """
         import config
         from models.schemas import Side
 
@@ -193,14 +196,28 @@ class TradeSignal(BaseModel):
             tp2_pct = cfg.tp2_pct
             self.suggested_leverage = 10  # default standard
 
-        if self.side == Side.LONG:
-            self.stop_loss = round(self.entry_price * (1 - sl_pct), 8)
-            self.tp1       = round(self.entry_price * (1 + tp1_pct), 8)
-            self.tp2       = round(self.entry_price * (1 + tp2_pct), 8)
+        # ── 1. Calculate Stop Loss ────────────────────────────────────
+        if atr_value > 0 and config.RISK.enable_atr_sl:
+            # Dynamic ATR SL
+            sl_dist = atr_value * config.RISK.atr_multiplier
+            if self.side == Side.LONG:
+                self.stop_loss = round(self.entry_price - sl_dist, 8)
+            else:
+                self.stop_loss = round(self.entry_price + sl_dist, 8)
         else:
-            self.stop_loss = round(self.entry_price * (1 + sl_pct), 8)
-            self.tp1       = round(self.entry_price * (1 - tp1_pct), 8)
-            self.tp2       = round(self.entry_price * (1 - tp2_pct), 8)
+            # Fixed Percentage SL
+            if self.side == Side.LONG:
+                self.stop_loss = round(self.entry_price * (1 - sl_pct), 8)
+            else:
+                self.stop_loss = round(self.entry_price * (1 + sl_pct), 8)
+
+        # ── 2. Take Profit Calculation (Fixed % for now) ──────────────
+        if self.side == Side.LONG:
+            self.tp1 = round(self.entry_price * (1 + tp1_pct), 8)
+            self.tp2 = round(self.entry_price * (1 + tp2_pct), 8)
+        else:
+            self.tp1 = round(self.entry_price * (1 - tp1_pct), 8)
+            self.tp2 = round(self.entry_price * (1 - tp2_pct), 8)
 
     @property
     def risk_reward_ratio(self) -> float:

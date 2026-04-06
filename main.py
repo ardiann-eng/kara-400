@@ -320,6 +320,26 @@ class KaraBot:
 
     async def _handle_signal(self, signal):
         """Handle a new trade signal and broadcast to all authorized user sessions."""
+        # ── 0. Fetch Dynamic ATR (Opsi B Implementation) ─────────────
+        atr_value = 0.0
+        if config.RISK.enable_atr_sl:
+            try:
+                # Fetch recent candles (1m interval) for ATR calculation
+                candles = await self.hl_client.get_candles(
+                    signal.asset, "1m", limit=config.RISK.atr_lookback
+                )
+                if candles:
+                    # Use any available session's risk manager for calculation
+                    any_session = next(iter(self.sessions.values())) if self.sessions else None
+                    if any_session:
+                        atr_value = any_session.risk_mgr.calculate_atr(candles)
+                        if atr_value > 0:
+                            log.info(f"📐 [ATR-SL] Calculated for {signal.asset}: {atr_value:.6f}")
+                else:
+                    log.warning(f"⚠️  [ATR] No candles returned for {signal.asset}, using fixed SL.")
+            except Exception as e:
+                log.error(f"Failed to calculate dynamic ATR for {signal.asset}: {e}")
+
         # 1. Loop through all authorized users (from Telegram state)
         # This ensures users in config.TELEGRAM_CHAT_ID get signals even before hitting /start
         target_ids = list(self.telegram._authorized_chat_ids)
@@ -338,7 +358,7 @@ class KaraBot:
 
             # Copy signal to avoid shared reference issues
             user_signal = signal.model_copy()
-            user_signal.localize_for_user(session.user.config.trading_mode)
+            user_signal.localize_for_user(session.user.config.trading_mode, atr_value=atr_value)
             
             acc = session.get_account_state()
             
