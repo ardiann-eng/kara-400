@@ -338,6 +338,8 @@ class KaraBot:
 
             # Copy signal to avoid shared reference issues
             user_signal = signal.model_copy()
+            user_signal.localize_for_user(session.user.config.trading_mode)
+            
             acc = session.get_account_state()
             
             # Enrich signal with position sizing for THIS user

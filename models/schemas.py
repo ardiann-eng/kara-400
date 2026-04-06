@@ -175,6 +175,33 @@ class TradeSignal(BaseModel):
     confirmed:        bool = False                # user confirmed (semi-auto)
     auto_executed:    bool = False                # full-auto bypass
 
+    def localize_for_user(self, mode: str):
+        """Dynamic adjustment of TP/SL/Lev based on user's trading mode."""
+        import config
+        from models.schemas import Side
+
+        if mode == "scalper":
+            cfg = config.SCALPER
+            sl_pct  = cfg.sl_pct
+            tp1_pct = cfg.tp1_pct
+            tp2_pct = cfg.tp2_pct
+            self.suggested_leverage = min(cfg.default_leverage, cfg.max_leverage)
+        else:
+            cfg = config.RISK
+            sl_pct  = cfg.default_sl_pct
+            tp1_pct = cfg.tp1_pct
+            tp2_pct = cfg.tp2_pct
+            self.suggested_leverage = 10  # default standard
+
+        if self.side == Side.LONG:
+            self.stop_loss = round(self.entry_price * (1 - sl_pct), 8)
+            self.tp1       = round(self.entry_price * (1 + tp1_pct), 8)
+            self.tp2       = round(self.entry_price * (1 + tp2_pct), 8)
+        else:
+            self.stop_loss = round(self.entry_price * (1 + sl_pct), 8)
+            self.tp1       = round(self.entry_price * (1 - tp1_pct), 8)
+            self.tp2       = round(self.entry_price * (1 - tp2_pct), 8)
+
     @property
     def risk_reward_ratio(self) -> float:
         if self.side == Side.LONG:
