@@ -349,23 +349,26 @@ class KaraBot:
             user_signal.suggested_size_usd   = size_usd
             user_signal.suggested_contracts  = contracts
 
+            # ⚡ PRE-TRADE VALIDATION (Before Notification)
+            # We only send signals if we can actually trade them (FULL_AUTO)
             if config.FULL_AUTO and user_signal.score >= config.SIGNAL.min_score_to_auto_trade and not getattr(user_signal, 'is_pyramid', False):
-                user_signal.auto_executed = True
+                approved, reason = session.risk_mgr.pre_trade_check(
+                    user_signal, acc, session.executor.open_positions
+                )
                 
+                if not approved:
+                    log.info(f"🔇 Sinyal {user_signal.asset} dibisukan (Muted): {reason}")
+                    continue  # SILENT SKIP
+                
+                # If approved, proceed to auto-execution
+                user_signal.auto_executed = True
                 await self.telegram.send_signal(user_signal, is_auto=True, target_chat_id=chat_id)
                 
                 pos = await session.executor.open_position(user_signal)
                 if pos:
                     await self.telegram.send_position_opened(pos, user_signal, target_chat_id=chat_id)
-                else:
-                    # Check if actually full or or failed for other reason
-                    open_count = len([p for p in session.executor._positions.values() if p.status.name == "OPEN"])
-                    if open_count >= config.RISK.max_concurrent_auto:
-                        await self.telegram.send_text(
-                            f"⏳ Sinyal <b>{user_signal.asset}</b> dilewati. Slot penuh ({open_count}/{config.RISK.max_concurrent_auto}).",
-                            target_chat_id=chat_id
-                        )
             else:
+                # Manual mode: always send so the user can decide
                 await self.telegram.send_signal(user_signal, target_chat_id=chat_id)
 
     async def _on_trade_confirmed(self, signal, chat_id: str):
