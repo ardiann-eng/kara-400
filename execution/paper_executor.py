@@ -133,6 +133,8 @@ class PaperExecutor:
         fill_price = self._simulate_fill(signal.entry_price, signal.side)
 
         # Build position
+        liq_price = self._calculate_liquidation_price(fill_price, signal.side, signal.suggested_leverage)
+
         pos = Position(
             position_id=gen_id("POS"),
             asset=signal.asset,
@@ -147,6 +149,7 @@ class PaperExecutor:
             tp2=signal.tp2,
             trailing_active=False,
             trailing_high=fill_price,
+            liquidation_price=liq_price,
             signal_id=signal.signal_id,
             is_paper=True,
         )
@@ -337,3 +340,16 @@ class PaperExecutor:
             return round(price + spread + noise, 8)   # buy at ask
         else:
             return round(price - spread + noise, 8)   # sell at bid
+
+    def _calculate_liquidation_price(self, entry: float, side: Side, leverage: int) -> float:
+        """
+        Isolated Margin Liquidation Formula (Approximate for Hyperliquid).
+        Entry * (1 - 1/Lev + MMR) for Long
+        Entry * (1 + 1/Lev - MMR) for Short
+        Assuming MMR = 0.5% (0.005)
+        """
+        mmr = 0.005  # 0.5% standard maintenance margin
+        if side == Side.LONG:
+            return entry * (1 - (1 / leverage) + mmr)
+        else:
+            return entry * (1 + (1 / leverage) - mmr)

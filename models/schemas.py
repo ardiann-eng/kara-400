@@ -251,6 +251,7 @@ class Position(BaseModel):
     tp2:              float
     trailing_active:  bool = False
     trailing_high:    float = 0.0    # highest price reached (for long trailing)
+    liquidation_price: Optional[float] = None  # estimated or actual liquidation price
 
     # State
     status:           PositionStatus = PositionStatus.OPEN

@@ -375,7 +375,7 @@ class KaraTelegram:
             unreal_pnl = pos.unrealized_pnl(current)
             float_pct  = pos.floating_pct(current) * 100
             
-            pnl_label   = "Profit" if unreal_pnl >= 0 else "Loss"
+            pnl_label   = "🍀 Profit" if unreal_pnl >= 0 else "🔻 Loss"
             pnl_str     = format_idr(unreal_pnl)
             pnl_sign    = "+" if unreal_pnl >= 0 else ""
 
@@ -389,11 +389,13 @@ class KaraTelegram:
             sl_label = " <i>[BEP]</i>" if pos.tp1_hit else ""
             tp_prog = "⭐⭐ (TP2)" if pos.tp2_hit else ("⭐ (TP1)" if pos.tp1_hit else "⏳ <i>Menunggu TP...</i>")
             trail_str = "🔄 Aktif" if pos.trailing_active else "-"
+            liq_str = f"   💀 Estimasi Liq: <code>${format_price(pos.liquidation_price)}</code>\n" if pos.liquidation_price else ""
 
             text += (
                 f"\n{side_emoji} <b>{pos.asset} {pos.side.value.upper()}</b> {pos.leverage}x\n"
                 f"   Entry: <code>${format_price(pos.entry_price)}</code> ➪ <b>${format_price(current)}</b>\n"
                 f"   {pnl_label}: <b>{pnl_sign}{pnl_str} ({pnl_sign}{float_pct:.2f}%)</b>\n"
+                f"{liq_str}"
                 f"   🛑 SL: <code>${format_price(pos.stop_loss)}</code>{sl_label}\n"
                 f"   🎯 Target: {tp_prog}\n"
                 f"   ⚡ Trail: {trail_str} | ⏱️ {duration_str}\n"
