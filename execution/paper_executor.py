@@ -235,20 +235,24 @@ class PaperExecutor:
             return None
 
         fill_price = self._simulate_fill(current_price, Side.SHORT if pos.side == Side.LONG else Side.LONG)
-        pnl        = pos.unrealized_pnl(fill_price) + pos.pnl_realized
-
+        
+        # The final PnL is what was made on the REMAINING size
+        floating_pnl = pos.unrealized_pnl(fill_price)
+        
         # Update state
-        pos.pnl_realized = pnl
+        pos.pnl_realized += floating_pnl
         pos.status       = PositionStatus.CLOSED
         pos.closed_at    = utcnow()
 
-        # Return margin + PnL
-        self._balance    += pos.margin_usd + pnl
-        self._available  += pos.margin_usd
+        # Return remaining margin + final floating PnL
+        # Already realized PnL was added to _balance during partial closures
+        self._balance    += floating_pnl
+        self._available  += pos.margin_usd + floating_pnl
         self._used_margin-= pos.margin_usd
-        self._daily_pnl  += pnl
-
-        self.risk.record_pnl(pnl, self._balance)
+        
+        # Total PnL for the record (cumulative)
+        total_pnl = pos.pnl_realized
+        self.risk.record_pnl(total_pnl, self._balance)
 
         log_data = {
             "type":      "close",
@@ -293,12 +297,24 @@ class PaperExecutor:
         """Handle TP1, TP2, trailing, or SL partial/full close."""
         close_ratio = action["close_ratio"]
         close_size  = pos.size_current * close_ratio
+        
         partial_pnl = (
-            pos.floating_pct(current_price) *
+            pos.floating_pct(current_price) * 
             close_size * pos.entry_price
         )
-        pos.pnl_realized += partial_pnl
-        pos.size_current -= close_size
+        
+        # Release proportional margin back to balance
+        margin_to_release = pos.margin_usd * close_ratio
+        
+        # Update executor state
+        self._balance      += partial_pnl
+        self._available    += partial_pnl + margin_to_release
+        self._used_margin  -= margin_to_release
+        
+        # Update position state
+        pos.pnl_realized   += partial_pnl
+        pos.margin_usd     -= margin_to_release
+        pos.size_current   -= close_size
         pos.pnl_unrealized = pos.unrealized_pnl(current_price)
 
         if action["action"] == "tp1":
@@ -325,7 +341,6 @@ class PaperExecutor:
             else:
                 pos.trailing_high = min(pos.trailing_high, current_price)
 
-        self._daily_pnl += partial_pnl
         return {**action, "pnl": partial_pnl, "position_id": pos.position_id}
 
     # ──────────────────────────────────────────
