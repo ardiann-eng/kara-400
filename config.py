@@ -94,7 +94,7 @@ class RiskConfig:
     # Position sizing
     risk_per_trade_pct:      float = 0.010    # 1.0% of equity per trade
     max_risk_per_trade_pct:  float = 0.025    # 2.5% absolute cap
-    fixed_margin_per_position: float = 50.0  # [NEW] Default $50 margin per trade (overrides pct if > 0)
+    fixed_margin_per_position: float = 10.0  # [NEW] Default $10 margin per trade (allows 5-6 concurrent trades)
 
     # Paper trade mode (tight, for fast data collection)
     paper_sl_pct:            float = 0.020    # 2.0% stop loss
