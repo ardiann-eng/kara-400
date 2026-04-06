@@ -384,6 +384,14 @@ class KaraBot:
         for chat_id, session in self.sessions.items():
             if not hasattr(session.executor, 'open_positions'):
                 continue
+            
+            # ── Daily Reset Check ───────────────────────────────────────
+            # This handles the UTC midnight transition for each user
+            acc = session.get_account_state()
+            if session.risk_mgr.reset_daily(acc.total_equity):
+                pos_count = len(session.executor.open_positions)
+                await self.telegram.send_daily_report(acc, pos_count, target_chat_id=chat_id)
+                log.info(f"📬 Daily report sent to {chat_id}")
             positions = session.executor.open_positions
             if not positions:
                 continue

@@ -28,6 +28,29 @@ from utils.helpers import format_usd, format_idr, format_pct, format_price, utcn
 
 log = logging.getLogger("kara.telegram")
 
+DAILY_REPORT_TEMPLATE = """
+📊 <b>KARA DAILY INSIGHTS</b> 🌸
+──────────────────────────
+📅 <i>Laporan Harian: {date}</i>
+
+💰 <b>KESEHATAN PORTOFOLIO</b>
+• Ekuitas Total: <code>{total_equity}</code>
+• Saldo Dompet : <code>{wallet_balance}</code>
+• Saldo Tersedia: <code>{available}</code>
+
+📈 <b>PERFORMER HARI INI</b>
+• Daily PnL    : <b>{pnl_sign}{pnl_val} ({pnl_sign}{pnl_pct})</b> {pnl_emoji}
+• Posisi Aktif : <b>{pos_count} terbuka</b>
+• Max Drawdown : <b>{drawdown}</b>
+
+🛡️ <b>STATUS SISTEM</b>
+• Risk Mode    : {mode_icon} <b>{mode_text}</b>
+• Bot Status   : {status_icon} <b>{status_text}</b>
+
+──────────────────────────
+<i>{footer}</i>
+"""
+
 
 # ──────────────────────────────────────────────
 # KARA's personality strings 
@@ -148,6 +171,8 @@ class KaraTelegram:
                 CommandHandler("scalper",  self.cmd_scalper),    # switch to scalper
                 CommandHandler("standard", self.cmd_standard),   # switch to standard
                 CommandHandler("paper",    self.cmd_paper),      # force paper mode
+                CommandHandler("daily",    self.cmd_daily),       # manual daily reset
+                CommandHandler("daily",    self.cmd_daily),      # manual daily report
                 CommandHandler("live",     self.cmd_live),       # upgrade to live mode
                 CallbackQueryHandler(self.on_callback),
             ]
@@ -451,6 +476,98 @@ class KaraTelegram:
             await update.message.reply_html(text)
         except Exception as e:
             await update.message.reply_html(f"❌ PnL Error: {e}")
+
+    async def cmd_daily(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """On-demand daily report manual."""
+        if not self._is_authorized(update): return
+        chat_id = str(update.effective_chat.id)
+        session = self.bot_app.get_session(chat_id) if self.bot_app else None
+        if not session: return
+        
+        acc = session.get_account_state()
+        pos_count = len(session.executor.open_positions)
+        await self.send_daily_report(acc, pos_count, target_chat_id=chat_id)
+
+    async def send_daily_report(self, acc: AccountState, pos_count: int, target_chat_id: str = None):
+        """Send the premium daily summary report."""
+        pnl_sign = "+" if acc.daily_pnl >= 0 else ""
+        pnl_emoji = "🟢" if acc.daily_pnl >= 0 else "🔴"
+        mode_text = "SCALPER" if self.mode_manager and self.mode_manager.is_scalper() else "STANDARD"
+        mode_icon = "⚡" if mode_text == "SCALPER" else "📊"
+        
+        # Friendly footers based on performance
+        if acc.daily_pnl >= 0:
+            footer = "Kerja bagus hari ini! Mari kita jaga momentumnya~ 🌸"
+        else:
+            footer = "Besok kita balas dendam ke market ya! Tetap disiplin~ 🌸"
+
+        status_text = "OK" if not acc.is_paused else "PAUSED"
+        status_icon = "✅" if status_text == "OK" else "⏸️"
+
+        text = DAILY_REPORT_TEMPLATE.format(
+            date=datetime.now().strftime("%Y-%m-%d"),
+            total_equity=format_idr(acc.total_equity),
+            wallet_balance=format_idr(acc.wallet_balance),
+            available=format_idr(acc.available),
+            pnl_sign=pnl_sign,
+            pnl_val=format_idr(acc.daily_pnl),
+            pnl_pct=format_pct(acc.daily_pnl_pct),
+            pnl_emoji=pnl_emoji,
+            pos_count=pos_count,
+            drawdown=format_pct(acc.current_drawdown_pct, show_sign=False),
+            mode_icon=mode_icon,
+            mode_text=mode_text,
+            status_icon=status_icon,
+            status_text=status_text,
+            footer=footer
+        )
+        await self.send_text(text, target_chat_id=target_chat_id)
+
+    async def cmd_daily(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """On-demand daily report manual."""
+        if not self._is_authorized(update): return
+        chat_id = str(update.effective_chat.id)
+        session = self.bot_app.get_session(chat_id) if self.bot_app else None
+        if not session: return
+        
+        acc = session.get_account_state()
+        pos_count = len(session.executor.open_positions)
+        await self.send_daily_report(acc, pos_count, target_chat_id=chat_id)
+
+    async def send_daily_report(self, acc: AccountState, pos_count: int, target_chat_id: str = None):
+        """Send the premium daily summary report."""
+        pnl_sign = "+" if acc.daily_pnl >= 0 else ""
+        pnl_emoji = "🟢" if acc.daily_pnl >= 0 else "🔴"
+        mode_text = "SCALPER" if self.mode_manager and self.mode_manager.is_scalper() else "STANDARD"
+        mode_icon = "⚡" if mode_text == "SCALPER" else "📊"
+        
+        # Friendly footers based on performance
+        if acc.daily_pnl >= 0:
+            footer = "Kerja bagus hari ini! Mari kita jaga momentumnya~ 🌸"
+        else:
+            footer = "Besok kita balas dendam ke market ya! Tetap disiplin~ 🌸"
+
+        status_text = "OK" if not acc.is_paused else "PAUSED"
+        status_icon = "✅" if status_text == "OK" else "⏸️"
+
+        text = DAILY_REPORT_TEMPLATE.format(
+            date=datetime.now().strftime("%Y-%m-%d"),
+            total_equity=format_idr(acc.total_equity),
+            wallet_balance=format_idr(acc.wallet_balance),
+            available=format_idr(acc.available),
+            pnl_sign=pnl_sign,
+            pnl_val=format_idr(acc.daily_pnl),
+            pnl_pct=format_pct(acc.daily_pnl_pct),
+            pnl_emoji=pnl_emoji,
+            pos_count=pos_count,
+            drawdown=format_pct(acc.current_drawdown_pct, show_sign=False),
+            mode_icon=mode_icon,
+            mode_text=mode_text,
+            status_icon=status_icon,
+            status_text=status_text,
+            footer=footer
+        )
+        await self.send_text(text, target_chat_id=target_chat_id)
 
     async def cmd_pause(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):

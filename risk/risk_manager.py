@@ -71,14 +71,16 @@ class RiskManager:
     # DAILY RESET
     # ──────────────────────────────────────────
 
-    def reset_daily(self, current_balance: float):
-        """Call at midnight UTC or on first run."""
+    def reset_daily(self, current_balance: float) -> bool:
+        """Call at midnight UTC or on first run. Returns True if reset happened."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if today != self._last_reset_day:
             self._daily_pnl     = 0.0
             self._session_start_balance = current_balance
             self._last_reset_day = today
             log.info(f"📅 Daily reset - session balance: {format_usd(current_balance)}")
+            return True
+        return False
 
     # ──────────────────────────────────────────
     # PRE-TRADE CHECK
