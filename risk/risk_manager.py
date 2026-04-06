@@ -161,7 +161,7 @@ class RiskManager:
             )
 
         # ── Available margin check ─────────────────────────────────────
-        required_margin = self.calculate_margin_required(signal, account.balance)
+        required_margin = self.calculate_margin_required(signal, account.total_equity)
         if required_margin > account.available:
             return False, (
                 f"💸 Insufficient margin - need {format_usd(required_margin)}, "
