@@ -310,7 +310,9 @@ class KaraBot:
                     scan_errors = 0  # reset on success
                 except Exception as e:
                     scan_errors += 1
-                    if scan_errors <= 2:  # only log first few errors
+                    if scan_errors <= 3:  # log first few with details
+                        log.error(f"❌ Scan error for {asset}: {e}", exc_info=True)
+                    else:
                         log.warning(f"Scan error for {asset}: {type(e).__name__}")
                 await asyncio.sleep(0.4)
         except Exception as e:
@@ -345,7 +347,7 @@ class KaraBot:
             user_signal.suggested_size_usd   = size_usd
             user_signal.suggested_contracts  = contracts
 
-            if config.FULL_AUTO and user_signal.score >= SIGNAL.min_score_to_auto_trade and not getattr(user_signal, 'is_pyramid', False):
+            if config.FULL_AUTO and user_signal.score >= config.SIGNAL.min_score_to_auto_trade and not getattr(user_signal, 'is_pyramid', False):
                 user_signal.auto_executed = True
                 
                 await self.telegram.send_signal(user_signal, is_auto=True, target_chat_id=chat_id)
@@ -354,10 +356,11 @@ class KaraBot:
                 if pos:
                     await self.telegram.send_position_opened(pos, user_signal, target_chat_id=chat_id)
                 else:
-                    open_count = len([p for p in session.executor._positions.values() if p.status.value == "open"])
+                    # Check if actually full or or failed for other reason
+                    open_count = len([p for p in session.executor._positions.values() if p.status.name == "OPEN"])
                     if open_count >= config.RISK.max_concurrent_auto:
                         await self.telegram.send_text(
-                            f"⏳ Sinyal <b>{user_signal.asset}</b> dilewati. Penuh ({open_count}/{config.RISK.max_concurrent_auto}).",
+                            f"⏳ Sinyal <b>{user_signal.asset}</b> dilewati. Slot penuh ({open_count}/{config.RISK.max_concurrent_auto}).",
                             target_chat_id=chat_id
                         )
             else:
