@@ -630,8 +630,8 @@ class KaraTelegram:
             tp1_pct=abs(signal.tp1 / signal.entry_price - 1) * 100,
             tp2=format_price(signal.tp2),
             tp2_pct=abs(signal.tp2 / signal.entry_price - 1) * 100,
-            lev=signal.leverage,
-            rr=signal.risk_reward,
+            lev=signal.suggested_leverage,
+            rr=signal.risk_reward_ratio,
             sig_id=signal.signal_id[:8]
         )
 
