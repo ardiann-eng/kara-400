@@ -784,20 +784,34 @@ class KaraTelegram:
     # ──────────────────────────────────────────
 
     async def send_position_opened(self, pos, signal, target_chat_id: str = None):
-        """Notification for a successful entry."""
-        margin_idr = pos.margin_usd * config.USD_TO_IDR
+        """Premium AI Agent Notification for a successful entry."""
+        from config import MODE, RISK
         
+        # Determine labels
+        mode_label = "🚀 FULL-AUTO" if config.FULL_AUTO else "🛠️ SEMI-AUTO"
+        type_label = "📝 PAPER" if MODE == "paper" else "💰 LIVE"
+        atr_status = "✅ Dynamic ATR" if RISK.enable_atr_sl else "固定 (Fixed)"
+
+        # Style & Narrative
         text = (
-            f"🚀 <b>POSISI DIBUKA — {pos.asset}</b>\n\n"
-            f"Arah    : {pos.side.value.upper()}\n"
-            f"Entry   : <code>${format_price(pos.entry_price)}</code>\n"
-            f"Margin  : <b>{format_idr(margin_idr)} ({format_usd(pos.margin_usd)})</b>\n"
-            f"Leverage: {pos.leverage}x isolated\n"
-            f"🛑 SL   : <code>${format_price(pos.stop_loss)}</code>\n"
-            f"🎯 TP1  : <code>${format_price(pos.tp1)}</code>\n"
-            f"🎯 TP2  : <code>${format_price(pos.tp2)}</code>\n\n"
-            f"Score   : <b>{signal.score}/100</b>\n"
-            f"<i>Semoga profit melimpah! ✨</i>"
+            f"🌸 <b>KARA SYSTEM: Position Executed</b>\n"
+            f"──────────────────────────\n"
+            f"<i>I have analyzed the market and successfully opened a <b>{pos.side.value.upper()}</b> position for <b>{pos.asset}</b>.</i>\n\n"
+            
+            f"📦 <b>Market Details</b>\n"
+            f"  • Entry   : <code>${format_price(pos.entry_price)}</code>\n"
+            f"  • Margin  : <b>{format_idr(pos.margin_usd)}</b> ({format_usd(pos.margin_usd)})\n"
+            f"  • Leverage: {pos.leverage}x isolated\n"
+            f"  • Mode    : {type_label} ({mode_label})\n\n"
+            
+            f"🛡️ <b>Risk Profile</b>\n"
+            f"  • 🛑 SL   : <code>${format_price(pos.stop_loss)}</code> ({atr_status})\n"
+            f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code>\n"
+            f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code>\n"
+            f"  • 📐 R:R Ratio: <b>{signal.risk_reward_ratio:.2f}x</b>\n"
+            f"  • 📊 Score: <b>{signal.score}/100</b>\n\n"
+            
+            f"<i>Execution complete. Monitoring for optimal exit. ✨</i>"
         )
         await self.send_text(text, target_chat_id=target_chat_id)
 
@@ -830,30 +844,34 @@ class KaraTelegram:
 
         if action_type == "tp1":
             text = (
-                "🎯 <b>TP1 HIT — {asset}</b>\n\n"
-                "Arah    : {side}\n"
-                "Entry   : <code>${entry:,.4f}</code>\n"
-                "TP1     : <code>${tp1:,.4f}</code>\n"
-                "Profit  : <b>{sign}{pnl_idr} ({sign}{pct:.2f}%)</b>\n"
-                "Sisa    : 60% masih jalan\n"
-                "SL      : Digeser ke Entry ✅\n"
-            ).format(
-                asset=pos.asset, side=side_str, entry=entry,
-                tp1=pos.tp1, sign=pnl_sign, pnl_idr=format_idr(pnl), pct=abs(pnl_pct)
+                "🌸 <b>KARA UPDATE: Target Reached</b>\n"
+                "──────────────────────────\n"
+                f"<i>I have secured partial profits for <b>{pos.asset}</b>. Taking some chips off the table.</i>\n\n"
+                
+                f"🎯 <b>TP1 HIT</b>\n"
+                f"  • Entry   : <code>${format_price(entry)}</code>\n"
+                f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
+                
+                f"🛡️ <b>Risk Adjustment</b>\n"
+                f"  • Status : Sisa 60% masih jalan\n"
+                f"  • Action : SL digeser ke Entry ✅\n\n"
+                
+                f"<i>Continuing to monitor for TP2. ✨</i>"
             )
 
         elif action_type == "tp2":
             text = (
-                "🎯🎯 <b>TP2 HIT — {asset}</b>\n"
+                "🏁 <b>KARA UPDATE: Final Targets</b>\n"
                 "──────────────────────────\n"
-                "Arah    : {side}\n"
-                "Entry   : <code>${entry:,.4f}</code>\n"
-                "TP2     : <code>${tp2:,.4f}</code>\n"
-                "Profit  : <b>{sign}{pnl_idr} ({sign}{pct:.2f}%)</b>\n"
-                "Sisa    : 25% dengan trailing"
-            ).format(
-                asset=pos.asset, side=side_str, entry=entry,
-                tp2=pos.tp2, sign=pnl_sign, pnl_idr=format_idr(pnl), pct=abs(pnl_pct)
+                f"<i>Excellent progress on <b>{pos.asset}</b>. TP2 has been successfully triggered.</i>\n\n"
+                
+                f"🎯🎯 <b>TP2 HIT</b>\n"
+                f"  • Entry   : <code>${format_price(entry)}</code>\n"
+                f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
+                
+                f"🛡️ <b>Trailing Active</b>\n"
+                f"  • Status : 25% sisa dengan trailing stop\n"
+                f"  • Objective: Maximizing the remainder. 🚀"
             )
 
         elif action_type == "trailing_stop":
@@ -894,22 +912,31 @@ class KaraTelegram:
         await self.send_text(text, target_chat_id=target_chat_id)
 
     async def send_hourly_summary(self, acc, open_count: int, target_chat_id: str = None):
-        """Send automatic hourly PnL summary."""
+        """Send a premium status overview."""
         daily_sign = "+" if acc.daily_pnl >= 0 else ""
         dd_pct     = acc.current_drawdown_pct
         
-        status_str = "🟢 OK"
-        if dd_pct >= 15: status_str = "🔴 DANGER"
-        elif dd_pct >= 8: status_str = "🟠 WARNING"
+        status_str = "🟢 SYSTEM NOMINAL"
+        if dd_pct >= 15: status_str = "🔴 DANGER: CRITICAL DRAWDOWN"
+        elif dd_pct >= 8: status_str = "🟠 WARNING: HIGH VOLATILITY"
 
         text = (
-            "📊 <b>Update Harian KARA</b>\n"
+            "💜 <b>KARA SYSTEM STATUS</b>\n"
             "──────────────────────────\n"
-            f"Ekuitas   : <code>{format_idr(acc.total_equity)}</code>\n"
-            f"Daily PnL : <code>{daily_sign}{format_idr(acc.daily_pnl)} ({daily_sign}{format_pct(acc.daily_pnl_pct)})</code>\n"
-            f"Posisi    : {open_count} terbuka\n"
-            f"Drawdown  : <code>{format_pct(acc.current_drawdown_pct, show_sign=False)}</code>\n"
-            f"Status    : {status_str}\n"
+            f"📊 <b>Kondisi Dana</b>\n"
+            f"  • Ekuitas  : <code>{format_idr(acc.total_equity)} (NAV)</code>\n"
+            f"  • Wallet   : <code>{format_idr(acc.wallet_balance)}</code>\n"
+            f"  • Floating : <code>{format_idr(acc.unrealized_pnl)}</code>\n\n"
+            
+            f"📈 <b>Performa Harian</b>\n"
+            f"  • Profit   : <b>{daily_sign}{format_idr(acc.daily_pnl)} ({daily_sign}{format_pct(acc.daily_pnl_pct)})</b>\n"
+            f"  • Drawdown : <code>{format_pct(acc.current_drawdown_pct, show_sign=False)}</code>\n\n"
+            
+            f"🎯 <b>Status Operasional</b>\n"
+            f"  • Posisi   : {open_count} aset aktif\n"
+            f"  • Health   : {status_str}\n\n"
+            
+            f"<i>Semua sistem beroperasi maksimal, siap tangkap peluang~! ✨</i>"
         )
         await self.send_text(text, target_chat_id=target_chat_id)
 
