@@ -154,11 +154,11 @@ class ScalperConfig:
     risk_per_trade_pct:      float = 0.13     # 13% per trade — VERY aggressive
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
-    # Scalper SL/TP (very tight)
-    sl_pct:                  float = 0.0025   # 0.25% stop loss
-    tp1_pct:                 float = 0.0035   # 0.35% TP1 — close 60%
-    tp2_pct:                 float = 0.0070   # 0.70% TP2 — close 40%
-    trailing_pct:            float = 0.0020   # 0.20% trailing on remainder
+    # Scalper SL/TP (Calibrated for 25x leverage)
+    sl_pct:                  float = 0.0065   # 0.65% stop loss (Breathing room)
+    tp1_pct:                 float = 0.0085   # 0.85% TP1 — close 60%
+    tp2_pct:                 float = 0.0150   # 1.50% TP2 — close 40%
+    trailing_pct:            float = 0.0040   # 0.40% trailing on remainder
 
     # Timing
     max_hold_minutes:        float = 12.0     # force close after 12min if no TP hit
