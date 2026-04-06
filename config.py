@@ -56,7 +56,7 @@ HL_TESTNET       = MODE == "paper"                       # auto-set from mode
 # ──────────────────────────────────────────────
 # TELEGRAM
 # ──────────────────────────────────────────────
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_TOKEN", ""))
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ──────────────────────────────────────────────
