@@ -636,6 +636,9 @@ class KaraTelegram:
         )
 
         keyboard = []
+        # Always store signal so the "View Reasons" button can fetch details
+        self._pending_signals[signal.signal_id] = signal
+
         if not is_auto:
             keyboard = [
                 [
@@ -644,7 +647,6 @@ class KaraTelegram:
                 ],
                 [InlineKeyboardButton("📝 Mengapa Sinyal Ini?", callback_data=f"reasons:{signal.signal_id}")]
             ]
-            self._pending_signals[signal.signal_id] = signal
         else:
             text += "\n🚀 <b>AUTO-EXECUTED</b>"
             # Match screenshot buttons for auto-trade
