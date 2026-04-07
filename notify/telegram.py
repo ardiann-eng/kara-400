@@ -372,28 +372,62 @@ class KaraTelegram:
         
         positions = session.executor.open_positions
         if not positions:
-            await update.message.reply_html(
+            text = (
                 "📭 <b>Tidak ada posisi terbuka saat ini.</b>\n"
                 "<i>KARA menunggu sinyal yang tepat~ 🌸</i>"
             )
+            keyboard = [[InlineKeyboardButton("🔄 REFRESH", callback_data="refresh_pos")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            if update.callback_query:
+                await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+            else:
+                await update.message.reply_html(text, reply_markup=reply_markup)
             return
 
-        # Fetch live prices for all open assets
+        # Fetch live prices for all open assets — OPTIMIZED (Task 5)
         live_prices = {}
-        if self.hl_client:
+        if self.bot_app and self.bot_app.cache:
             for pos in positions:
-                if pos.asset not in live_prices:
+                ctx = self.bot_app.cache.funding.get(pos.asset)
+                if ctx and "markPx" in ctx:
                     try:
-                        live_prices[pos.asset] = await self.hl_client.get_mark_price(pos.asset)
-                    except Exception:
-                        live_prices[pos.asset] = pos.entry_price
+                        live_prices[pos.asset] = float(ctx["markPx"])
+                    except: pass
+        
+        # Fallback for missing prices (one batch call instead of many)
+        if len(live_prices) < len(positions) and self.hl_client:
+            try:
+                # One batch call for ALL metadata & contexts -> [universe, contexts]
+                all_meta = await self.hl_client.get_all_market_data()
+                if all_meta and len(all_meta) >= 2:
+                    universe = all_meta[0]
+                    contexts = all_meta[1]
+                    for i, ctx in enumerate(contexts):
+                        if i < len(universe):
+                            name = universe[i].get("name")
+                            if name in [p.asset for p in positions] and name not in live_prices:
+                                live_prices[name] = float(ctx.get("markPx", 0))
+            except Exception as e:
+                log.debug(f"Batch price fallback failed: {e}")
+        
+        # Final safety fallback 
+        for pos in positions:
+            if pos.asset not in live_prices or live_prices[pos.asset] == 0:
+                live_prices[pos.asset] = pos.entry_price
 
         from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc)
 
         text = f"🎯 <b>Monitoring Posisi ({len(positions)})</b>\n\n"
-        keyboard_rows = []
         
+        # ── Buttons Grid logic ─────────────────────
+        # Row 1: Refresh Button
+        keyboard_rows = [
+            [InlineKeyboardButton("🔄 REFRESH POSISI", callback_data="refresh_pos")]
+        ]
+        
+        close_buttons = []
         for pos in positions:
             side_emoji = "🟢" if pos.side.value == "long" else "🔴"
             current    = live_prices.get(pos.asset, pos.entry_price)
@@ -417,7 +451,7 @@ class KaraTelegram:
             liq_str = f"   💀 Estimasi Liq: <code>${format_price(pos.liquidation_price)}</code>\n" if pos.liquidation_price else ""
 
             text += (
-                f"\n{side_emoji} <b>{pos.asset} {pos.side.value.upper()}</b> {pos.leverage}x\n"
+                f"\n{side_emoji} <b><a href='https://app.hyperliquid.xyz/trade/{pos.asset}'>{pos.asset}</a> {pos.side.value.upper()}</b> {pos.leverage}x\n"
                 f"   Entry: <code>${format_price(pos.entry_price)}</code> ➪ <b>${format_price(current)}</b>\n"
                 f"   {pnl_label}: <b>{pnl_sign}{pnl_str} ({pnl_sign}{float_pct:.2f}%)</b>\n"
                 f"{liq_str}"
@@ -426,15 +460,22 @@ class KaraTelegram:
                 f"   ⚡ Trail: {trail_str} | ⏱️ {duration_str}\n"
             )
 
-            keyboard_rows.append([
+            # Concise labels for 2-column grid
+            side_short = "L" if pos.side.value == "long" else "S"
+            close_buttons.append(
                 InlineKeyboardButton(
-                    f"❌ Close {pos.asset} {pos.side.value.upper()}", 
+                    f"❌ {pos.asset} {side_short}", 
                     callback_data=f"close_req:{pos.asset}:{pos.side.value}"
                 )
-            ])
+            )
             
+        # Chunk close buttons into rows of 2
+        for i in range(0, len(close_buttons), 2):
+            keyboard_rows.append(close_buttons[i:i+2])
+
         text += "\n<i>Santai dulu, biarkan profit kita mengalir~ 🌸</i>"
 
+        # Final Row: Global Actions
         keyboard_rows.append([
             InlineKeyboardButton("🚨 CLOSE ALL POSITIONS 🚨", callback_data="close_all_req")
         ])
@@ -442,9 +483,13 @@ class KaraTelegram:
         reply_markup = InlineKeyboardMarkup(keyboard_rows)
 
         if update.callback_query:
-            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+            try:
+                await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+            except Exception as e:
+                log.debug(f"Refresh skip: {e}")
         else:
             await update.message.reply_html(text, reply_markup=reply_markup)
+
 
     async def cmd_pnl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
@@ -476,52 +521,6 @@ class KaraTelegram:
             await update.message.reply_html(text)
         except Exception as e:
             await update.message.reply_html(f"❌ PnL Error: {e}")
-
-    async def cmd_daily(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """On-demand daily report manual."""
-        if not self._is_authorized(update): return
-        chat_id = str(update.effective_chat.id)
-        session = self.bot_app.get_session(chat_id) if self.bot_app else None
-        if not session: return
-        
-        acc = session.get_account_state()
-        pos_count = len(session.executor.open_positions)
-        await self.send_daily_report(acc, pos_count, target_chat_id=chat_id)
-
-    async def send_daily_report(self, acc: AccountState, pos_count: int, target_chat_id: str = None):
-        """Send the premium daily summary report."""
-        pnl_sign = "+" if acc.daily_pnl >= 0 else ""
-        pnl_emoji = "🟢" if acc.daily_pnl >= 0 else "🔴"
-        mode_text = "SCALPER" if self.mode_manager and self.mode_manager.is_scalper() else "STANDARD"
-        mode_icon = "⚡" if mode_text == "SCALPER" else "📊"
-        
-        # Friendly footers based on performance
-        if acc.daily_pnl >= 0:
-            footer = "Kerja bagus hari ini! Mari kita jaga momentumnya~ 🌸"
-        else:
-            footer = "Besok kita balas dendam ke market ya! Tetap disiplin~ 🌸"
-
-        status_text = "OK" if not acc.is_paused else "PAUSED"
-        status_icon = "✅" if status_text == "OK" else "⏸️"
-
-        text = DAILY_REPORT_TEMPLATE.format(
-            date=datetime.now().strftime("%Y-%m-%d"),
-            total_equity=format_idr(acc.total_equity),
-            wallet_balance=format_idr(acc.wallet_balance),
-            available=format_idr(acc.available),
-            pnl_sign=pnl_sign,
-            pnl_val=format_idr(acc.daily_pnl),
-            pnl_pct=format_pct(acc.daily_pnl_pct),
-            pnl_emoji=pnl_emoji,
-            pos_count=pos_count,
-            drawdown=format_pct(acc.current_drawdown_pct, show_sign=False),
-            mode_icon=mode_icon,
-            mode_text=mode_text,
-            status_icon=status_icon,
-            status_text=status_text,
-            footer=footer
-        )
-        await self.send_text(text, target_chat_id=target_chat_id)
 
     async def cmd_daily(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """On-demand daily report manual."""
@@ -785,35 +784,32 @@ class KaraTelegram:
 
     async def send_position_opened(self, pos, signal, target_chat_id: str = None):
         """Premium AI Agent Notification for a successful entry."""
-        from config import MODE, RISK
-        
         # Determine labels
-        mode_label = "🚀 FULL-AUTO" if config.FULL_AUTO else "🛠️ SEMI-AUTO"
-        type_label = "📝 PAPER" if MODE == "paper" else "💰 LIVE"
-        atr_status = "✅ Dynamic ATR" if RISK.enable_atr_sl else "固定 (Fixed)"
-
+        is_scalper = self.mode_manager and self.mode_manager.is_scalper() if hasattr(self, 'mode_manager') else False
+        mode_text = "Scalping" if is_scalper else "Standar"
+        
         # Style & Narrative
         text = (
             f"🌸 <b>KARA SYSTEM: Position Executed</b>\n"
-            f"──────────────────────────\n"
-            f"<i>I have analyzed the market and successfully opened a <b>{pos.side.value.upper()}</b> position for <b>{pos.asset}</b>.</i>\n\n"
+            f"<i>Saya baru saja menganalisis pasar dan berhasil membuka posisi <b>{pos.side.value.upper()}</b> untuk <b><a href='https://app.hyperliquid.xyz/trade/{pos.asset}'>{pos.asset}</a></b>.</i>\n\n"
             
             f"📦 <b>Market Details</b>\n"
             f"  • Entry   : <code>${format_price(pos.entry_price)}</code>\n"
             f"  • Margin  : <b>{format_idr(pos.margin_usd)}</b> ({format_usd(pos.margin_usd)})\n"
             f"  • Leverage: {pos.leverage}x isolated\n"
-            f"  • Mode    : {type_label} ({mode_label})\n\n"
+            f"  • Mode    : {mode_text}\n\n"
             
             f"🛡️ <b>Risk Profile</b>\n"
-            f"  • 🛑 SL   : <code>${format_price(pos.stop_loss)}</code> ({atr_status})\n"
+            f"  • 🛑 SL   : <code>${format_price(pos.stop_loss)}</code>\n"
             f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code>\n"
             f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code>\n"
             f"  • 📐 R:R Ratio: <b>{signal.risk_reward_ratio:.2f}x</b>\n"
             f"  • 📊 Score: <b>{signal.score}/100</b>\n\n"
             
-            f"<i>Execution complete. Monitoring for optimal exit. ✨</i>"
+            f"<i>Eksekusi selesai. Memantau market untuk exit terbaik. ✨</i>"
         )
         await self.send_text(text, target_chat_id=target_chat_id)
+
 
     async def send_position_event(self, action: dict, prices: dict, target_chat_id: str = None):
         """Dispatch the right formatted card based on action type."""
@@ -993,6 +989,11 @@ class KaraTelegram:
             action, sig_id = data.split(":", 1)
         else:
             action, sig_id = data, ""
+            
+        # ── Refresh Logic ───────────────────────────────────────────
+        if action == "refresh_pos":
+            await self.cmd_positions(update, ctx)
+            return
         
         # ── Mode Switch Confirmation ──────────────────────────────────
         if action == "mode_switch":

@@ -55,32 +55,32 @@ class OIFundingAnalyzer:
         
         # POSITIVE funding = longs paying shorts = longs crowded -> SHORT
         if fr > SIGNAL.funding_extreme_threshold * 2:     # > 0.0006
-            bear += 15
+            bear += 20  # increased from 15
             reasons.append(
                 f"EXTREME positive funding {fr*100:.4f}%/8h - longs very crowded -> SHORT"
             )
         elif fr > SIGNAL.funding_extreme_threshold:        # > 0.0003
-            bear += 10
+            bear += 14  # increased from 10
             reasons.append(
                 f"HIGH positive funding {fr*100:.4f}%/8h -> SHORT pressure"
             )
         elif fr > 0.00005:                                 # > 0.005%/8h - meaningful positive
-            bear += 6
+            bear += 8   # increased from 6
             reasons.append(
                 f"Moderate positive funding {fr*100:.4f}%/8h -> mild SHORT tilt"
             )
         elif fr < -SIGNAL.funding_extreme_threshold * 2:   # < -0.0006
-            bull += 15
+            bull += 20  # increased from 15
             reasons.append(
                 f"EXTREME negative funding {fr*100:.4f}%/8h - shorts crowded -> LONG"
             )
         elif fr < -SIGNAL.funding_extreme_threshold:       # < -0.0003
-            bull += 10
+            bull += 14  # increased from 10
             reasons.append(
                 f"HIGH negative funding {fr*100:.4f}%/8h -> LONG pressure"
             )
         elif fr < -0.00005:                                # < -0.005%/8h - meaningful negative
-            bull += 6
+            bull += 8   # increased from 6
             reasons.append(
                 f"Moderate negative funding {fr*100:.4f}%/8h -> mild LONG tilt"
             )
@@ -159,14 +159,14 @@ class OIFundingAnalyzer:
         # ── 4. OI Change Analysis ─────────────────────────────────────
         oi_chg = oi.oi_change_pct
         if price_change_1h > 0.002 and oi_chg > SIGNAL.oi_change_threshold_pct:
-            bull += 10
+            bull += 18  # significantly increased from 10
             reasons.append(
-                f"OI +{oi_chg*100:.1f}% with price up -> LONG confirmed"
+                f"OI +{oi_chg*100:.1f}% with price up -> STRONG LONG confirmed"
             )
         elif price_change_1h < -0.002 and oi_chg > SIGNAL.oi_change_threshold_pct:
-            bear += 10
+            bear += 18  # significantly increased from 10
             reasons.append(
-                f"OI +{oi_chg*100:.1f}% with price down -> SHORT confirmed"
+                f"OI +{oi_chg*100:.1f}% with price down -> STRONG SHORT confirmed"
             )
         elif price_change_1h > 0.005 and oi_chg < -0.005:
             bear += 3
@@ -188,20 +188,20 @@ class OIFundingAnalyzer:
         oi_usd = oi.open_interest
         if oi_usd > 1_000_000_000:      # > $1B  (BTC, ETH level)
             # High liquidity market — small funding differences matter more
-            magnitude_bonus = 5
+            magnitude_bonus = 8  # was 5
             reasons.append(f"High conviction market (OI ${oi_usd/1e9:.1f}B)")
         elif oi_usd > 200_000_000:       # > $200M (SOL, HYPE level)
-            magnitude_bonus = 4
+            magnitude_bonus = 6  # was 4
             reasons.append(f"Mid-cap market (OI ${oi_usd/1e6:.0f}M)")
         elif oi_usd > 50_000_000:        # > $50M
-            magnitude_bonus = 3
+            magnitude_bonus = 4  # was 3
             reasons.append(f"Active market (OI ${oi_usd/1e6:.0f}M)")
         elif oi_usd > 10_000_000:        # > $10M
-            magnitude_bonus = 2
+            magnitude_bonus = 2  
             reasons.append(f"Small-cap market (OI ${oi_usd/1e6:.0f}M)")
         else:
-            magnitude_bonus = 1
-            reasons.append(f"Low OI market (${oi_usd/1e6:.1f}M) -> lower conviction")
+            magnitude_bonus = 0  # was 1
+            reasons.append(f"Low OI market (${oi_usd/1e6:.1f}M) -> neutral")
 
         # Magnitude amplifies the winning side
         if bull > bear:
@@ -255,8 +255,8 @@ class OIFundingAnalyzer:
         else:
             log.warning(f"[{asset}] Spot/Oracle price unavailable, skipping Basis score")
 
-        # CAP max score to prevent inflation
-        bull = min(bull, 25)
-        bear = min(bear, 25)
+        # CAP max score to prevent inflation (increased for Conviction)
+        bull = min(bull, 40)
+        bear = min(bear, 40)
 
         return bull, bear, reasons, warnings

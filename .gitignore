@@ -69,7 +69,10 @@ docker-compose.override.yml
 .claude/
 
 # Project Persistence (KARA)
-data/
+# Allow the folder and its code, but ignore specific database files
+data/*.json
+data/*.db
+data/*.sqlite
 storage/
 *.json
 !package.json

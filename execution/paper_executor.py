@@ -50,9 +50,28 @@ class PaperExecutor:
         self._trade_log:  List[Dict] = []              # for backtest-style analysis
 
         log.info(
-            f" Paper executor ready - "
-            f"starting balance: {format_usd(PAPER_INITIAL_BALANCE)}"
+            f" [PAPER] Paper executor ready - "
+            f"starting balance: {format_usd(self._balance)}"
         )
+
+    def load_from_db(self, chat_id: str):
+        """Restore previous state from SQLite to survive restarts."""
+        from core.db import user_db
+        state = user_db.load_paper_state(chat_id)
+        if state:
+            self._balance = state["balance"]
+            self._available = state["balance"]
+            self._daily_start_balance = state["balance"]
+            self._peak_balance = max(state["balance"], state.get("equity", 0))
+            log.info(f" [PAPER] Restored balance from DB: {format_usd(self._balance)}")
+        
+        positions = user_db.load_paper_positions(chat_id)
+        for pos in positions:
+            self._positions[pos.position_id] = pos
+            # Update used margin
+            self._used_margin += pos.margin_usd
+            self._available   -= pos.margin_usd
+            log.info(f" [PAPER] Restored position: {pos.asset} {pos.side.value}")
 
     # ──────────────────────────────────────────
     # ACCOUNT STATE
@@ -159,6 +178,12 @@ class PaperExecutor:
         self._available   -= margin
         self._positions[pos.position_id] = pos
 
+        # BUG 1 FIX: Persist to SQLite
+        from core.db import user_db
+        cid = getattr(self, "chat_id", "system")
+        user_db.save_paper_position(cid, pos)
+        user_db.save_paper_state(cid, self._balance, account.total_equity)
+
         # Log entry
         log_data = {
             "type":     "open",
@@ -250,6 +275,11 @@ class PaperExecutor:
         self._available  += pos.margin_usd + floating_pnl
         self._used_margin-= pos.margin_usd
         
+        # BUG 1 FIX: Persist to SQLite
+        from core.db import user_db
+        user_db.remove_paper_position(position_id)
+        user_db.save_paper_state("system", self._balance, self._balance) # equity = balance when no positions
+
         # Total PnL for the record (cumulative)
         total_pnl = pos.pnl_realized
         self.risk.record_pnl(total_pnl, self._balance)
@@ -316,6 +346,12 @@ class PaperExecutor:
         pos.margin_usd     -= margin_to_release
         pos.size_current   -= close_size
         pos.pnl_unrealized = pos.unrealized_pnl(current_price)
+
+        # BUG 1 FIX: Persist partial change
+        from core.db import user_db
+        if pos.status == PositionStatus.OPEN:
+            user_db.save_paper_position("system", pos)
+        user_db.save_paper_state("system", self._balance, self._balance + pos.pnl_unrealized)
 
         if action["action"] == "tp1":
             pos.tp1_hit = True

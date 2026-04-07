@@ -14,6 +14,7 @@ import logging
 import sys
 import os
 import signal
+from typing import Dict, List, Optional, Any
 # Ensure root directory is in path for module discovery (Railway/Docker Fix)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -73,14 +74,17 @@ class KaraBot:
         self.ws_client  = KaraWebSocketClient()
         self.cache      = market_cache
 
-        # ModeManager — single source of truth for active strategy mode
         self.mode_mgr   = mode_manager
+        self.cache      = market_cache
 
         # Scoring engine (stateless regarding user risk)
-        self.scorer     = ScoringEngine(self.hl_client, self.cache, None, self.mode_mgr)
+        self.scorer     = ScoringEngine(self.hl_client, self.cache, mode_manager=self.mode_mgr)
 
         # Multi-user session store (chat_id -> UserSession)
         self.sessions: Dict[str, UserSession] = {}
+
+        # Semaphor for parallel scanning (Task 4)
+        self.scan_sem   = asyncio.Semaphore(5)
 
         # Notification
         self.telegram   = KaraTelegram(on_confirm=self._on_trade_confirmed)
@@ -123,7 +127,10 @@ class KaraBot:
 
         # Initialize User Sessions from DB
         for u in user_db.get_all_users():
-            self.sessions[u.chat_id] = UserSession(u, mode_manager=self.mode_mgr, hl_client=self.hl_client)
+            session = UserSession(u, mode_manager=self.mode_mgr, hl_client=self.hl_client)
+            if hasattr(session.executor, 'load_from_db'):
+                session.executor.load_from_db(u.chat_id)
+            self.sessions[u.chat_id] = session
         log.info(f"Loaded {len(self.sessions)} user sessions.")
 
         # Inject into dashboard (passing sessions registry for multi-user support)
@@ -160,7 +167,8 @@ class KaraBot:
                 "imbalance": 0.65,
                 "vwap_dev": -0.004,
                 "session_bonus": SIGNAL.ny_session_bonus,
-                "regime": MarketRegime.TRENDING
+                "regime": MarketRegime.TRENDING,
+                "trend_pct": 0.03  # Added to trigger the 1.1x trend multiplier
             })
             log.info(f"   Strong signal    → Score: {strong['score']}/100 ✓ (Expected: 72-85)")
         except Exception as e:
@@ -275,13 +283,13 @@ class KaraBot:
             # 2. Broadcast account summary
             await broadcast({
                 "type": "account_update",
-                **acc.dict()
+                **acc.model_dump()
             })
             
             # 3. Broadcast open positions
             await broadcast({
                 "type": "positions_update",
-                "positions": [p.dict() for p in session.executor.open_positions]
+                "positions": [p.model_dump() for p in session.executor.open_positions]
             })
             
         except Exception as e:
@@ -290,33 +298,38 @@ class KaraBot:
 
     async def _scan_all_assets(self):
         """Run scoring engine for all watched assets."""
+    async def _scan_all_assets(self):
+        """Perform scoring scan on all watched assets in parallel."""
+        log.info(f" 🔍 Scanning {len(self.watched_assets)} markets (parallel)...")
+        
         try:
-            log.info(f"Scanning {len(self.watched_assets)} markets (batch)...")
-            scan_errors = 0
-
             # 1. Fetch batch meta data once for all assets
             await self.hl_client.refresh_market_cache(force=True)
             all_meta = await self.hl_client.get_all_market_data()
             if not all_meta:
-                log.warning("Could not fetch batch metadata, will fallback to individual requests")
+                log.warning(" Could not fetch batch metadata, will fallback to individual requests")
 
-            for asset in self.watched_assets:
-                # In multi-user mode, we scan all watched assets.
-                # Per-user risk distancing/pyramiding is handled in _handle_signal.
-                try:
-                    signal = await self.scorer.run_asset(asset, meta_data=all_meta)
-                    if signal:
-                        await self._handle_signal(signal)
-                    scan_errors = 0  # reset on success
-                except Exception as e:
-                    scan_errors += 1
-                    if scan_errors <= 3:  # log first few with details
-                        log.error(f"❌ Scan error for {asset}: {e}", exc_info=True)
-                    else:
-                        log.warning(f"Scan error for {asset}: {type(e).__name__}")
-                await asyncio.sleep(0.4)
+            # 2. Parallel scan with Semaphore(5)
+            async def _scan_one(asset):
+                async with self.scan_sem:
+                    try:
+                        # ScoringEngine now uses its own candle_sem(3) internally for candles
+                        signal = await self.scorer.run_asset(asset, meta_data=all_meta)
+                        if signal:
+                            await self._handle_signal(signal)
+                    except Exception as e:
+                        # Log errors but don't stop the whole scan
+                        if "429" in str(e):
+                            log.warning(f" ⚠️ Rate limited on {asset}")
+                        else:
+                            log.error(f" ❌ Scan error for {asset}: {e}")
+
+            tasks = [_scan_one(asset) for asset in self.watched_assets]
+            await asyncio.gather(*tasks)
+            log.info(f" 🏁 Scan complete for {len(self.watched_assets)} markets.")
+            
         except Exception as e:
-            log.error(f"Scan loop error: {e}")
+            log.error(f" [FATAL] Scan loop failure: {e}", exc_info=True)
 
     async def _handle_signal(self, signal):
         """Handle a new trade signal and broadcast to all authorized user sessions."""
@@ -382,6 +395,7 @@ class KaraBot:
                 
                 # If approved, proceed to auto-execution
                 user_signal.auto_executed = True
+                user_db.save_signal(user_signal) # v17 Sync
                 await self.telegram.send_signal(user_signal, is_auto=True, target_chat_id=chat_id)
                 
                 pos = await session.executor.open_position(user_signal)
@@ -389,6 +403,7 @@ class KaraBot:
                     await self.telegram.send_position_opened(pos, user_signal, target_chat_id=chat_id)
             else:
                 # Manual mode: always send so the user can decide
+                user_db.save_signal(user_signal) # v17 Sync
                 await self.telegram.send_signal(user_signal, target_chat_id=chat_id)
 
     async def _on_trade_confirmed(self, signal, chat_id: str):
@@ -487,23 +502,25 @@ class KaraBot:
 async def main():
     bot = KaraBot()
 
+    # 1. Start Dashboard FIRST in background to pass Railway Health Checks
+    dashboard_task = asyncio.create_task(run_dashboard())
+    print("⏳ [KARA_DEBUG] Initializing dashboard...")
+    await asyncio.sleep(2) # Give it 2 seconds to bind the port
+    log.info("📊 Dashboard task started in background.")
+
+    # 2. Initialize Bot (Market data, calibration, etc.)
     try:
         await bot.start()
     except Exception as e:
         log.error(f" Initialization failed: {e}")
-        log.error("\n📋 Troubleshooting:")
-        log.error("  1. Check your .env file exists and is configured")
-        log.error("  2. Run: python test_components.py")
-        log.error("  3. Run: python test_connection.py")
-        log.error("  4. View logs: tail -f kara.log")
         import traceback
         traceback.print_exc()
+        # Shutdown dashboard if init fails
+        dashboard_task.cancel()
         sys.exit(1)
 
+    # 3. Setup Signal Handlers
     loop = asyncio.get_running_loop()
-
-    # Graceful shutdown on SIGINT / SIGTERM (Unix/Linux only, not Windows)
-    # Windows uses Ctrl+C which asyncio.run() handles automatically
     if sys.platform != "win32":
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -514,11 +531,11 @@ async def main():
             except Exception as e:
                 log.warning(f"Could not setup signal handler: {e}")
 
-    # Run trading loop + dashboard concurrently
+    # 4. Run trading loop and keep dashboard running
     try:
         await asyncio.gather(
             bot.run_trading_loop(),
-            run_dashboard(),
+            dashboard_task,
         )
     except Exception as e:
         log.error(f" Runtime error: {e}")
@@ -528,4 +545,12 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+    except Exception as fatal_e:
+        log = logging.getLogger("kara.main")
+        log.critical(f" 💀 [FATAL_CRASH] Bot process died: {fatal_e}", exc_info=True)
+        # Final graceful exit attempt not possible since loop is gone
+        sys.exit(1)

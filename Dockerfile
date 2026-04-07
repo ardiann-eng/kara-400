@@ -38,14 +38,14 @@ ENV PATH=/root/.local/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1
 
 # Health check
-HEALTHCHECK --interval=60s --timeout=15s --start-period=10s --retries=3 \
-    CMD python -c "import requests, os; port=os.getenv('PORT', '8888'); requests.get(f'http://localhost:{port}/api/health')" || exit 1
+HEALTHCHECK --interval=60s --timeout=15s --start-period=30s --retries=3 \
+    CMD python -c "import httpx, os; port=os.getenv('PORT', '8080'); httpx.get(f'http://localhost:{port}/api/health', timeout=5.0)" || exit 1
 
 # Default: paper mode
 ENV KARA_MODE=paper
 
 # Expose dynamic port (Railway uses this)
-EXPOSE 8888
+EXPOSE 8080
 
 # Run bot
 CMD ["python", "main.py"]

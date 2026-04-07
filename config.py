@@ -59,11 +59,19 @@ HL_TESTNET       = MODE == "paper"                       # auto-set from mode
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_TOKEN", ""))
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# ──────────────────────────────────────────────
-# DASHBOARD
-# ──────────────────────────────────────────────
-DASHBOARD_HOST   = os.getenv("DASHBOARD_HOST", "0.0.0.0")
-DASHBOARD_PORT   = int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", "8888")))
+from dotenv import load_dotenv
+load_dotenv(override=True)  # Aggressive load
+
+# ─────────── DASHBOARD (ULTIMATE DEBUG) ───────────
+DASHBOARD_HOST   = "0.0.0.0"
+DASHBOARD_PORT   = int(os.getenv("PORT", 8080))
+
+# [KARA_PORT_DEBUG] - Direct print to bypass logging
+print("\n" + "="*50)
+print(f"📡 [KARA_DEBUG] SYSTEM_PORT ENV: {os.getenv('PORT')}")
+print(f"🚀 [KARA_DEBUG] BINDING DASHBOARD TO: {DASHBOARD_HOST}:{DASHBOARD_PORT}")
+print("="*50 + "\n")
+
 SECRET_KEY       = os.getenv("SECRET_KEY", "kara-secret-change-me")
 
 # ──────────────────────────────────────────────

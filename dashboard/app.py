@@ -38,7 +38,9 @@ _ws_clients:   List[WebSocket] = []
 
 def get_active_session(chat_id: str = None):
     """Helper to find the best session to display (Admin or first available)."""
-    if not _sessions: return None
+    if not _sessions: 
+        log.warning("⚠️ [DASHBOARD] get_active_session called but _sessions is empty!")
+        return None
     
     # 1. If chat_id provided, use it
     if chat_id and chat_id in _sessions:
@@ -50,7 +52,9 @@ def get_active_session(chat_id: str = None):
         
     # 3. Fallback to first available session
     if _sessions:
-        return list(_sessions.values())[0]
+        first_id = list(_sessions.keys())[0]
+        log.info(f"ℹ️ [DASHBOARD] Using fallback session: {first_id}")
+        return _sessions[first_id]
         
     return None
 
@@ -60,25 +64,73 @@ def get_active_session(chat_id: str = None):
 
 @app.get("/api/account")
 async def get_account(chat_id: str = None):
+    from core.db import user_db
     session = get_active_session(chat_id)
-    if not session:
-        return {"error": "no active session"}
-    try:
-        acc = session.get_account_state()
-        return acc.dict()
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    
+    # 1. Try Live Session
+    if session:
+        try:
+            acc = session.get_account_state()
+            data = acc.dict()
+            log.info(f"✅ [API] Returning live state for {session.chat_id}: ${data.get('total_equity')}")
+            return data
+        except Exception as e: 
+            log.error(f"❌ [API] Failed to get live account state: {e}")
+        
+    # 2. Fallback to Database
+    cid = chat_id or _admin_chat_id or "system"
+    log.info(f"🔍 [API] Falling back to DB for ChatID: {cid}")
+    state = user_db.load_paper_state(cid)
+    user = user_db.get_user(cid)
+    
+    if state:
+        return {
+            "total_equity": state.get("equity", 0),
+            "wallet_balance": state.get("balance", 0),
+            "available": state.get("balance", 0),
+            "unrealized_pnl": state.get("equity", 0) - state.get("balance", 0),
+            "daily_pnl": 0,
+            "daily_pnl_pct": 0,
+            "mode": user.config.bot_mode.value if user else "standard",
+            "is_paused": False,
+            "positions": []
+        }
+        
+    return {
+        "total_equity": 0,
+        "wallet_balance": 0,
+        "error": "no data available"
+    }
 
 @app.get("/api/positions")
 async def get_positions(chat_id: str = None):
+    from core.db import user_db
     session = get_active_session(chat_id)
-    if not session:
-        return {"positions": []}
+    
+    # 1. Try Live Session
+    if session:
+        return {
+            "positions": [p.dict() for p in session.executor.open_positions]
+        }
+        
+    # 2. Fallback to Database
+    cid = chat_id or _admin_chat_id or "system"
+    positions = user_db.load_paper_positions(cid)
     return {
-        "positions": [
-            p.dict() for p in session.executor.open_positions
-        ]
+        "positions": [p.dict() for p in positions]
     }
+
+@app.get("/api/signals")
+async def get_signals(limit: int = 20):
+    from core.db import user_db
+    try:
+        signals = user_db.load_signals(limit=limit)
+        return {
+            "signals": [s.dict() for s in signals]
+        }
+    except Exception as e:
+        log.error(f"Failed to fetch signals: {e}")
+        return {"signals": []}
 
 @app.get("/api/risk_status")
 async def get_risk_status(chat_id: str = None):
@@ -103,6 +155,7 @@ async def resume_bot(chat_id: str = None):
 
 @app.get("/api/health")
 async def health():
+    log.info("❤️ [HEALTH] Heartbeat check from Railway/Uptime")
     return {
         "status": "ok",
         "mode":   config.MODE,
@@ -238,6 +291,7 @@ DASHBOARD_DIR = os.path.dirname(os.path.abspath(__file__))
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
+    log.info("🏠 [DASHBOARD] Root route hit (GET /)")
     file_path = os.path.join(DASHBOARD_DIR, "templates", "dashboard.html")
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -265,12 +319,21 @@ def init_dashboard(sessions, telegram_bot=None, mode_manager=None):
 
 async def run_dashboard():
     """Start uvicorn in async context."""
-    log.info(f"📊 DASHBOARD ATTEMPTING START: http://localhost:{config.DASHBOARD_PORT}")
+    log.info("=" * 40)
+    log.info(f"🚀 DASHBOARD LIVE ON: http://{config.DASHBOARD_HOST}:{config.DASHBOARD_PORT}")
+    log.info("=" * 40)
+    
     server_config = uvicorn.Config(
         app=app,
         host=config.DASHBOARD_HOST,
         port=config.DASHBOARD_PORT,
         log_level="info",
+        access_log=True,
     )
     server = uvicorn.Server(server_config)
-    await server.serve()
+    try:
+        await server.serve()
+    except Exception as e:
+        print(f"\n❌ [KARA_DEBUG] FATAL: Dashboard failed to bind! Error: {e}")
+        import sys
+        sys.exit(1)

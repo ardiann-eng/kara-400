@@ -1,105 +1,95 @@
-# 📖 Kitab Suci KARA (Ultimate Knowledge Base)
+# 📖 Kitab Suci KARA: The Infinite Knowledge Base
 
-Dokumen ini adalah **Ultimate Source of Truth** untuk proyek KARA. Dirancang agar asisten AI atau pengembang baru memahami seluruh sistem dari 0 hingga operasional penuh.
-
----
-
-## 🌸 Section 1: Filosofi & Visi
-**KARA** adalah asisten trading futures (Hyperliquid) yang dirancang dengan tiga pilar utama:
-1. **Safety First**: Pengelolaan risiko yang sangat ketat (isolated margin, low leverage).
-2. **Premium Interface**: Pengalaman pengguna yang elegan dan responsif (Telegram & Dashboard).
-3. **Multi-User Platform**: Infrastruktur yang mampu melayani banyak trader secara independen.
-
-- **Karakter**: Sopan, Professional (Kawaii-style), namun tegas soal disiplin trading.
-- **Tech Stack**: Python 3.12+, FastAPI (Dashboard), Pydantic (Schemas), WebSockets (Real-time data).
+Selamat datang di pusat kesadaran **KARA** (Knowledge-driven Autonomous Risk-aware Assistant). Dokumen ini adalah panduan komprehensif dari nol untuk memahami identitas, arsitektur, dan logika operasional bot ini.
 
 ---
 
-## 🏗️ Section 2: Arsitektur Sistem (Global to Local)
+## 🌸 0. Apa itu KARA?
 
-### 1. Orchestrator (`main.py`)
-Pusat syaraf utama yang melakukan:
-- Inisialisasi klien HL dan WebSocket.
-- Monitoring pasar secara global 24/7.
-- **User Registry**: Menyimpan `UserSession` per `chat_id` Telegram.
-- **Signal Dispatching**: Memasukkan sinyal pasar ke setiap sesi user yang memenuhi syarat risiko.
+**KARA** adalah asisten trading berbasis AI yang dirancang khusus untuk ekosistem **Hyperliquid Futures**. Berbeda dengan bot konvensional yang hanya menggunakan indikator teknikal (RSI/MACD), KARA menggabungkan data **Market Intelligence**:
+- **Open Interest (OI)**: Mengukur partisipasi pasar.
+- **Funding Rates**: Mendeteksi kerumunan trader (crowding) yang berisiko terlikuidasi.
+- **Liquidation Heatmaps**: Mencari area pembersihan harga (liquidity hunt).
+- **Orderbook Imbalance**: Mengintip kekuatan beli/jual secara *real-time*.
 
-### 2. UserSession & Isolation (`core/user_session.py`)
-Kunci dari sistem multi-user. Setiap user memiliki:
-- **RiskManager**: Mengelola sizing dan batas rugi harian spesifik user tersebut.
-- **Executor**: Menangani pengiriman order (Paper/Live) untuk akun user tersebut.
-- **IDR Balance**: Saldo virtual lokal (misal: Rp1.000.000).
-
-### 3. Database Persistence (`core/db.py`)
-- Menggunakan file JSON `data/users.json` (dirancang demi kemudahan deployment di Railway/Docker).
-- Sinkronisasi status dilakukan setiap kali ada perubahan saldo, mode, atau konfigurasi user.
+**Kepribadian**: "Kawaii-Professional Maid". KARA bertindak sebagai pelayan setia bagi tuannya (Master), menjaga aset dengan disiplin besi, tapi tetap ramah dan sopan di Telegram.
 
 ---
 
-## 📡 Section 3: Pipeline Data & Scoring Engine
+## 🏗️ 1. Arsitektur & Performa (The Secret Sauce)
 
-### 1. Data Flow (Real-Time)
-`Hyperliquid WS` -> `KaraWebSocketClient` -> `MarketDataCache` -> `ScoringEngine`.
-- **MarketDataCache**: Singleton yang menyimpan "snapshot" pasar terbaru (Orderbook, Trades, Funding, Liquidations).
+KARA dirancang agar super kencang di **Railway** (Memory 512MB) tanpa kehilangan akurasi 100 market.
 
-### 2. Signal Engine Logic (`engine/scoring_engine.py`)
-Setiap aset di-scan dan diberi skor **0-100**:
-- **OI + Funding (0-25 pts)**: Mencari area "crowded trades".
-- **Liquidation Map (0-25 pts)**: Menghitung risiko *cascade* berdasarkan kepadatan likuidasi.
-- **Orderbook (0-25 pts)**: Menganalisa *imbalance* antara pembeli dan penjual.
-- **Session & Regime (0-25 pts)**: Bonus untuk volatilitas yang sehat dan sesi trading sibuk (NY/London).
+### A. Rahasia Scan 100 Market < 1 Detik
+KARA menggunakan teknik **Batch Metadata Fetching**. Alih-alih bertanya ke bursa satu-per-satu untuk tiap koin, KARA memanggil endpoint `metaAndAssetCtxs` yang langsung menarik info harga, funding, harganya, dan OI untuk 100 koin sekaligus dalam **satu panggilan API**.
 
-### 3. Scalper vs Standard Mode
-- **Standard**: Fokus pada tren besar, score minimal 56, interval scan 1 menit.
-- **Scalper**: Agresif (HFT), score minimal 45, interval scan 5-10 detik. Menggunakan indikator EMA8/21, RSI, dan CVD Ratio secara bersamaan.
+### B. Persistence (Ingatan Abadi)
+Meskipun bot di-restart di Railway, KARA tidak akan lupa:
+- **SQLite Cache**: Menyimpan status "Sifat Market" (Regime) sehingga tidak perlu download grafik ulang setiap detik.
+- **Local DB**: Saldo Paper, riwayat posisi, dan konfigurasi user tersimpan aman di `/app/data/kara_user.db`.
 
 ---
 
-## 🛡️ Section 4: Risk Management & Eksekusi
+## 🧠 2. Otak KARA: Scoring Engine
 
-### 1. Position Sizing
-Rumus Sizing: `(Account Equity * Risk %) / (Entry Price * SL % * Leverage)`.
-- Jika `fixed_margin` aktif (misal Rp50.000), maka rumus di atas diabaikan dan margin tetap digunakan.
+Setiap koin dievaluasi setiap 60 detik dengan skor **0 - 100**.
 
-### 2. Advanced Take-Profit (3 Stages)
-KARA membagi posisi menjadi tiga bagian untuk memaksimalkan profil risiko:
-1. **TP1 (40% posisi)**: Ditutup saat profit ~2-4%. SL langsung digeser ke Entry (Breakeven).
-2. **TP2 (35% posisi)**: Ditutup saat profit ~5-8%.
-3. **Trailing Stop (25% posisi)**: Sisa posisi dibiarkan "berlari" dengan trailing stop (offset ~3%) untuk menangkap tren panjang.
+### Analisa Utama (Analis):
+1.  **OI & Funding (Cap 40 pts)**: Memberikan poin besar jika terjadi *OI Expansion* (+18 pts) di mana harga naik bersamaan dengan masuknya uang baru.
+2.  **Liquidation Analyzer (Cap 40 pts)**: Mendeteksi kluster likuidasi besar yang bisa memicu "Long Squeeze" atau "Short Squeeze".
+3.  **Orderbook Analyzer (Cap 20 pts)**: Menganalisa ketebalan antrean harga.
 
----
+### Multiplier (Penguat Skor):
+Skor mentah lalu dikalikan dengan dua faktor:
+- **Trend Multiplier**: Skor dikali **1.1x** jika koin sedang dalam tren kenceng (pergerakan > 1.5% dalam 24 jam). Jika tidak, dikali **0.95x** (penalti tipis).
+- **Volatility Multiplier**: Skor dipangkas jika market sedang terlalu liar (*Extreme Vol*) untuk menjaga keamanan saldo.
 
-## 💸 Section 5: Multi-User & IDR Logic
-
-### 1. Paper vs Live
-- **Paper**: Simulasi lokal yang 99% mirip kondisi market asli (fee, slippage).
-- **Live**: Menggunakan "Agent Wallet" Hyperliquid untuk eksekusi on-chain (Mainnet).
-
-### 2. Konversi IDR
-Semua angka USD diubah ke IDR menggunakan konstanta `USD_TO_IDR` di `config.py` sebelum dikirimkan ke Telegram. Hal ini memudahkan user Indonesia memantau nilai aset aslinya.
+**Target Sinyal (Signal)**: Jika Skor Final **≥ 52**, KARA akan langsung meletuskan sinyal atau *open posisi* otomatis.
 
 ---
 
-## 🌸 Section 6: UI & Personality Guidelines
+## 🛡️ 3. Jantung KARA: Risk & Execution
 
-### 1. Gaya Bahasa Telegram
-- **Notifikasi**: Selalu gunakan header emoji yang jelas (🎯 Sinyal, ✅ Profit, 🛑 Loss).
-- **Konfirmasi**: Memberikan pilihan tombol inline agar user merasa memegang kendali.
-- **Command Utama**:
-  - `/start`: Onboarding user baru.
-  - `/pos`: Monitor posisi aktif dengan tombol [Close] instan.
-  - `/status`: Ringkasan akun (Ekuitas, PnL Hari ini).
+KARA tidak pernah berjudi. Setiap posisi dihitung secara matematis.
 
-### 2. Dashboard
-- Visualisasi grafik PnL dan riwayat trading secara real-time.
-- Desain minimalis, gelap, dengan aksen warna premium (Ungu/Hijau).
+### A. Position Sizing
+Rumus: `(Saldo * Risiko%) / (Jarak Stop Loss * Leverage)`.
+- Default **Leverage**: 20x (Standard) atau 25x-35x (Scalper).
+- **Stop Loss**: Selalu dipasang saat posisi dibuka (Gak ada istilah "ngambang").
+
+### B. Exit Strategy (3 Tahap)
+KARA sangat pintar mengunci keuntungan:
+1.  **TP1 (40% Posisi)**: Tutup saat profit kecil tercapai. Stop-loss langsung ditarik ke harga beli (Breakeven).
+2.  **TP2 (35% Posisi)**: Ambil porsi profit kedua.
+3.  **Trailing Stop (Sisa 25%)**: Membiarkan profit "berlari" sejauh mungkin sesuai tren pasar.
+
+---
+
+## 📱 4. Interaksi Master & KARA (UI)
+
+KARA berkomunikasi melalui Telegram dengan gaya bahasa sopan namun detail.
+
+### Command Utama:
+- `/pos`: Monitor posisi aktif. Tombol [Refresh] sekarang bersifat **instan** (< 0.5 detik) karena mengambil data dari WebSocket cache.
+- `/status`: Cek saldo akun, PnL hari ini, dan riwayat "Daily Reset".
+- `/paper`: Reset saldo simulasi ke awal ($1,000).
 
 ---
 
-## 🛠️ Section 7: Maintenance & Troubleshooting
-- **Logs**: `kara.log` menyimpan semua aktivitas teknis.
-- **Excel**: `trade_history.xlsx` untuk audit performa manual di Excel.
-- **Reset**: User bisa mereset saldo paper lewat command `/paper`.
+## 🛠️ 5. Pedoman Developer (Anatomi Kode)
+
+Bagi Master yang ingin memodifikasi KARA, ini petanya:
+- `/engine`: Logika trading (Scoring, Analyzers).
+- `/core`: Mesin utama (Database, Registry, UserSession).
+- `/data`: Komunikasi bursa (REST API, WebSocket).
+- `/notify`: Telegram Bot Interface.
+- `/risk`: Manager keamanan dan sizing.
 
 ---
-*Dibuat oleh AI Assistant untuk KARA Master — April 2025.*
+
+## 🔮 6. Masa Depan KARA
+
+Visi KARA adalah menjadi asisten autonomous penuh yang bisa beradaptasi sendiri dengan kondisi market bullish, bearish, maupun sideways tanpa intervensi manusia, sambil tetap menjaga ekuitas Master di atas segalanya.
+
+---
+*Dokumen ini diperbarui secara berkala oleh KARA AI Core — April 2026.*

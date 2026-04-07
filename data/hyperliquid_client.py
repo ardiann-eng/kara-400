@@ -312,6 +312,42 @@ class HyperliquidClient:
             log.info(f"✓ Using {len(fallback)} fallback markets: {', '.join(fallback)}")
             return fallback
 
+    async def get_candles(self, asset: str, interval: str = "1h", limit: int = 100) -> List[List[Any]]:
+        """
+        Fetch historical OHLCV data for an asset.
+        Returns: [[timestamp, open, high, low, close, volume], ... ]
+        """
+        try:
+            await self._ensure_info()
+            
+            # 1. Try SDK
+            if self._info:
+                try:
+                    candles = await self._run(self._info.candles_snapshot, asset, interval, limit)
+                    if candles:
+                        return candles
+                except Exception as e:
+                    log.debug(f"SDK candles_snapshot failed for {asset}: {e}")
+
+            # 2. Direct HTTP Fallback
+            result, success = await self._call_info_endpoint("candleSnapshot", {
+                "req": {
+                    "coin": asset,
+                    "interval": interval,
+                    "startTime": 0, # last N candles
+                    "endTime": 0    # last N candles
+                }
+            })
+            
+            if success and isinstance(result, list):
+                # Note: candleSnapshot returns most recent candles
+                return result[:limit]
+                
+            return []
+        except Exception as e:
+            log.error(f"get_candles failed for {asset}: {e}")
+            return []
+
     async def get_btc_real_time_data(self) -> Dict[str, Any]:
         """
         Ambil data real-time BTC/USD untuk chart dashboard.

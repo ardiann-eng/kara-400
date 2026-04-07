@@ -60,6 +60,9 @@ class ScoringEngine:
         self.liq_analyzer         = LiquidationAnalyzer()
         self.ob_analyzer          = OrderbookAnalyzer()
 
+        # Semaphores for rate limiting (Task 4)
+        self.candle_sem = asyncio.Semaphore(3)
+
         # Cooldown tracking: asset -> last signal timestamp
         self._last_signal_ts: Dict[str, float] = {}
 
@@ -157,18 +160,12 @@ class ScoringEngine:
         raw_score += session_bonus
         raw_score = max(0, min(raw_score, 85))
 
-        multiplier = {
-            MarketRegime.LOW_VOL:   0.90,
-            MarketRegime.NORMAL:    1.00,
-            MarketRegime.HIGH_VOL:  0.85,
-            MarketRegime.EXTREME:   0.70,
-            MarketRegime.TRENDING:  1.10,
-            MarketRegime.RANGING:   0.85,
-            MarketRegime.VOLATILE:  0.75,
-            MarketRegime.UNKNOWN:   0.90,
-        }.get(regime, 1.00)
-
-        final_score = int(raw_score * multiplier)
+        # Dynamic Multipliers (Sync with _calculate_score)
+        vol_multiplier   = 1.0  # Assume normal for simulation
+        trend_pct        = params.get("trend_pct", 0.0)
+        trend_multiplier = 1.10 if abs(trend_pct) > 0.015 else 0.95
+        
+        final_score = int(raw_score * vol_multiplier * trend_multiplier)
         final_score = max(0, min(final_score, 100))
 
         return {
@@ -223,15 +220,17 @@ class ScoringEngine:
         # 2. Fetch 1-minute candles (last 30 for EMA/RSI)
         candles = []
         try:
-            import time as _time
-            now_ms = int(_time.time() * 1000)
-            start_ms = now_ms - 30 * 60 * 1000  # last 30 minutes
-            resp, succ = await self.client._call_info_endpoint(
-                "candleSnapshot",
-                {"req": {"coin": asset, "interval": "1m", "startTime": start_ms, "endTime": now_ms}}
-            )
-            if succ and isinstance(resp, list):
-                candles = resp
+            # Use candle_semaphore (3) as requested
+            async with self.candle_sem:
+                import time as _time
+                now_ms = int(_time.time() * 1000)
+                start_ms = now_ms - 30 * 60 * 1000  # last 30 minutes
+                resp, succ = await self.client._call_info_endpoint(
+                    "candleSnapshot",
+                    {"req": {"coin": asset, "interval": "1m", "startTime": start_ms, "endTime": now_ms}}
+                )
+                if succ and isinstance(resp, list):
+                    candles = resp
         except Exception as e:
             log.debug(f"[SCALPER] {asset} candle fetch failed: {e}")
 
@@ -447,16 +446,42 @@ class ScoringEngine:
             log.error(f"[{asset}] Cannot fetch OI: {e}")
             return None
 
-        # Orderbook — OPTIONAL (continue without it)
+        # Orderbook — OPTIONAL (PROACTIVELY USE WS CACHE FIRST TO SAVE REST CALLS)
         ob_snap = None
         try:
-            ob_snap = await self.client.get_orderbook(asset)
-            log.debug(
-                f"[{asset}] bids={len(ob_snap.bids)} asks={len(ob_snap.asks)} "
-                f"imbalance={ob_snap.bid_ask_imbalance:.3f}"
-            )
+            # Task: Use WS Cache for 100 markets efficiency
+            ws_book = self.cache.orderbook.get(asset)
+            if ws_book:
+                # Convert raw WS book to OrderbookSnapshot
+                from models.schemas import OrderbookSnapshot
+                levels = ws_book.get("levels", [[], []])
+                bids = [[float(b[0]), float(b[1])] for b in levels[0][:20]]
+                asks = [[float(a[0]), float(a[1])] for a in levels[1][:20]]
+                if bids and asks:
+                    mid = (bids[0][0] + asks[0][0]) / 2
+                    bid_liq = sum(b[0] * b[1] for b in bids)
+                    ask_liq = sum(a[0] * a[1] for a in asks)
+                    imbalance = (bid_liq - ask_liq) / (bid_liq + ask_liq) if (bid_liq + ask_liq) else 0
+                    ob_snap = OrderbookSnapshot(
+                        asset=asset, bids=bids, asks=asks, mid_price=mid,
+                        spread_pct=(asks[0][0] - bids[0][0])/mid,
+                        bid_ask_imbalance=imbalance, vwap=mid, vwap_deviation_pct=0
+                    )
+                    log.debug(f"[{asset}] Using WS Orderbook Cache")
+            
+            if not ob_snap:
+                # Limit REST fallback to avoid 429 spam
+                try:
+                    ob_snap = await self.client.get_orderbook(asset)
+                    log.debug(f"[{asset}] Fetched REST Orderbook")
+                except Exception as e:
+                    # Silence common 429/timeout errors to keep logs clean
+                    if "429" not in str(e):
+                        log.debug(f"[{asset}] REST Orderbook unavailable: {repr(e)}")
+                    ob_snap = None
         except Exception as e:
-            log.warning(f"[{asset}] Cannot fetch orderbook, using neutral: {e}")
+            # Final catch for any parsing logic errors
+            log.debug(f"[{asset}] Orderbook logic error: {repr(e)}")
             ob_snap = None
 
         # Store OI snapshot for change calculation
@@ -519,6 +544,20 @@ class ScoringEngine:
         # Step 4: Session bonus
         session_bonus, session_reasons = self._get_session_bonus()
 
+        # ── DIAGNOSTIC LOG (Bug 4 Fix) ─────────────────────────────────
+        basis = mark_price - spot_price
+        cvd_val = 0.0
+        if recent_trades:
+            buys = sum(float(t.get('sz', 0)) for t in recent_trades if t.get('side') == 'B')
+            sells = sum(float(t.get('sz', 0)) for t in recent_trades if t.get('side') == 'S')
+            cvd_val = buys - sells
+            
+        log.debug(
+            f"🔍 [DIAG] {asset}: funding={funding.funding_rate:.7f}, "
+            f"basis={basis:.4f}, cvd={cvd_val:.1f}, "
+            f"ob_imbal={ob_snap.bid_ask_imbalance if ob_snap else 0.0:.3f}"
+        )
+
         # ── Tally total bull vs bear evidence ──────────────────────────
         total_bull = oi_bull + liq_bull + ob_bull
         total_bear = oi_bear + liq_bear + ob_bear
@@ -554,8 +593,8 @@ class ScoringEngine:
             MarketRegime.EXTREME:  0.70,
         }.get(vol_regime, 1.00)
 
-        # Trend multiplier - slightly more sensitive (1.5% move in 24h)
-        trend_multiplier = 1.10 if abs(trend_pct) > 0.015 else 0.85
+        # Trend multiplier - less punishing of range (0.95 instead of 0.85)
+        trend_multiplier = 1.10 if abs(trend_pct) > 0.015 else 0.95
 
         final_multiplier = vol_multiplier * trend_multiplier
         final_score = int(raw_score * final_multiplier)
@@ -598,17 +637,27 @@ class ScoringEngine:
             warnings=all_warnings,
         )
 
-        # ── Log with bull/bear breakdown ───────────────────────────────
-        log_msg = (
-            f"{asset} | {'LONG' if side == Side.LONG else 'SHORT'} | "
-            f"Score: {final_score}/100 | "
-            f"Bull:{total_bull} Bear:{total_bear} | "
-            f"Session:{session_bonus:+d} | Regime:{log_regime.value}"
+        # ── Format Combat Report ────────────────────────────────────────
+        # Format: CC | Score: XX/52 | (OI+XX Liq+XX OB+XX Ses+XX) | Regime: XXX
+        breakdown_str = (
+            f"(OI:{oi_bull+oi_bear:+} Liq:{liq_bull+liq_bear:+} "
+            f"OB:{ob_bull+ob_bear:+} Ses:{session_bonus:+})"
         )
         
-        # Prevent terminal flood when scanning 100 markets
-        if final_score >= 40:
-            log.info(log_msg)
+        log_msg = (
+            f"{asset:5} | {side.value.upper():5} | "
+            f"Score: {final_score:2d}/{SIGNAL.min_score_to_signal} | "
+            f"{breakdown_str} | Regime: {log_regime.value}"
+        )
+        
+        # ── Output Logic ───────────────────────────────────────────────
+        threshold = SIGNAL.min_score_to_signal
+        
+        if final_score >= threshold:
+            log.info(f"🎯 [SIGNAL] {log_msg}")
+        elif final_score >= 25:
+            # Report scan results for active coins to keep the terminal "alive"
+            log.info(f"🔍 [SCAN]   {log_msg}")
         else:
             log.debug(log_msg)
 
@@ -645,19 +694,34 @@ class ScoringEngine:
         """
         cached = self._vol_cache.get(asset)
         if cached and (time.monotonic() - cached[0]) < 3600:
-            log.debug(f"[VOL] {asset}: using cached regime={cached[1].value.upper()}")
+            log.debug(f"[VOL] {asset}: using memory cached regime={cached[1].value.upper()}")
             return cached[1], cached[2], cached[3]
             
+        # BUG 2 FIX: Check SQLite Cache first
+        from core.db import user_db
+        db_cache = user_db.get_vol_cache(asset)
+        if db_cache:
+            age = time.time() - db_cache["cached_at"]
+            if age < 3600:
+                regime = MarketRegime(db_cache["regime"])
+                log.debug(f"[VOL] {asset}: Loaded from SQL Cache (age {int(age)}s)")
+                # Warm up memory cache
+                self._vol_cache[asset] = (time.monotonic() - age, regime, db_cache["realized_vol"], db_cache["trend"])
+                return regime, db_cache["realized_vol"], db_cache["trend"]
+
         try:
-            now_ms = int(time.time() * 1000)
-            start_ms = now_ms - (86400 * 1000)
-            payload = {
-                "coin": asset,
-                "interval": "1h",
-                "startTime": start_ms,
-                "endTime": now_ms
-            }
-            resp, succ = await self.client._call_info_endpoint("candleSnapshot", {"req": payload})
+            # Use candle_semaphore (3) as requested
+            async with self.candle_sem:
+                log.debug(f"[VOL] {asset}: Cache expired/empty, fetching candles...")
+                now_ms = int(time.time() * 1000)
+                start_ms = now_ms - (86400 * 1000)
+                payload = {
+                    "coin": asset,
+                    "interval": "1h",
+                    "startTime": start_ms,
+                    "endTime": now_ms
+                }
+                resp, succ = await self.client._call_info_endpoint("candleSnapshot", {"req": payload})
             
             if not succ or not isinstance(resp, list) or len(resp) < 2:
                 log.warning(f"[{asset}] candleSnapshot failed (likely 429), using NORMAL and CACHING 5m")
@@ -704,6 +768,10 @@ class ScoringEngine:
                 trend_pct = 0.0
             
             self._vol_cache[asset] = (time.monotonic(), regime, realized_vol, trend_pct)
+            
+            # Persist to SQLite
+            user_db.save_vol_cache(asset, regime.value, realized_vol, trend_pct)
+            
             return regime, realized_vol, trend_pct
             
         except Exception as e:
