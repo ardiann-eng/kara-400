@@ -261,7 +261,7 @@ class PaperExecutor:
             "side":      pos.side.value,
             "reason":    reason,
             "exit_price":fill_price,
-            "pnl":       pnl,
+            "pnl":       total_pnl,
             "pnl_pct":   pos.floating_pct(fill_price),
             "timestamp": utcnow(),
         }
@@ -270,13 +270,13 @@ class PaperExecutor:
 
         log.info(
             f" [PAPER] Closed {pos.asset} {pos.side.value.upper()} "
-            f"@ {fill_price} | PnL: {format_usd(pnl)} ({reason})"
+            f"@ {fill_price} | PnL: {format_usd(total_pnl)} ({reason})"
         )
         return {
             "position_id": position_id,
-            "pnl": pnl,
+            "pnl": total_pnl,
             "reason": reason,
-            "message": f"{'' if pnl > 0 else ''} Closed {pos.asset}: {format_usd(pnl)}"
+            "message": f"{'' if total_pnl > 0 else ''} Closed {pos.asset}: {format_usd(total_pnl)}"
         }
     async def close_all_positions(self, prices: Dict[str, float]) -> List[Dict]:
         """Close all open positions at current prices."""
