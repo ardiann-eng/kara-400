@@ -44,3 +44,6 @@ mypy>=1.6.0
 
 # === Deployment ===
 gunicorn>=21.2.0
+
+# === Security & Encryption ===
+cryptography>=41.0.0

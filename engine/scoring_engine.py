@@ -63,7 +63,7 @@ class ScoringEngine:
         # Semaphores for rate limiting (Task 4)
         self.candle_sem = asyncio.Semaphore(3)
 
-        # Cooldown tracking: asset -> last signal timestamp
+        # Cooldown tracking: asset_mode -> last signal timestamp
         self._last_signal_ts: Dict[str, float] = {}
 
         # Price history for regime detection: asset -> [(ts, price)]
@@ -177,28 +177,49 @@ class ScoringEngine:
             "session_bonus": session_bonus,
         }
 
-    async def run_asset(self, asset: str, meta_data=None) -> Optional[TradeSignal]:
+    async def run_asset(self, asset: str, active_modes: List[str] = None, meta_data=None) -> Dict[str, TradeSignal]:
         """
         Run full scoring pipeline for one asset.
-        Branches into scalper or standard mode automatically.
+        Computes standard and/or scalper score independently based on active_modes.
+        Returns dictionary of signals by mode.
         """
-        is_scalper = self.mode_mgr and self.mode_mgr.is_scalper()
+        import config
+        if active_modes is None:
+            active_modes = ["standard"]
+            
+        signals = {}
+        now_ts = time.monotonic()
 
-        # Cooldown — different per mode
-        last_ts = self._last_signal_ts.get(asset, 0)
-        if self.mode_mgr:
-            cooldown_secs = self.mode_mgr.signal_cooldown_minutes * 60
-        else:
-            cooldown_secs = SIGNAL.signal_cooldown_minutes * 60
+        # 1. SCALPER MODE
+        if "scalper" in active_modes:
+            cooldown_secs = 5 * 60
+            if hasattr(config, 'SCALPER') and hasattr(config.SCALPER, 'signal_cooldown_minutes'):
+                cooldown_secs = config.SCALPER.signal_cooldown_minutes * 60
+            
+            last_ts = self._last_signal_ts.get(f"{asset}_scalper", 0)
+            if now_ts - last_ts >= cooldown_secs:
+                sig = await self._run_scalper(asset, meta_data)
+                if sig:
+                    signals["scalper"] = sig
+                    self._last_signal_ts[f"{asset}_scalper"] = now_ts
+            else:
+                remaining = int(cooldown_secs - (now_ts - last_ts))
+                log.debug(f"{asset} [SCALPER]: cooldown active ({remaining}s remaining)")
 
-        if time.monotonic() - last_ts < cooldown_secs:
-            remaining = int(cooldown_secs - (time.monotonic() - last_ts))
-            log.debug(f"{asset}: cooldown active ({remaining}s remaining)")
-            return None
+        # 2. STANDARD MODE
+        if "standard" in active_modes:
+            cooldown_secs = config.SIGNAL.signal_cooldown_minutes * 60
+            last_ts = self._last_signal_ts.get(f"{asset}_standard", 0)
+            if now_ts - last_ts >= cooldown_secs:
+                sig = await self._run_standard(asset, meta_data)
+                if sig:
+                    signals["standard"] = sig
+                    self._last_signal_ts[f"{asset}_standard"] = now_ts
+            else:
+                remaining = int(cooldown_secs - (now_ts - last_ts))
+                log.debug(f"{asset} [STANDARD]: cooldown active ({remaining}s remaining)")
 
-        if is_scalper:
-            return await self._run_scalper(asset, meta_data)
-        return await self._run_standard(asset, meta_data)
+        return signals
 
     # ──────────────────────────────────────────
     # SCALPER SCORING
@@ -243,7 +264,6 @@ class ScoringEngine:
 
         # 4. Build signal with scalper TP/SL
         signal = self._build_scalper_signal(asset, side, score, mark_price, reasons)
-        self._last_signal_ts[asset] = time.monotonic()
         log.info(f"⚡ SCALPER SIGNAL: {asset} {side.value.upper()} score={score}")
         return signal
 
@@ -651,7 +671,7 @@ class ScoringEngine:
         )
         
         # ── Output Logic ───────────────────────────────────────────────
-        threshold = SIGNAL.min_score_to_signal
+        threshold = 30 # Internal capture threshold (per-user filtering happens in main.py)
         
         if final_score >= threshold:
             log.info(f"🎯 [SIGNAL] {log_msg}")
@@ -662,10 +682,9 @@ class ScoringEngine:
             log.debug(log_msg)
 
         # ── Check threshold ────────────────────────────────────────────
-        if final_score < SIGNAL.min_score_to_signal:
+        if final_score < threshold:
             log.debug(
-                f"{asset}: score {final_score} below threshold "
-                f"{SIGNAL.min_score_to_signal}"
+                f"{asset}: score {final_score} below internal capture threshold {threshold}"
             )
             return None
 
@@ -676,7 +695,6 @@ class ScoringEngine:
             vol_regime=vol_regime.value if hasattr(vol_regime, "value") else vol_regime
         )
 
-        self._last_signal_ts[asset] = time.monotonic()
         log.info(
             f"🎯 SIGNAL: {asset} {side.value.upper()} "
             f"score={final_score} strength={signal.strength.value}"

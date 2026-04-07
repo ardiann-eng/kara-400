@@ -18,9 +18,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
+from core.db import user_db
 from config import RISK, SCALPER, MODE
 from models.schemas import (
     AccountState, Position, TradeSignal, Side, PositionStatus,
@@ -42,7 +44,8 @@ class RiskManager:
     Also manages trailing stops and TP logic.
     """
 
-    def __init__(self, mode_manager=None):
+    def __init__(self, mode_manager=None, chat_id: str = ""):
+        self._chat_id         = chat_id
         self._daily_pnl:      float = 0.0
         self._peak_balance:   float = 0.0
         self._session_start_balance: float = 0.0
@@ -50,22 +53,50 @@ class RiskManager:
         self._cooldown_until: Optional[float] = None  # monotonic timestamp
         self._kill_switch:    bool = False
         self._paused:         bool = False
-        # ModeManager injected from main.py (lazy to avoid circular import)
-        self._mode_mgr = mode_manager
 
-    def set_mode_manager(self, mode_manager):
-        """Inject ModeManager after construction (avoids circular import)."""
-        self._mode_mgr = mode_manager
+        # --- Hydrate from persisted state if exists
+        self._load_risk_state()
+
+    def _persist_risk_state(self):
+        if not self._chat_id: return
+        user_db.save_risk_state(self._chat_id, {
+            "daily_pnl":      self._daily_pnl,
+            "peak_balance":   self._peak_balance,
+            "kill_switch":    self._kill_switch,
+            "last_reset_day": self._last_reset_day
+        })
+
+    def _load_risk_state(self):
+        if not self._chat_id: return
+        state = user_db.load_risk_state(self._chat_id)
+        if state:
+            self._daily_pnl      = state.get("daily_pnl", 0.0)
+            self._peak_balance   = state.get("peak_balance", 0.0)
+            self._kill_switch    = state.get("kill_switch", False)
+            self._last_reset_day = state.get("last_reset_day")
 
     def _cfg(self):
         """Return active mode config (SCALPER or RISK) based on current mode."""
-        if self._mode_mgr and self._mode_mgr.is_scalper():
+        if self._is_scalper():
             return SCALPER
         return RISK
 
     def _is_scalper(self) -> bool:
-        """True if scalper mode is currently active."""
-        return bool(self._mode_mgr and self._mode_mgr.is_scalper())
+        """True if scalper mode is currently active for this user."""
+        if not self._chat_id: return False
+        user = user_db.get_user(self._chat_id)
+        if user and user.config.trading_mode == "scalper":
+            return True
+        return False
+
+    def _get_user_value(self, key: str, global_fallback=None):
+        """Helper to get mode-specific value from user config."""
+        user = user_db.get_user(self._chat_id)
+        if not user: return global_fallback
+        
+        is_scalper = user.config.trading_mode == "scalper"
+        prefix = "scl_" if is_scalper else "std_"
+        return getattr(user.config, f"{prefix}{key}", global_fallback)
 
     # ──────────────────────────────────────────
     # DAILY RESET
@@ -78,9 +109,18 @@ class RiskManager:
             self._daily_pnl     = 0.0
             self._session_start_balance = current_balance
             self._last_reset_day = today
+            self._persist_risk_state()
             log.info(f"📅 Daily reset - session balance: {format_usd(current_balance)}")
             return True
         return False
+
+    def reset_kill_switch(self, requester_id: str):
+        admin_id = os.getenv("ADMIN_CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", ""))
+        if requester_id != admin_id:
+            raise PermissionError("Hanya admin yang bisa reset kill-switch.")
+        self._kill_switch = False
+        self._persist_risk_state()
+        log.warning(f"Kill-switch explicitly reset by Admin {admin_id}")
 
     # ──────────────────────────────────────────
     # PRE-TRADE CHECK
@@ -111,10 +151,12 @@ class RiskManager:
             mins = (remaining % 3600) // 60
             return False, f"❄️  Post-loss cooldown active - {hrs}h {mins}m remaining"
 
-        # ── Concurrent positions cap (mode-aware) ─────────────────────
         cfg = self._cfg()
+
+        # ── Concurrent positions cap (mode-aware & user-specific) ──────
         open_count = len([p for p in open_positions if p.status == PositionStatus.OPEN])
-        max_pos = cfg.max_concurrent_positions
+        max_pos = self._get_user_value("max_concurrent_positions", cfg.max_concurrent_positions)
+
         if open_count >= max_pos:
             mode_tag = "[SCALPER]" if self._is_scalper() else "[STANDARD]"
             return False, f"⛔ {mode_tag} Max concurrent positions ({max_pos}) reached"
@@ -194,7 +236,10 @@ class RiskManager:
         if sl_pct <= 0:
             sl_pct = RISK.default_sl_pct
 
-        lev = signal.suggested_leverage
+        # ── Leverage: Cap by user setting ─────────────────────────────
+        cfg = self._cfg()
+        user_max_lev = self._get_user_value("max_leverage", cfg.max_leverage)
+        lev = min(signal.suggested_leverage, user_max_lev)
 
         # ── 1. Determine size_usd (margin) — mode-aware ───────────────
         cfg = self._cfg()

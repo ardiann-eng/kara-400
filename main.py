@@ -297,9 +297,7 @@ class KaraBot:
             pass
 
     async def _scan_all_assets(self):
-        """Run scoring engine for all watched assets."""
-    async def _scan_all_assets(self):
-        """Perform scoring scan on all watched assets in parallel."""
+        """Perform scoring scan on all watched assets in parallel, mode-aware."""
         log.info(f" 🔍 Scanning {len(self.watched_assets)} markets (parallel)...")
         
         try:
@@ -309,14 +307,28 @@ class KaraBot:
             if not all_meta:
                 log.warning(" Could not fetch batch metadata, will fallback to individual requests")
 
+            # Gather active modes across all authorized users
+            target_ids = list(self.telegram._authorized_chat_ids)
+            active_modes = set()
+            for cid in target_ids:
+                session = self.get_session(cid)
+                if session and session.user and hasattr(session.user.config, 'trading_mode'):
+                    active_modes.add(session.user.config.trading_mode)
+            
+            # If no authorized users use the bot yet, default to standard to keep cache warm
+            if not active_modes:
+                active_modes.add("standard")
+                
+            active_modes_list = list(active_modes)
+
             # 2. Parallel scan with Semaphore(5)
             async def _scan_one(asset):
                 async with self.scan_sem:
                     try:
-                        # ScoringEngine now uses its own candle_sem(3) internally for candles
-                        signal = await self.scorer.run_asset(asset, meta_data=all_meta)
-                        if signal:
-                            await self._handle_signal(signal)
+                        # ScoringEngine returns Dict[str, TradeSignal]
+                        signals_dict = await self.scorer.run_asset(asset, active_modes=active_modes_list, meta_data=all_meta)
+                        if signals_dict:
+                            await self._handle_signals(signals_dict)
                     except Exception as e:
                         # Log errors but don't stop the whole scan
                         if "429" in str(e):
@@ -331,47 +343,58 @@ class KaraBot:
         except Exception as e:
             log.error(f" [FATAL] Scan loop failure: {e}", exc_info=True)
 
-    async def _handle_signal(self, signal):
-        """Handle a new trade signal and broadcast to all authorized user sessions."""
-        # ── 0. Fetch Dynamic ATR (Opsi B Implementation) ─────────────
-        atr_value = 0.0
-        if config.RISK.enable_atr_sl:
-            try:
-                # Fetch recent candles (1m interval) for ATR calculation
-                candles = await self.hl_client.get_candles(
-                    signal.asset, "1m", limit=config.RISK.atr_lookback
-                )
-                if candles:
-                    # Use any available session's risk manager for calculation
-                    any_session = next(iter(self.sessions.values())) if self.sessions else None
-                    if any_session:
-                        atr_value = any_session.risk_mgr.calculate_atr(candles)
-                        if atr_value > 0:
-                            log.info(f"📐 [ATR-SL] Calculated for {signal.asset}: {atr_value:.6f}")
-                else:
-                    log.warning(f"⚠️  [ATR] No candles returned for {signal.asset}, using fixed SL.")
-            except Exception as e:
-                log.error(f"Failed to calculate dynamic ATR for {signal.asset}: {e}")
-
-        # 1. Loop through all authorized users (from Telegram state)
-        # This ensures users in config.TELEGRAM_CHAT_ID get signals even before hitting /start
+    async def _handle_signals(self, signals_dict: dict):
+        """Distribute each mode's signal to the respective users in that mode."""
+        from execution.paper_executor import PaperExecutor # just to satisfy type hints if needed
+        import config
+        
         target_ids = list(self.telegram._authorized_chat_ids)
         if not target_ids:
-            log.warning("No authorized users found for signal broadcast.")
             return
 
         for chat_id in target_ids:
             # Get or create session
             session = self.get_session(chat_id)
             if not session:
-                log.info(f"Initializing auto-session for authorized user: {chat_id}")
-                # Use a default username for auto-sessions
                 user = user_db.create_user(chat_id, "Master", init_usd=config.PAPER_BALANCE_USD)
                 session = self.get_session(chat_id)
+                
+            user_mode = getattr(session.user.config, 'trading_mode', 'standard')
+            base_signal = signals_dict.get(user_mode)
+            
+            if not base_signal:
+                continue
+
+            # ── Per-User Threshold Check ──────────────────
+            user_cfg = session.user.config
+            is_scl = (user_mode == 'scalper')
+            sig_threshold = user_cfg.scl_min_score_to_signal if is_scl else user_cfg.std_min_score_to_signal
+            auto_threshold = user_cfg.scl_min_score_to_auto_trade if is_scl else user_cfg.std_min_score_to_auto_trade
+
+            if base_signal.score < sig_threshold:
+                continue # User doesn't want signals this weak
 
             # Copy signal to avoid shared reference issues
-            user_signal = signal.model_copy()
-            user_signal.localize_for_user(session.user.config.trading_mode, atr_value=atr_value)
+            user_signal = base_signal.model_copy()
+            
+            # ── Fetch Dynamic ATR (calculated once per signal if needed)
+            atr_value = 0.0
+            if getattr(config, 'RISK', None) and getattr(config.RISK, 'enable_atr_sl', False):
+                try:
+                    # Fetch recent candles (1m interval) for ATR calculation
+                    candles = await self.hl_client.get_candles(
+                        user_signal.asset, "1m", limit=config.RISK.atr_lookback
+                    )
+                    if candles:
+                        atr_value = session.risk_mgr.calculate_atr(candles)
+                        if atr_value > 0:
+                            log.info(f"📐 [ATR-SL] Calculated for {user_signal.asset}: {atr_value:.6f}")
+                    else:
+                        log.warning(f"⚠️  [ATR] No candles returned for {user_signal.asset}, using fixed SL.")
+                except Exception as e:
+                    log.error(f"Failed to calculate dynamic ATR for {user_signal.asset}: {e}")
+                
+            user_signal.localize_for_user(user_mode, atr_value=atr_value)
             
             acc = session.get_account_state()
             
@@ -383,8 +406,8 @@ class KaraBot:
             user_signal.suggested_contracts  = contracts
 
             # ⚡ PRE-TRADE VALIDATION (Before Notification)
-            # We only send signals if we can actually trade them (FULL_AUTO)
-            if config.FULL_AUTO and user_signal.score >= config.SIGNAL.min_score_to_auto_trade and not getattr(user_signal, 'is_pyramid', False):
+            # We only auto-trade if score >= user's auto_threshold AND not a pyramid re-entry
+            if config.FULL_AUTO and user_signal.score >= auto_threshold and not getattr(user_signal, 'is_pyramid', False):
                 approved, reason = session.risk_mgr.pre_trade_check(
                     user_signal, acc, session.executor.open_positions
                 )
@@ -419,35 +442,38 @@ class KaraBot:
 
     async def _update_positions(self):
         """Update unrealized PnL and check TP/SL for all users."""
+        # 1. Collect all unique assets across all users
+        all_open_assets = set()
         for chat_id, session in self.sessions.items():
-            if not hasattr(session.executor, 'open_positions'):
+            if hasattr(session.executor, 'open_positions'):
+                for pos in session.executor.open_positions:
+                    all_open_assets.add(pos.asset)
+        
+        # 2. Fetch prices ONCE (O(N_Assets) instead of O(Users * Assets))
+        prices = {}
+        for asset in all_open_assets:
+            try:
+                prices[asset] = await self.hl_client.get_mark_price(asset)
+            except Exception as e:
+                log.debug(f"Failed to fetch market price for {asset}: {e}")
+
+        # 3. Apply updates to each user
+        for chat_id, session in self.sessions.items():
+            if not hasattr(session.executor, 'open_positions') or not session.executor.open_positions:
                 continue
             
             # ── Daily Reset Check ───────────────────────────────────────
-            # This handles the UTC midnight transition for each user
             acc = session.get_account_state()
             if session.risk_mgr.reset_daily(acc.total_equity):
                 pos_count = len(session.executor.open_positions)
                 await self.telegram.send_daily_report(acc, pos_count, target_chat_id=chat_id)
                 log.info(f"📬 Daily report sent to {chat_id}")
-            positions = session.executor.open_positions
-            if not positions:
-                continue
-
-            prices = {}
-            for pos in positions:
-                if pos.asset not in prices:
-                    try:
-                        prices[pos.asset] = await self.hl_client.get_mark_price(pos.asset)
-                    except:
-                        pass
 
             actions = await session.executor.update_positions(prices)
             for action in actions:
                 await self.telegram.send_position_event(action, prices, target_chat_id=chat_id)
             
             # Save user state after positional update to persist PnL changes
-            # We sync balance to user DB periodically
             session.user.paper_balance_usd = session.get_account_state().total_equity
             user_db.update_user(session.user)
 
@@ -463,8 +489,10 @@ class KaraBot:
 
     async def _on_user_event(self, data):
         """Handle live user events (fills, funding, etc.) from WS."""
-        log.debug(f"User event: {data}")
-        # In live mode, sync position fills here
+        log.debug(f"User event received: {data}")
+        # In live mode, sync position fills
+        # We trigger a background update of positions to pull latest states
+        asyncio.create_task(self._update_positions())
 
     # ──────────────────────────────────────────
     # SHUTDOWN
@@ -482,7 +510,8 @@ class KaraBot:
 
         try:
             await self.telegram.stop()
-        except: pass
+        except Exception as e:
+            log.warning(f"Telegram stop warning: {e}")
         
         try:
             await self.ws_client.stop()
@@ -511,6 +540,11 @@ async def main():
     # 2. Initialize Bot (Market data, calibration, etc.)
     try:
         await bot.start()
+        
+        # 🔗 [Pulse Sync v27] - Connect Bot Session to Dashboard
+        init_dashboard(bot.sessions, bot.telegram, bot.mode_mgr)
+        log.info(f"✅ [DASHBOARD] Pulse Sync Complete: {len(bot.sessions)} user sessions linked.")
+        
     except Exception as e:
         log.error(f" Initialization failed: {e}")
         import traceback

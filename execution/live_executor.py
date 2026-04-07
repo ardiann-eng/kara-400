@@ -152,7 +152,7 @@ class LiveExecutor:
 
         # Calculate size
         size_usd, contracts = self.risk.calculate_position_size(
-            signal, account.balance
+            signal, account.wallet_balance
         )
 
         # Place Post-Only limit order (slightly inside spread for fill probability)
@@ -436,8 +436,8 @@ class LiveExecutor:
                             if oid:
                                 try:
                                     await self.client.cancel_order(asset, oid)
-                                except Exception:
-                                    pass
+                                except Exception as cencal_err:
+                                    log.warning(f"Failed to cancel resting order {oid}: {cencal_err}")
                             # Switch to IOC on last retry
                             if attempt == EXEC.order_retry_count:
                                 order_type = "limit"  # IOC fallback

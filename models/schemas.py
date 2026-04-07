@@ -338,7 +338,18 @@ class UserConfig(BaseModel):
     trading_mode:  str = "standard"        # standard | scalper
     bot_mode:      BotMode = BotMode.PAPER # paper | live
     risk_pct:      float = 0.02            # 2% of equity
-    max_positions: int = 5
+    
+    # ── Standard Mode Settings ────────────────
+    std_min_score_to_signal:     int = 56
+    std_min_score_to_auto_trade: int = 78
+    std_max_leverage:            int = 10
+    std_max_concurrent_positions: int = 10
+
+    # ── Scalper Mode Settings ─────────────────
+    scl_min_score_to_signal:     int = 45
+    scl_min_score_to_auto_trade: int = 65
+    scl_max_leverage:            int = 20
+    scl_max_concurrent_positions: int = 5
 
 class User(BaseModel):
     chat_id:           str
@@ -346,8 +357,16 @@ class User(BaseModel):
     paper_balance_usd: float               # internally USD
     created_at:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     config:            UserConfig = Field(default_factory=UserConfig)
+    is_active:         bool = True         # Allow disabling users
     
     # Live mode auth
     hl_agent_address:  Optional[str] = None
     hl_agent_secret:   Optional[str] = None
     wallet_authorized: bool = False
+    tos_agreed:        bool = False
+
+    # Access Code Gate
+    is_authorized:     bool = False                # True setelah akses code benar
+    authorized_at:     Optional[datetime] = None   # Timestamp persetujuan
+    access_attempts:   int = 0                     # Jumlah percobaan kode salah
+    access_blocked_until: Optional[datetime] = None  # Blokir sementara jika melebihi limit

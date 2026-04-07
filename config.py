@@ -58,6 +58,19 @@ HL_TESTNET       = MODE == "paper"                       # auto-set from mode
 # ──────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_TOKEN", ""))
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+_allowed_ids_str = os.getenv("ALLOWED_CHAT_IDS", "")
+ALLOWED_CHAT_IDS = [x.strip() for x in _allowed_ids_str.split(",") if x.strip()]
+if TELEGRAM_CHAT_ID and TELEGRAM_CHAT_ID not in ALLOWED_CHAT_IDS:
+    ALLOWED_CHAT_IDS.append(TELEGRAM_CHAT_ID)
+
+# Access Code gate for new users
+ACCESS_CODE      = os.getenv("KARA_ACCESS_CODE", "KARA2026")
+_alt_codes_str   = os.getenv("KARA_ACCESS_CODES_ALT", "")
+ACCESS_CODE_ALTS = [x.strip() for x in _alt_codes_str.split(",") if x.strip()]
+# All valid codes (primary + alternates), case-insensitive match happens at runtime
+ALL_ACCESS_CODES = list({ACCESS_CODE} | set(ACCESS_CODE_ALTS))
+ACCESS_MAX_TRIES = 3              # block after this many wrong attempts
+ACCESS_BLOCK_HOURS = 1            # block duration in hours
 
 from dotenv import load_dotenv
 load_dotenv(override=True)  # Aggressive load
@@ -72,7 +85,8 @@ print(f"📡 [KARA_DEBUG] SYSTEM_PORT ENV: {os.getenv('PORT')}")
 print(f"🚀 [KARA_DEBUG] BINDING DASHBOARD TO: {DASHBOARD_HOST}:{DASHBOARD_PORT}")
 print("="*50 + "\n")
 
-SECRET_KEY       = os.getenv("SECRET_KEY", "kara-secret-change-me")
+SECRET_KEY       = os.getenv("SECRET_KEY", "CHANGEME")
+FERNET_KEY       = os.getenv("FERNET_KEY", "")
 
 # ──────────────────────────────────────────────
 # DATABASE & PERSISTENCE
@@ -175,7 +189,7 @@ class ScalperConfig:
 
     # Timing
     max_hold_minutes:        float = 12.0     # force close after 12min if no TP hit
-    scan_interval_seconds:   int   = 5        # scan every 5 seconds
+    scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold (more signals, lower bar)
     min_score_to_enter:      int   = 45       # entry threshold (vs 56 for standard)

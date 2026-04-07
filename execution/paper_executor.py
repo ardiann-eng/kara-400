@@ -34,9 +34,10 @@ class PaperExecutor:
     All trades stored in-memory; persisted to SQLite via main.py.
     """
 
-    def __init__(self, risk_manager: RiskManager, initial_balance: float = 1000.0):
+    def __init__(self, risk_manager: RiskManager, initial_balance: float = 1000.0, chat_id: str = "system"):
         self.risk  = risk_manager
         self.mode  = BotMode.PAPER
+        self.chat_id = chat_id
 
         # State
         self._balance:    float = initial_balance
@@ -50,7 +51,7 @@ class PaperExecutor:
         self._trade_log:  List[Dict] = []              # for backtest-style analysis
 
         log.info(
-            f" [PAPER] Paper executor ready - "
+            f" [PAPER] Paper executor ready for {self.chat_id} - "
             f"starting balance: {format_usd(self._balance)}"
         )
 
@@ -180,7 +181,7 @@ class PaperExecutor:
 
         # BUG 1 FIX: Persist to SQLite
         from core.db import user_db
-        cid = getattr(self, "chat_id", "system")
+        cid = self.chat_id
         user_db.save_paper_position(cid, pos)
         user_db.save_paper_state(cid, self._balance, account.total_equity)
 
@@ -278,7 +279,7 @@ class PaperExecutor:
         # BUG 1 FIX: Persist to SQLite
         from core.db import user_db
         user_db.remove_paper_position(position_id)
-        user_db.save_paper_state("system", self._balance, self._balance) # equity = balance when no positions
+        user_db.save_paper_state(self.chat_id, self._balance, self._balance) # equity = balance when no positions
 
         # Total PnL for the record (cumulative)
         total_pnl = pos.pnl_realized
@@ -350,8 +351,8 @@ class PaperExecutor:
         # BUG 1 FIX: Persist partial change
         from core.db import user_db
         if pos.status == PositionStatus.OPEN:
-            user_db.save_paper_position("system", pos)
-        user_db.save_paper_state("system", self._balance, self._balance + pos.pnl_unrealized)
+            user_db.save_paper_position(self.chat_id, pos)
+        user_db.save_paper_state(self.chat_id, self._balance, self._balance + pos.pnl_unrealized)
 
         if action["action"] == "tp1":
             pos.tp1_hit = True

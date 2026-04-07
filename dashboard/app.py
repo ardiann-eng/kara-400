@@ -62,20 +62,37 @@ def get_active_session(chat_id: str = None):
 # API ENDPOINTS
 # ──────────────────────────────────────────────
 
+@app.get("/api/ping")
+async def ping():
+    return {"status": "pong", "timestamp": datetime.now(timezone.utc).isoformat()}
+
 @app.get("/api/account")
 async def get_account(chat_id: str = None):
     from core.db import user_db
+    log.info(f"🐦 [CANARY] API /api/account triggered (chat_id: {chat_id})")
     session = get_active_session(chat_id)
     
     # 1. Try Live Session
     if session:
         try:
             acc = session.get_account_state()
-            data = acc.dict()
-            log.info(f"✅ [API] Returning live state for {session.chat_id}: ${data.get('total_equity')}")
+            # Manual construction - 100% safe
+            data = {
+                "total_equity": round(acc.total_equity, 2),
+                "wallet_balance": round(acc.wallet_balance, 2),
+                "available": round(acc.available, 2),
+                "used_margin": round(acc.used_margin, 2),
+                "unrealized_pnl": round(acc.unrealized_pnl, 2),
+                "daily_pnl": round(acc.daily_pnl, 2),
+                "daily_pnl_pct": round(acc.daily_pnl_pct, 4),
+                "is_paused": acc.is_paused,
+                "mode": acc.mode.value if hasattr(acc.mode, 'value') else str(acc.mode),
+                "updated_at": acc.updated_at.isoformat() if hasattr(acc.updated_at, 'isoformat') else str(acc.updated_at)
+            }
+            log.info(f"🏁 [API_FINISH] Sending Data for {session.user.chat_id}: ${data['total_equity']}")
             return data
         except Exception as e: 
-            log.error(f"❌ [API] Failed to get live account state: {e}")
+            log.error(f"❌ [API] Failed at live state: {e}")
         
     # 2. Fallback to Database
     cid = chat_id or _admin_chat_id or "system"
@@ -109,15 +126,30 @@ async def get_positions(chat_id: str = None):
     
     # 1. Try Live Session
     if session:
-        return {
-            "positions": [p.dict() for p in session.executor.open_positions]
-        }
+        try:
+            positions = session.executor.open_positions
+            data = [p.dict() for p in positions]
+            # Manual ISO format for datetimes to avoid JSON errors
+            for p in data:
+                if 'opened_at' in p and p['opened_at']:
+                    p['opened_at'] = p['opened_at'].isoformat() if hasattr(p['opened_at'], 'isoformat') else str(p['opened_at'])
+                if 'closed_at' in p and p['closed_at']:
+                    p['closed_at'] = p['closed_at'].isoformat() if hasattr(p['closed_at'], 'isoformat') else str(p['closed_at'])
+            
+            log.info(f"✅ [API] Sending {len(data)} live positions for {session.user.chat_id}")
+            return {"positions": data}
+        except Exception as e:
+            log.error(f"❌ [API] Failed to parse positions: {e}")
         
     # 2. Fallback to Database
     cid = chat_id or _admin_chat_id or "system"
-    positions = user_db.load_paper_positions(cid)
+    db_positions = user_db.load_paper_positions(cid)
+    data = [p.dict() for p in db_positions]
+    for p in data:
+        if 'opened_at' in p and p['opened_at']:
+            p['opened_at'] = p['opened_at'].isoformat() if hasattr(p['opened_at'], 'isoformat') else str(p['opened_at'])
     return {
-        "positions": [p.dict() for p in positions]
+        "positions": data
     }
 
 @app.get("/api/signals")
@@ -292,12 +324,31 @@ DASHBOARD_DIR = os.path.dirname(os.path.abspath(__file__))
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     log.info("🏠 [DASHBOARD] Root route hit (GET /)")
-    file_path = os.path.join(DASHBOARD_DIR, "templates", "dashboard.html")
+    
+    # Try multiple possible paths for Docker/Railway environments
+    possible_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "dashboard.html"),
+        "/app/dashboard/templates/dashboard.html",
+        "dashboard/templates/dashboard.html",
+        "./dashboard/templates/dashboard.html"
+    ]
+    
+    file_path = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            file_path = p
+            break
+            
+    if not file_path:
+        log.error(f"❌ [DASHBOARD] Could not find dashboard.html in any of: {possible_paths}")
+        return HTMLResponse(f"<h1>Error: dashboard.html not found</h1><p>Tried: {possible_paths}</p>", status_code=404)
+
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
-    except FileNotFoundError:
-        return HTMLResponse("<h1>Error: templates/dashboard.html not found</h1>", status_code=404)
+    except Exception as e:
+        log.error(f"❌ [DASHBOARD] Exception reading {file_path}: {e}")
+        return HTMLResponse(f"<h1>Error reading dashboard</h1><p>{e}</p>", status_code=500)
 
 @app.get("/old", response_class=HTMLResponse)
 async def old_dashboard():
@@ -315,6 +366,7 @@ def init_dashboard(sessions, telegram_bot=None, mode_manager=None):
     _sessions     = sessions
     _telegram     = telegram_bot
     _mode_manager = mode_manager
+    log.info(f"✅ [DASHBOARD] Pulse Sync: {len(sessions) if sessions else 0} user sessions linked.")
 
 
 async def run_dashboard():

@@ -9,12 +9,13 @@ from __future__ import annotations
 import asyncio
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeDefault
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, ContextTypes
+    Application, CommandHandler, CallbackQueryHandler,
+    ConversationHandler, MessageHandler, filters, ContextTypes
 )
 from telegram.constants import ParseMode
 
@@ -27,6 +28,10 @@ from models.schemas import (
 from utils.helpers import format_usd, format_idr, format_pct, format_price, utcnow
 
 log = logging.getLogger("kara.telegram")
+
+# ConversationHandler State
+WAITING_CODE = 1
+WAITING_CONFIG_VALUE = 2
 
 DAILY_REPORT_TEMPLATE = """
 📊 <b>KARA DAILY INSIGHTS</b> 🌸
@@ -95,6 +100,37 @@ Score Baru: <b>{score}/100</b>
 <i>ID: {sig_id}</i>
 """
 
+TOS_TEXT = """
+⚖️ <b>TERMS OF SERVICE — KARA AI AGENT</b> 🌸
+──────────────────────────
+Sebelum kita mulai petualangan trading kita, aku perlu kamu menyetujui beberapa hal penting ya, User! ✨
+
+1. 🛡️ <b>Tanggung Jawab Pribadi:</b> Aku adalah asisten AI yang memberikan analisis berdasarkan data market. Semua keputusan akhir untuk melakukan trade ada di tangan User sepenuhnya.
+2. 📉 <b>Risiko Modal:</b> Trading futures memiliki risiko tinggi. User memahami bahwa modal bisa berkurang atau hilang sepenuhnya.
+3. 🚫 <b>Bukan Penasehat Keuangan:</b> Aku bukan penasehat keuangan berlisensi. Gunakan analisisku hanya sebagai referensi tambahan.
+4. ⚙️ <b>Teknologi:</b> User memahami risiko teknis seperti delay koneksi atau error pada API pihak ketiga (Hyperliquid).
+
+<i>\"Analisisku cerdas, tapi User adalah nahkodanya!\"</i> 💜
+
+Ayo kita mulai dengan bijak~! ✨
+──────────────────────────
+<b>Apakah User setuju dengan ketentuan di atas?</b>
+"""
+
+RISK_WARNING_TEXT = """
+⚠️ <b>RISK WARNING (LIVE MODE)</b> ⚡
+──────────────────────────
+User akan memasuki <b>Live Trading Mode</b> menggunakan dana asli. Harap perhatikan hal-hal berikut:
+
+• 📉 <b>Past Performance:</b> Hasil trading masa lalu (Paper Mode) TIDAK menjamin hasil yang sama di masa depan. Market selalu dinamis.
+• 💸 <b>Loss Potential:</b> Gunakan hanya dana yang User siap untuk hilang. Jangan gunakan dana kebutuhan pokok.
+• ⚡ <b>Leverage:</b> Penggunaan leverage tinggi mempercepat potensi keuntungan sekaligus mempercepat risiko likuidasi modal.
+• ⚖️ <b>DYOR:</b> Selalu lakukan riset mandiri sebelum mengonfirmasi eksekusi dari KARA.
+
+<i>KARA akan menjagamu dengan manajemen risiko ketat, tapi User harus tetap waspada!</i> 💜
+──────────────────────────
+"""
+
 
 class KaraTelegram:
     """Telegram bot for KARA - notifications + commands."""
@@ -107,8 +143,11 @@ class KaraTelegram:
         self._on_confirm = on_confirm
         self._pending_signals: Dict[str, TradeSignal] = {}  # sig_id -> signal
         self._bot_started = False
-        self._authorized_chat_ids: Set[str] = set()
+        self._authorized_chat_ids: set = set()
         self._state_file = config.TG_STATE_PATH
+        
+        # Rate Limiting: chat_id -> timestamp
+        self._last_cmd_ts: Dict[str, float] = {}
 
         # Injected later by main.py
         self.bot_app:      Any = None   # KaraBot instance to access get_session
@@ -158,22 +197,51 @@ class KaraTelegram:
                 .build()
             )
 
-            # Register handlers
+            # Access Code ConversationHandler (wraps /start flow for new users)
+            access_conv = ConversationHandler(
+                entry_points=[CommandHandler("start", self.cmd_start)],
+                states={
+                    WAITING_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.cmd_access_code)],
+                },
+                fallbacks=[CommandHandler("start", self.cmd_start)],
+                per_user=True,
+                per_chat=True,
+                allow_reentry=True,
+            )
+
+            # Settings ConversationHandler
+            settings_conv = ConversationHandler(
+                entry_points=[CommandHandler("settings", self.cmd_settings)],
+                states={
+                    WAITING_CONFIG_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.cmd_set_config_value)],
+                },
+                fallbacks=[CommandHandler("settings", self.cmd_settings), CommandHandler("cancel", self.cmd_cancel)],
+                per_user=True,
+                allow_reentry=True
+            )
+
             handlers = [
-                CommandHandler("start",    self.cmd_start),
+                access_conv,
+                settings_conv,
                 CommandHandler("help",     self.cmd_help),
                 CommandHandler("status",   self.cmd_status),
                 CommandHandler("pos",      self.cmd_positions),
                 CommandHandler("positions",self.cmd_positions),
                 CommandHandler("pnl",      self.cmd_pnl),
                 CommandHandler("export",   self.cmd_export),
-                CommandHandler("mode",     self.cmd_mode),       # show current mode
-                CommandHandler("scalper",  self.cmd_scalper),    # switch to scalper
-                CommandHandler("standard", self.cmd_standard),   # switch to standard
-                CommandHandler("paper",    self.cmd_paper),      # force paper mode
-                CommandHandler("daily",    self.cmd_daily),       # manual daily reset
-                CommandHandler("daily",    self.cmd_daily),      # manual daily report
-                CommandHandler("live",     self.cmd_live),       # upgrade to live mode
+                CommandHandler("mode",     self.cmd_mode),
+                CommandHandler("scalper",  self.cmd_scalper),
+                CommandHandler("standard", self.cmd_standard),
+                CommandHandler("paper",    self.cmd_paper),
+                CommandHandler("live",     self.cmd_live),
+                CommandHandler("settings", self.cmd_settings),
+                
+                # Direct Config Commands
+                CommandHandler("setscore",    self.cmd_direct_set_config),
+                CommandHandler("setauto",     self.cmd_direct_set_config),
+                CommandHandler("setleverage",  self.cmd_direct_set_config),
+                CommandHandler("setmaxpos",    self.cmd_direct_set_config),
+
                 CallbackQueryHandler(self.on_callback),
             ]
             for h in handlers:
@@ -195,6 +263,7 @@ class KaraTelegram:
                         BotCommand("pnl",      "Ringkasan PnL & Equity"),
                         BotCommand("paper",    "Kembali ke Paper Mode & Reset Saldo"),
                         BotCommand("live",     "Setup Live Mode (Agent Wallet)"),
+                        BotCommand("settings", "Pusat Kendali (Threshold & Leverage)"),
                         BotCommand("help",     "Daftar instruksi lengkap"),
                         BotCommand("export",   "Export riwayat trade ke Excel"),
                     ],
@@ -236,56 +305,307 @@ class KaraTelegram:
     # ──────────────────────────────────────────
 
     async def cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        chat_id = str(update.effective_chat.id)
-        username = update.effective_user.username or update.effective_user.first_name or "Master"
-        
-        # Multi-user Init
+        """Entry point — gate by Access Code for NEW users."""
+        chat_id  = str(update.effective_chat.id)
+        username = update.effective_user.username or update.effective_user.first_name or "User"
+
+        # ── 1. Always create a bare-minimum user record if none exists ──
         user = user_db.get_user(chat_id)
         if not user:
-            # Create new user state
             user = user_db.create_user(chat_id, username, init_usd=config.PAPER_BALANCE_USD)
+
+        # ── 2. Admin shortcut: TELEGRAM_CHAT_ID is always authorized ──
+        if not user.is_authorized and str(config.TELEGRAM_CHAT_ID) == chat_id:
+            user.is_authorized     = True
+            user.authorized_at     = datetime.now()
+            user.tos_agreed        = True
+            user_db.update_user(user)
+
+        # ── 3. Already authorized → welcome back ──
+        if user.is_authorized:
+            if chat_id not in self._authorized_chat_ids:
+                self._authorized_chat_ids.add(chat_id)
+                self._save_state()
             if self.bot_app:
-                # Force session init
                 self.bot_app.get_session(chat_id)
-            
-        # Ensure ID always in state allowed
-        if chat_id not in self._authorized_chat_ids:
-            self._authorized_chat_ids.add(chat_id)
-            self._save_state()
-            
-        exec_mode = "🤝 Semi-Auto" if not config.FULL_AUTO else "🚀 Full-Auto"
-        
-        reply_msg = (
-            f"✨ <b>Halo, {username}! Saya KARA, Intelligence Trading Partner Anda.</b> 🌸\n\n"
-            f"Selamat datang! Saya sudah menyiapkan akun virtual Anda untuk trading di Hyperliquid perp.\n\n"
-            f"💰 <b>Saldo Paper Anda: {format_idr(user.paper_balance_usd)}</b>\n\n"
-            f"Ketik /help untuk instruksi awal. Anda bisa mengetik /mode untuk memilih gaya trading (Standard / Scalper)."
+
+            # TOS check (authorized tapi belum agree)
+            if not getattr(user, 'tos_agreed', False):
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ SAYA SETUJU & PAHAM", callback_data="tos_agree")]
+                ])
+                await update.message.reply_html(TOS_TEXT, reply_markup=keyboard)
+                return ConversationHandler.END
+
+            reply_msg = (
+                f"✨ <b>Halo, {username}! Saya KARA, Intelligence Trading Partner Anda.</b> 🌸\n\n"
+                f"Selamat datang kembali! Saya siap memantau Hyperliquid untuk User.\n\n"
+                f"💰 <b>Saldo Paper User: {format_idr(user.paper_balance_usd)}</b>\n\n"
+                f"Ketik /help untuk instruksi. Jangan lupa, <i>Not Financial Advice</i> ya! 💜"
+            )
+            await update.message.reply_html(reply_msg)
+            return ConversationHandler.END
+
+        # ── 4. Check block (too many wrong attempts) ──
+        now = datetime.now(timezone.utc)
+        blocked_until = user.access_blocked_until
+        if blocked_until:
+            blocked_until_aware = blocked_until.replace(tzinfo=timezone.utc) if blocked_until.tzinfo is None else blocked_until
+            if now < blocked_until_aware:
+                remaining_mins = int((blocked_until_aware - now).total_seconds() // 60) + 1
+                await update.message.reply_html(
+                    f"🚫 <b>Akses Sementara Diblokir</b>\n\n"
+                    f"Terlalu banyak percobaan kode yang salah.\n"
+                    f"Silakan coba lagi dalam <b>{remaining_mins} menit</b>. "
+                )
+                return ConversationHandler.END
+            else:
+                # Block expired, reset
+                user.access_attempts     = 0
+                user.access_blocked_until = None
+                user_db.update_user(user)
+
+        # ── 5. New / not-yet-authorized → ask for access code ──
+        remaining = config.ACCESS_MAX_TRIES - user.access_attempts
+        await update.message.reply_html(
+            f"🔒 <b>Selamat datang di KARA Bot!</b> 🌸\n\n"
+            f"Bot ini bersifat privat dan hanya untuk pengguna terpilih.\n"
+            f"Silakan masukkan <b>Access Code</b> untuk melanjutkan: "
         )
-        await update.message.reply_html(reply_msg)
+        return WAITING_CODE
+
+    async def cmd_access_code(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Handle Access Code input from user."""
+        chat_id  = str(update.effective_chat.id)
+        username = update.effective_user.username or update.effective_user.first_name or "User"
+        code_input = (update.message.text or "").strip()
+
+        user = user_db.get_user(chat_id)
+        if not user:
+            user = user_db.create_user(chat_id, username, init_usd=config.PAPER_BALANCE_USD)
+
+        # ── Validate Code (case-insensitive) ──
+        valid = any(code_input.upper() == c.upper() for c in config.ALL_ACCESS_CODES)
+
+        if valid:
+            user.is_authorized        = True
+            user.authorized_at        = datetime.now(timezone.utc)
+            user.access_attempts      = 0
+            user.access_blocked_until = None
+            user.tos_agreed           = True   # access code implies ToS acceptance
+            user_db.update_user(user)
+
+            # Register in session
+            if chat_id not in self._authorized_chat_ids:
+                self._authorized_chat_ids.add(chat_id)
+                self._save_state()
+            if self.bot_app:
+                self.bot_app.get_session(chat_id)
+
+            log.info(f"✅ New user authorized: {username} ({chat_id})")
+            await update.message.reply_html(
+                f"✨ <b>Halo, {username}! Saya KARA, Intelligence Trading Partner Anda.</b> 🌸\n\n"
+                f"Selamat datang! Saya sudah menyiapkan akun virtual Anda untuk trading di Hyperliquid perp.\n\n"
+                f"💰 <b>Saldo Paper Anda: {format_idr(user.paper_balance_usd)}</b>\n\n"
+                f"Ketik /help untuk instruksi awal. Anda bisa mengetik /mode untuk memilih gaya trading (Standard / Scalper)."
+            )
+            return ConversationHandler.END
+
+        # ── Wrong code ──
+        user.access_attempts += 1
+        remaining = config.ACCESS_MAX_TRIES - user.access_attempts
+
+        if remaining <= 0:
+            user.access_blocked_until = datetime.now(timezone.utc) + timedelta(hours=config.ACCESS_BLOCK_HOURS)
+            user_db.update_user(user)
+            log.warning(f"⛔ User {chat_id} blocked after {config.ACCESS_MAX_TRIES} wrong attempts.")
+            await update.message.reply_html(
+                f"🚫 <b>Akses Diblokir Sementara</b>\n\n"
+                f"Kamu sudah mencoba <b>{config.ACCESS_MAX_TRIES} kali</b> dengan kode yang salah.\n"
+                f"Akun sementara diblokir selama <b>{config.ACCESS_BLOCK_HOURS} jam</b>.\n\n"
+                f"<i>Kalau kamu seharusnya punya akses, hubungi Admin ya!</i> 💜"
+            )
+            return ConversationHandler.END
+
+        user_db.update_user(user)
+        await update.message.reply_html(
+            f"❌ <b>Access Code salah.</b> Silakan coba lagi.\n"
+            f"<i>Sisa percobaan: <b>{remaining}</b></i>"
+        )
+        return WAITING_CODE
+
+    async def cmd_settings(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Display and edit user-specific trading configuration."""
+        if not self._is_authorized(update): return
+        chat_id = str(update.effective_chat.id)
+        user = user_db.get_user(chat_id)
+        if not user: return
+
+        # Determine which mode view to show (default to current mode)
+        view_mode = ctx.user_data.get("settings_view_mode", user.config.trading_mode)
+        ctx.user_data["settings_view_mode"] = view_mode
+        
+        is_scl = (view_mode == "scalper")
+        pfx = "scl_" if is_scl else "std_"
+        mode_label = "🌸 SCALPER MODE" if is_scl else "🛡️ STANDARD MODE"
+
+        text = (
+            f"⚙️ <b>KARA Settings — {mode_label}</b>\n"
+            f"────────────────────────\n"
+            f"• Min Score Signal     : <b>{getattr(user.config, pfx+'min_score_to_signal')}</b>\n"
+            f"• Min Score Auto-Trade : <b>{getattr(user.config, pfx+'min_score_to_auto_trade')}</b>\n"
+            f"• Max Leverage         : <b>{getattr(user.config, pfx+'max_leverage')}x</b>\n"
+            f"• Max Open Positions   : <b>{getattr(user.config, pfx+'max_concurrent_positions')}</b>\n\n"
+            f"<i>Klik tombol di bawah untuk mengubah nilai atau ganti tampilan mode.</i> 🌸"
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton("🎯 Score Signal", callback_data=f"set_cfg:{pfx}min_score_to_signal"),
+                InlineKeyboardButton("🚀 Score Auto", callback_data=f"set_cfg:{pfx}min_score_to_auto_trade")
+            ],
+            [
+                InlineKeyboardButton("📈 Leverage", callback_data=f"set_cfg:{pfx}max_leverage"),
+                InlineKeyboardButton("🎯 Max Positions", callback_data=f"set_cfg:{pfx}max_concurrent_positions")
+            ],
+            [
+                InlineKeyboardButton("🔄 Ganti View ke " + ("Standard" if is_scl else "Scalper"), callback_data="switch_settings_view"),
+                InlineKeyboardButton("♻️ Reset Defaults", callback_data="reset_cfg_defaults")
+            ]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        else:
+            await update.message.reply_html(text, reply_markup=reply_markup)
+        
+        return ConversationHandler.END
+
+    async def cmd_set_config_value(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Process the text input for a specific config field."""
+        if not self._is_authorized(update): return ConversationHandler.END
+        
+        chat_id = str(update.effective_chat.id)
+        field = ctx.user_data.get("editing_field")
+        val_str = update.message.text.strip()
+        
+        if not field:
+            await update.message.reply_text("❌ Terjadi kesalahan sesi. Silakan ketik /settings lagi.")
+            return ConversationHandler.END
+            
+        try:
+            val = int(val_str)
+            # Validations
+            if "min_score" in field:
+                if not (40 <= val <= 100):
+                    await update.message.reply_text("❌ Score harus antara 40 dan 100. Coba lagi:")
+                    return WAITING_CONFIG_VALUE
+            elif "max_leverage" in field:
+                if not (1 <= val <= 40):
+                    await update.message.reply_text("❌ Leverage harus antara 1 dan 40x. Coba lagi:")
+                    return WAITING_CONFIG_VALUE
+            elif "max_concurrent" in field:
+                if not (1 <= val <= 10):
+                    await update.message.reply_text("❌ Maksimal posisi antara 1 dan 10. Coba lagi:")
+                    return WAITING_CONFIG_VALUE
+                    
+            # Save to DB
+            user = user_db.get_user(chat_id)
+            setattr(user.config, field, val)
+            user_db.update_user(user)
+            
+            await update.message.reply_html(f"✅ <b>Berhasil!</b> Nilai diperbarui menjadi: <code>{val}</code>")
+            return await self.cmd_settings(update, ctx)
+            
+        except ValueError:
+            await update.message.reply_text("❌ Harap masukkan angka bulat (integer). Coba lagi:")
+            return WAITING_CONFIG_VALUE
+
+    async def cmd_direct_set_config(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Handle direct commands like /setleverage 20 or /setmaxpos 3."""
+        if not self._is_authorized(update): return
+        
+        chat_id = str(update.effective_chat.id)
+        user = user_db.get_user(chat_id)
+        if not user: return
+        
+        cmd = update.message.text.split()[0].lower().replace("/", "")
+        args = ctx.args
+        
+        if not args:
+            await update.message.reply_html(f"ℹ️ <b>Cara pakai:</b> <code>/{cmd} [angka]</code>")
+            return
+            
+        try:
+            val = int(args[0])
+            mode = user.config.trading_mode
+            pfx = "scl_" if mode == "scalper" else "std_"
+            
+            # Map command to field
+            mapping = {
+                "setscore":    "min_score_to_signal",
+                "setauto":     "min_score_to_auto_trade",
+                "setleverage": "max_leverage",
+                "setmaxpos":   "max_concurrent_positions"
+            }
+            
+            field_base = mapping.get(cmd)
+            if not field_base: return
+            
+            full_field = f"{pfx}{field_base}"
+            
+            # Re-use validation logic
+            if "min_score" in field_base:
+                if not (40 <= val <= 100):
+                    await update.message.reply_text("❌ Score harus antara 40 dan 100.")
+                    return
+            elif "max_leverage" in field_base:
+                if not (1 <= val <= 40):
+                    await update.message.reply_text("❌ Leverage harus antara 1 dan 40x.")
+                    return
+            elif "max_concurrent" in field_base:
+                if not (1 <= val <= 10):
+                    await update.message.reply_text("❌ Maksimal posisi antara 1 dan 10.")
+                    return
+            
+            setattr(user.config, full_field, val)
+            user_db.update_user(user)
+            
+            mode_label = "SCALPER" if mode == "scalper" else "STANDARD"
+            await update.message.reply_html(f"✅ <b>[{mode_label}]</b> {field_base.replace('_', ' ').title()} diperbarui ke: <code>{val}</code>")
+            
+        except ValueError:
+            await update.message.reply_text("❌ Harap masukkan angka yang valid.")
+
+    async def cmd_cancel(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("👌 Operasi dibatalkan.")
+        return ConversationHandler.END
 
     async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update):
-            return
+        if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id)): return
+        
         help_text = (
-            "💜 <b>KARA Bot — Menu Lengkap</b>\n"
-            "\n"
+            "📖 <b>KARA 4.0 - User Manual</b> 🌸\n\n"
             "🎛️ <b>Mode Trading & Akun</b>\n"
-            "/paper    — Kembali ke Paper Mode & Reset saldo ke Rp1.000.000\n"
-            "/live     — Sambungkan KARA ke wallet asli Anda!\n"
-            "/mode     — Tampilkan menu mode: Standard / Scalping\n"
-            "\n"
+            "• /mode     — Pilih gaya trading (Standard/Scalper)\n"
+            "• /settings — Atur threshold & leverage pribadi\n"
+            "• /live     — Aktivasi Live Mode (Risiko Nyata)\n"
+            "• /paper    — Kembali ke Paper Mode & Reset saldo\n\n"
             "📊 <b>Informasi Portofolio</b>\n"
-            "/status   — Status bot, ekuitas, dan float\n"
-            "/pos      — Lihat daftar koin yang sedang jalan (Tombol Close) \n"
-            "/pnl      — Ringkasan PnL\n"
-            "/export   — Download riwayat trade Excel\n"
-            "\n"
-            "💡 <i>Kirim pesan apa saja untuk mengobrol jika ada ChatGPT terhubung!</i>"
+            "• /status   — Status bot, ekuitas, dan float\n"
+            "• /pos      — Lihat daftar koin yang sedang jalan\n"
+            "• /pnl      — Ringkasan keuntungan/kerugian\n"
+            "• /export   — Download riwayat trade Excel\n\n"
+            "<i>Tips: Gunakan menu /settings untuk menyesuaikan bot dengan kenyamanan risiko User.</i>\n\n"
+            "⚠️ <b>Not Financial Advice:</b> Seluruh aktivitas trading memiliki risiko. User bertanggung jawab penuh. ✨"
         )
         await update.message.reply_html(help_text)
 
     async def cmd_paper(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id)): return
         chat_id = str(update.effective_chat.id)
         user = user_db.get_user(chat_id)
         if not user: return await self.cmd_start(update, ctx)
@@ -306,8 +626,10 @@ class KaraTelegram:
 
     async def cmd_live(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id)): return
         
         text = (
+            f"{RISK_WARNING_TEXT}\n"
             "⚡ <b>UPGRADE KE LIVE MODE</b> ⚡\n\n"
             "KARA dapat menggunakan <b>Agent Wallet (L1)</b> di Hyperliquid, sehingga kamu <b>TIDAK PERLU</b> memberikan Private Key dompet utamamu ke bot ini.\n\n"
             "Ikuti langkah ini:\n"
@@ -321,6 +643,7 @@ class KaraTelegram:
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id)): return
         chat_id = str(update.effective_chat.id)
         session = self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return await self.cmd_start(update, ctx)
@@ -352,13 +675,13 @@ class KaraTelegram:
                 f"📈 <b>Performa Harian (Total)</b>\n"
                 f"  • Profit Hari Ini: <b>{daily_sign}{format_idr(acc.daily_pnl)}</b> ({daily_sign}{format_pct(acc.daily_pnl_pct)})\n"
                 f"  • Max Drawdown: <code>{format_pct(acc.current_drawdown_pct, show_sign=False)}</code>\n\n"
-                f"🎯 <b>Posisi Terbuka:</b> {pos_len} aset\n\n"
+                f"🎯 <b>Posisi Terbuka:</b> {pos_len} aset\n"
             )
 
             if risk_status.get("in_cooldown"):
-                text += "\n❄️ <i>Post-loss cooldown aktif. Break dulu yaa~</i>"
+                text += "❄️ <i>Post-loss cooldown aktif. Break dulu yaa~</i>"
             else:
-                text += "\n<i>Semua sistem beroperasi maksimal, siap tangkap peluang~! ✨</i>"
+                text += "<i>Semua sistem beroperasi maksimal, siap tangkap peluang~! ✨</i>"
 
             await update.message.reply_html(text)
         except Exception as e:
@@ -366,6 +689,7 @@ class KaraTelegram:
 
     async def cmd_positions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id)): return
         chat_id = str(update.effective_chat.id)
         session = self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return await self.cmd_start(update, ctx)
@@ -416,66 +740,72 @@ class KaraTelegram:
             if pos.asset not in live_prices or live_prices[pos.asset] == 0:
                 live_prices[pos.asset] = pos.entry_price
 
-        from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc)
 
-        text = f"🎯 <b>Monitoring Posisi ({len(positions)})</b>\n\n"
-        
-        # ── Buttons Grid logic ─────────────────────
-        # Row 1: Refresh Button
+        text = f"🌸 <b>Monitoring Posisi ({len(positions)})</b>\n"
+        text += "─────────────────────────\n"
+
+        # ── Keyboard setup ──────────────────────────────────────────────
         keyboard_rows = [
-            [InlineKeyboardButton("🔄 REFRESH POSISI", callback_data="refresh_pos")]
+            [InlineKeyboardButton("🔄 Refresh", callback_data="refresh_pos")]
         ]
-        
         close_buttons = []
+
         for pos in positions:
-            side_emoji = "🟢" if pos.side.value == "long" else "🔴"
             current    = live_prices.get(pos.asset, pos.entry_price)
             unreal_pnl = pos.unrealized_pnl(current)
             float_pct  = pos.floating_pct(current) * 100
-            
-            pnl_label   = "🍀 Profit" if unreal_pnl >= 0 else "🔻 Loss"
-            pnl_str     = format_idr(unreal_pnl)
-            pnl_sign    = "+" if unreal_pnl >= 0 else ""
+            pnl_sign   = "+" if float_pct >= 0 else ""
+            pnl_emoji  = "🟢" if float_pct >= 0 else "🔴"
+            side_str   = pos.side.value.upper()
 
+            # Duration
             if pos.opened_at:
-                delta = now_utc - (pos.opened_at.replace(tzinfo=timezone.utc) if pos.opened_at.tzinfo is None else pos.opened_at)
+                delta      = now_utc - (pos.opened_at.replace(tzinfo=timezone.utc) if pos.opened_at.tzinfo is None else pos.opened_at)
                 total_mins = int(delta.total_seconds() // 60)
-                duration_str = f"{total_mins // 60}j {total_mins % 60}m" if total_mins >= 60 else f"{total_mins}m"
+                duration   = f"{total_mins // 60}j {total_mins % 60}m" if total_mins >= 60 else f"{total_mins}m"
             else:
-                duration_str = "?"
+                duration = "?"
 
-            sl_label = " <i>[BEP]</i>" if pos.tp1_hit else ""
-            tp_prog = "⭐⭐ (TP2)" if pos.tp2_hit else ("⭐ (TP1)" if pos.tp1_hit else "⏳ <i>Menunggu TP...</i>")
-            trail_str = "🔄 Aktif" if pos.trailing_active else "-"
-            liq_str = f"   💀 Estimasi Liq: <code>${format_price(pos.liquidation_price)}</code>\n" if pos.liquidation_price else ""
+            # TP status indicators
+            tp1_icon = "✅" if pos.tp1_hit  else "⏳"
+            tp2_icon = "✅" if pos.tp2_hit  else "⏳"
 
+            # SL label — if TP1 already hit, SL moved to breakeven
+            sl_note = " <i>(BEP)</i>" if pos.tp1_hit else ""
+
+            # Liq row (only show if available)
+            liq_part = f" | Liq: <code>${format_price(pos.liquidation_price)}</code>" if pos.liquidation_price else ""
+
+            # ── 4-Row Card ───────────────────────────────────────────────
             text += (
-                f"\n{side_emoji} <b><a href='https://app.hyperliquid.xyz/trade/{pos.asset}'>{pos.asset}</a> {pos.side.value.upper()}</b> {pos.leverage}x\n"
-                f"   Entry: <code>${format_price(pos.entry_price)}</code> ➪ <b>${format_price(current)}</b>\n"
-                f"   {pnl_label}: <b>{pnl_sign}{pnl_str} ({pnl_sign}{float_pct:.2f}%)</b>\n"
-                f"{liq_str}"
-                f"   🛑 SL: <code>${format_price(pos.stop_loss)}</code>{sl_label}\n"
-                f"   🎯 Target: {tp_prog}\n"
-                f"   ⚡ Trail: {trail_str} | ⏱️ {duration_str}\n"
+                f"\n"
+                f"<b><a href='https://app.hyperliquid.xyz/trade/{pos.asset}'>{pos.asset}</a>"
+                f" {side_str} {pos.leverage}x</b>  {pnl_emoji} {pnl_sign}{float_pct:.2f}%\n"
+                f"Entry: <code>${format_price(pos.entry_price)}</code> → <code>${format_price(current)}</code>\n"
+                f"SL: <code>${format_price(pos.stop_loss)}</code>{sl_note}{liq_part}\n"
+                f"TP1: <code>${format_price(pos.tp1)}</code> {tp1_icon}  "
+                f"TP2: <code>${format_price(pos.tp2)}</code> {tp2_icon}  | {duration} lalu\n"
+                f"─────────────────────────\n"
             )
 
-            # Concise labels for 2-column grid
+            # Close button per position (2-column grid)
             side_short = "L" if pos.side.value == "long" else "S"
             close_buttons.append(
                 InlineKeyboardButton(
-                    f"❌ {pos.asset} {side_short}", 
+                    f"❌ {pos.asset} {side_short}",
                     callback_data=f"close_req:{pos.asset}:{pos.side.value}"
                 )
             )
-            
-        # Chunk close buttons into rows of 2
+
+        # Build close button rows (2 per row)
         for i in range(0, len(close_buttons), 2):
             keyboard_rows.append(close_buttons[i:i+2])
 
+        # Footer
         text += "\n<i>Santai dulu, biarkan profit kita mengalir~ 🌸</i>"
 
-        # Final Row: Global Actions
+        # Close All row
         keyboard_rows.append([
             InlineKeyboardButton("🚨 CLOSE ALL POSITIONS 🚨", callback_data="close_all_req")
         ])
@@ -484,15 +814,18 @@ class KaraTelegram:
 
         if update.callback_query:
             try:
-                await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+                await update.callback_query.edit_message_text(
+                    text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
+                )
             except Exception as e:
-                log.debug(f"Refresh skip: {e}")
+                log.debug(f"Refresh skip (no change): {e}")
         else:
             await update.message.reply_html(text, reply_markup=reply_markup)
 
 
     async def cmd_pnl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id)): return
         chat_id = str(update.effective_chat.id)
         session = self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return await self.cmd_start(update, ctx)
@@ -525,6 +858,7 @@ class KaraTelegram:
     async def cmd_daily(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """On-demand daily report manual."""
         if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id)): return
         chat_id = str(update.effective_chat.id)
         session = self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return
@@ -568,38 +902,9 @@ class KaraTelegram:
         )
         await self.send_text(text, target_chat_id=target_chat_id)
 
-    async def cmd_pause(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update):
-            return
-        if self.risk_manager:
-            self.risk_manager.pause()
-        await update.message.reply_html(
-            "⏸️ <b>KARA dijeda.</b>\n"
-            "Tidak ada trade baru. Posisi aktif tetap dipantau.\n"
-            "Ketik /resume untuk lanjutkan~ "
-        )
 
-    async def cmd_resume(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update):
-            return
-        if self.risk_manager:
-            self.risk_manager.resume()
-        await update.message.reply_html(
-            "▶️ <b>KARA aktif kembali!</b>\n"
-            "Siap mencari peluang yang bagus untukmu~ "
-        )
 
-    async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update):
-            return
-        await update.message.reply_html(
-            "🛑 <b>Stop command diterima.</b>\n"
-            "KARA akan menutup semua posisi dan berhenti.\n\n"
-            "<i>Pastikan ini benar-benar yang kamu inginkan ya! 💙</i>"
-        )
-        if self.risk_manager:
-            self.risk_manager.pause()
-        # main.py will handle actual stop via signal
+
 
     async def cmd_enable_auto(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
@@ -646,8 +951,8 @@ class KaraTelegram:
         )
 
     async def cmd_export(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update):
-            return
+        if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id)): return
         
         file_path = config.EXCEL_LOG_PATH
         if not os.path.exists(file_path):
@@ -681,6 +986,7 @@ class KaraTelegram:
     async def cmd_mode(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Show current trading mode and allow switching."""
         if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id)): return
         chat_id = str(update.effective_chat.id)
         user = user_db.get_user(chat_id)
         if not user: return
@@ -703,16 +1009,22 @@ class KaraTelegram:
 
     async def cmd_scalper(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
-        chat_id = str(update.effective_chat.id)
-        session = self.bot_app.get_session(chat_id) if self.bot_app else None
-        if not session: return
-        
-        session.user.config.trading_mode = "scalper"
-        user_db.update_user(session.user)
-        await update.message.reply_html("⚡ <b>Ganti ke Scalper Mode Berhasil!</b>")
+        if self._is_throttled(str(update.effective_chat.id)): return
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚡ YA, SAYA PAHAM RISIKONYA", callback_data="scalper_confirm")],
+            [InlineKeyboardButton("❌ Batal", callback_data="mode_switch:cancel")]
+        ])
+        await update.message.reply_html(
+            "⚠️ <b>PERINGATAN SCALPER MODE</b>\n\n"
+            "Mode ini menggunakan leverage 25-35x dan risk 13% per trade.\n"
+            "<b>Satu trade jelek bisa hilangkan 13% modal Anda.</b>\n\n"
+            "Apakah Anda yakin?",
+            reply_markup=keyboard
+        )
 
     async def cmd_standard(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id)): return
         chat_id = str(update.effective_chat.id)
         session = self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return
@@ -725,12 +1037,23 @@ class KaraTelegram:
     # SIGNAL NOTIFICATION
     # ──────────────────────────────────────────
 
-    # ──────────────────────────────────────────
-    # SIGNAL NOTIFICATION
-    # ──────────────────────────────────────────
+    async def _cleanup_pending_signals(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        expired = []
+        for sig_id, sig in list(self._pending_signals.items()):
+            # Handle diff gracefully mapping to seconds
+            diff_secs = (now.timestamp() - sig.timestamp.timestamp()) if hasattr(sig.timestamp, 'timestamp') else 600
+            if diff_secs > 300:  # 5 menit
+                expired.append(sig_id)
+                
+        for sig_id in expired:
+            self._pending_signals.pop(sig_id, None)
 
     async def send_signal(self, signal: TradeSignal, is_auto: bool = False, target_chat_id: str = None):
         """Send a formatted signal card to Telegram."""
+        await self._cleanup_pending_signals()
+        
         side_emoji = "🟢" if signal.side == Side.LONG else "🔴"
         side_text  = "LONG" if signal.side == Side.LONG else "SHORT"
         
@@ -998,14 +1321,17 @@ class KaraTelegram:
         # ── Mode Switch Confirmation ──────────────────────────────────
         if action == "mode_switch":
             if sig_id == "scalper":
-                session.user.config.trading_mode = "scalper"
-                user_db.update_user(session.user)
-                await query.edit_message_reply_markup(reply_markup=None)
-                await query.message.reply_html(
-                    "🚀 <b>SCALPER MODE AKTIF!</b>\n\n"
-                    "⚠️ <b>HATI-HATI:</b> Akun Anda sekarang dalam mode ultra-agresif.\n"
-                    "• Scan interval: 5 detik\n"
-                    "• Risk: 13% | Leverage: up to 35x"
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚡ YA, SAYA PAHAM RISIKONYA", callback_data="scalper_confirm")],
+                    [InlineKeyboardButton("❌ Batal", callback_data="mode_switch:cancel")]
+                ])
+                await query.edit_message_text(
+                    "⚠️ <b>PERINGATAN SCALPER MODE</b>\n\n"
+                    "Mode ini menggunakan leverage 25-35x dan risk 13% per trade.\n"
+                    "<b>Satu trade jelek bisa hilangkan 13% modal Anda.</b>\n\n"
+                    "Apakah Anda yakin?",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard
                 )
             elif sig_id == "standard":
                 session.user.config.trading_mode = "standard"
@@ -1015,6 +1341,18 @@ class KaraTelegram:
             else:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.message.reply_html("❌ Pemindahan mode dibatalkan.")
+            return
+
+        if action == "scalper_confirm":
+            session.user.config.trading_mode = "scalper"
+            user_db.update_user(session.user)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_html(
+                "🚀 <b>SCALPER MODE AKTIF!</b>\n\n"
+                "⚠️ <b>HATI-HATI:</b> Akun Anda sekarang dalam mode ultra-agresif.\n"
+                "• Scan interval: 5 detik\n"
+                "• Risk: 13% | Leverage: up to 35x"
+            )
             return
 
         if action == "close_req":
@@ -1129,6 +1467,47 @@ class KaraTelegram:
             await query.message.delete()
             return
 
+        # ── TOS AGREE ──────────────────────────────────────────────────
+        if action == "tos_agree":
+            session.user.tos_agreed = True
+            user_db.update_user(session.user)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_html(
+                "✨ <b>Terima kasih sudah memahami, User!</b> 🌸\n\n"
+                "Sekarang User bisa mengakses seluruh fitur KARA. Mari kita cari profit dengan bijak~! 📈\n\n"
+                "Ketik /help untuk memulai."
+            )
+            return
+
+        # ── SETTINGS CALLBACKS ──────────────────────────────────────────
+        if action == "set_cfg":
+            ctx.user_data["editing_field"] = sig_id # sig_id contains field name
+            clean_name = sig_id.replace("std_", "").replace("scl_", "").replace("_", " ").title()
+            await query.message.reply_html(f"📝 <b>Edit {clean_name}</b>\n\nSilakan masukkan nilai baru untuk parameter ini (angka):")
+            return WAITING_CONFIG_VALUE
+
+        if action == "switch_settings_view":
+            current_view = ctx.user_data.get("settings_view_mode", "standard")
+            ctx.user_data["settings_view_mode"] = "scalper" if current_view == "standard" else "standard"
+            await self.cmd_settings(update, ctx)
+            return
+
+        if action == "reset_cfg_defaults":
+            if session:
+                u = session.user
+                u.config.std_min_score_to_signal = 56
+                u.config.std_min_score_to_auto_trade = 78
+                u.config.std_max_leverage = 10
+                u.config.std_max_concurrent_positions = 10
+                u.config.scl_min_score_to_signal = 45
+                u.config.scl_min_score_to_auto_trade = 65
+                u.config.scl_max_leverage = 20
+                u.config.scl_max_concurrent_positions = 3
+                user_db.update_user(u)
+                await query.answer("♻️ Konfigurasi direset ke default!")
+                await self.cmd_settings(update, ctx)
+            return
+
         signal = self._pending_signals.get(sig_id)
 
         if action == "confirm" and signal:
@@ -1191,5 +1570,41 @@ class KaraTelegram:
     # ──────────────────────────────────────────
 
     def _is_authorized(self, update: Update) -> bool:
-        """KARA Public Mode: Everyone is authorized to start."""
+        """KARA Auth: user harus sudah mengisi access code dan aktif."""
+        if not update or not update.effective_chat:
+            return False
+
+        chat_id = str(update.effective_chat.id)
+
+        # Admin selalu diizinkan (TELEGRAM_CHAT_ID)
+        if config.TELEGRAM_CHAT_ID and chat_id == str(config.TELEGRAM_CHAT_ID):
+            return True
+
+        # Cek apakah user ada di DB dan sudah is_authorized
+        user = user_db.get_user(chat_id)
+        if not user:
+            return False
+        if not getattr(user, 'is_authorized', False):
+            return False
+        if getattr(user, 'is_active', True) is False:
+            return False
+
+        # TOS block: tolak semua kecuali /start dan /help
+        if update.message and update.message.text:
+            cmd = update.message.text.split()[0].lower()
+            if cmd not in ["/start", "/help"] and not getattr(user, 'tos_agreed', False):
+                return False
+
         return True
+
+    def _is_throttled(self, chat_id: str, threshold: int = 5) -> bool:
+        """Rate limit handler: Returns True if user is spamming commands."""
+        import time
+        now = time.time()
+        last_time = self._last_cmd_ts.get(chat_id, 0)
+        
+        if now - last_time < threshold:
+            return True
+            
+        self._last_cmd_ts[chat_id] = now
+        return False

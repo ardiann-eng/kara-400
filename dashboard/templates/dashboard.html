@@ -920,7 +920,7 @@
             <div class="connection-status">
                 <div id="ws-dot" class="status-dot disconnected"></div>
                 <span id="ws-text" class="status-text">Connecting...</span>
-                <span style="font-size:10px; color:var(--text-muted); opacity:0.5; margin-left:8px">v1.3</span>
+                <span style="font-size:10px; color:var(--text-muted); opacity:0.5; margin-left:8px">v2.0 Premium</span>
             </div>
         </aside>
 
@@ -1209,71 +1209,11 @@
             try {
                 const r = await fetch('/api/account');
                 const acc = await r.json();
+                console.log("📊 [DEBUG] Account Data Received:", acc);
                 if (acc && !acc.error) updateAccountUI(acc);
-            } catch (e) { }
-        }
-
-        function updatePositionsUI(posList) {
-            const posStr = posList || [];
-            document.getElementById('pos-count-val').innerText = posStr.length;
-            document.getElementById('pos-pills').innerText = posStr.map(p => p.asset).join(', ') || '-';
-
-            const tbody = document.querySelector('#positions-table tbody');
-            const mobContainer = document.getElementById('mobile-positions');
-            const empty = document.getElementById('pos-empty');
-
-            if (posStr.length === 0) {
-                tbody.innerHTML = '';
-                mobContainer.innerHTML = '';
-                empty.style.display = 'block';
-                return;
+            } catch (e) { 
+                console.error("❌ [DEBUG] Fetch Account Failed:", e);
             }
-            empty.style.display = 'none';
-
-            let tableHtml = '';
-            let mobHtml = '';
-
-            posStr.forEach(p => {
-                const pnl = p.unrealized_pnl || 0;
-                const pnlPct = p.unrealized_pnl_pct || 0;
-                const pnlCls = pnl >= 0 ? 'text-green' : 'text-red';
-                const dirCls = p.side.toLowerCase() === 'long' ? 'dir-long' : 'dir-short';
-
-                tableHtml += `
-                    <tr>
-                        <td>
-                            <div style="font-weight:600">${p.asset}</div>
-                            <div class="dir-pill ${dirCls}">${p.side.toUpperCase()}</div>
-                        </td>
-                        <td class="mono">$${parseFloat(p.entry_price).toFixed(2)}</td>
-                        <td class="mono">$${parseFloat(p.mark_price || p.entry_price).toFixed(2)}</td>
-                        <td class="mono ${pnlCls}">
-                            ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} (${pnlPct.toFixed(2)}%)
-                        </td>
-                        <td>
-                            <div class="tp-progress">
-                                <div class="tp-fill" style="width: ${Math.min(100, Math.max(0, (pnlPct / 5) * 100))}%"></div>
-                            </div>
-                        </td>
-                    </tr>
-                `;
-
-                mobHtml += `
-                    <div class="glass-card" style="margin-bottom:12px">
-                        <div style="display:flex; justify-content:space-between; margin-bottom:8px">
-                            <span style="font-weight:600">${p.asset}</span>
-                            <span class="dir-pill ${dirCls}">${p.side.toUpperCase()}</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; font-size:13px">
-                            <span class="text-secondary">PnL</span>
-                            <span class="${pnlCls}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</span>
-                        </div>
-                    </div>
-                `;
-            });
-
-            tbody.innerHTML = tableHtml;
-            mobContainer.innerHTML = mobHtml;
         }
 
         function updatePositionsUI(posList) {
@@ -1299,21 +1239,18 @@
                 const isLong = p.side.toLowerCase() === 'long';
                 const cls = isLong ? 'dir-long' : 'dir-short';
                 
-                // Field mapping: pnl_unrealized from Position model
                 const pnl = p.pnl_unrealized || 0;
                 const entry = parseFloat(p.entry_price || 0);
                 const size = parseFloat(p.size_current || 0);
                 
-                // Calculate PnL % if not provided by backend
                 let pnlPct = 0;
                 if (entry > 0 && size > 0) {
                     pnlPct = (pnl / (entry * size)) * 100;
                 }
                 
                 const pColor = pnl >= 0 ? 'text-green' : 'text-red';
-                const markPrice = p.mark_price || entry; // fallback
+                const markPrice = p.mark_price || entry;
 
-                // Calculate progress towards TP
                 const tp2 = p.tp2 || (entry * (isLong ? 1.02 : 0.98));
                 const range = Math.abs(tp2 - entry);
                 let prog = 0;
@@ -1357,8 +1294,11 @@
             try {
                 const r = await fetch('/api/positions');
                 const data = await r.json();
+                console.log("📍 [DEBUG] Positions Received:", data);
                 if (data && data.positions) updatePositionsUI(data.positions);
-            } catch (e) { }
+            } catch (e) {
+                console.error("❌ [DEBUG] Fetch Positions Failed:", e);
+            }
         }
 
         function configLeverageFallback(def) { return 20; }
@@ -1396,96 +1336,54 @@
                         </span>
                         <span style="font-size:11px; color:var(--text-muted)">Just now</span>
                     </div>
-                    <div style="display:flex; align-items:center; justify-content:space-between; font-size:12px; color:var(--text-secondary)">
-                        <span>Entry: <span class="mono">${sig.entry}</span></span>
-                        <div style="display:flex; align-items:center; gap:8px;">
-                            <span class="mono" style="color:white">${sig.score}/100</span>
-                            <div class="score-bar-bg"><div class="score-bar-fill" style="width:${sig.score}%"></div></div>
-                        </div>
-                    </div>
                 </div>
             `;
             feed.insertAdjacentHTML('afterbegin', html);
             if (feed.children.length > 20) feed.removeChild(feed.lastChild);
         }
 
-        // --- WebSocket ---
         function initWs() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = protocol + '//' + window.location.host + '/ws';
-            console.log("Attempting WebSocket connection to:", wsUrl);
-            let ws = new WebSocket(wsUrl);
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            const socket = new WebSocket(wsUrl);
             const dot = document.getElementById('ws-dot');
             const msg = document.getElementById('ws-text');
-
-            ws.onopen = () => {
+            
+            socket.onopen = () => {
                 dot.className = 'status-dot';
-                msg.innerText = 'Connected to Core';
-                console.log("WebSocket Connected");
+                msg.innerText = 'Connected';
             };
-
-            ws.onclose = () => {
+            
+            socket.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'price_update' && data.asset === 'BTC') {
+                        const price = data.price || data.close;
+                        if (!price) return;
+                        const priceEl = document.getElementById('live-price-disp');
+                        priceEl.classList.remove('price-up', 'price-down');
+                        void priceEl.offsetWidth; 
+                        if (price > lastBtcPrice && lastBtcPrice > 0) priceEl.classList.add('price-up');
+                        else if (price < lastBtcPrice && lastBtcPrice > 0) priceEl.classList.add('price-down');
+                        priceEl.innerText = parseFloat(price).toFixed(2);
+                        lastBtcPrice = price;
+                        const t = (data.time || Date.now()) / 1000;
+                        candleSeries.update({
+                            time: Math.floor(t / 60) * 60,
+                            open: data.open || price, high: data.high || price, low: data.low || price, close: data.close || price
+                        });
+                        lineSeries.update({ time: t, value: price });
+                    }
+                    if (data.type === 'account_update') updateAccountUI(data.account);
+                    if (data.type === 'positions_update') updatePositionsUI(data.positions);
+                    if (data.type === 'signal') appendSignal(data);
+                } catch (err) { }
+            };
+            
+            socket.onclose = () => {
                 dot.className = 'status-dot disconnected';
                 msg.innerText = 'Retrying Connection...';
-                console.log("WebSocket Disconnected - Retrying...");
                 setTimeout(initWs, 3000);
-            };
-
-            ws.onerror = (err) => {
-                console.error("WebSocket Error:", err);
-                dot.className = 'status-dot disconnected';
-                msg.innerText = 'Connection Error';
-            };
-
-            ws.onmessage = (e) => {
-                try {
-                    const data = JSON.parse(e.data);
-                    
-                    if (data.type === 'signal') {
-                        appendSignal(data);
-                    }
-                    
-                    if (data.type === 'account_update') {
-                        updateAccountUI(data);
-                    }
-                    
-                    if (data.type === 'positions_update' && data.positions) {
-                        updatePositionsUI(data.positions);
-                    }
-                    
-                        if (data.type === 'price_update' && data.asset === 'BTC') {
-                            const price = data.price || data.close;
-                            if (!price) return;
-
-                            const priceEl = document.getElementById('live-price-disp');
-                            priceEl.classList.remove('price-up', 'price-down');
-                            void priceEl.offsetWidth; // trigger reflow
-
-                            if (price > lastBtcPrice && lastBtcPrice > 0) {
-                                priceEl.classList.add('price-up');
-                            } else if (price < lastBtcPrice && lastBtcPrice > 0) {
-                                priceEl.classList.add('price-down');
-                            }
-
-                            priceEl.innerText = parseFloat(price).toFixed(2);
-                            lastBtcPrice = price;
-                            
-                            if (data.high) document.getElementById('btc-high').innerText = parseFloat(data.high).toFixed(2);
-                            if (data.low) document.getElementById('btc-low').innerText = parseFloat(data.low).toFixed(2);
-
-                            const t = (data.time || Date.now()) / 1000;
-                            const candleData = {
-                                time: Math.floor(t / 60) * 60,
-                                open: data.open || price,
-                                high: data.high || price,
-                                low: data.low || price,
-                                close: data.close || price
-                            };
-                            
-                            candleSeries.update(candleData);
-                            lineSeries.update({ time: t, value: price });
-                        }
-                } catch (err) { }
             };
         }
 
