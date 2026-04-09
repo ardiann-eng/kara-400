@@ -750,28 +750,6 @@ class KaraTelegram:
         )
         await update.effective_message.reply_html(help_text)
 
-    async def cmd_paper(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update): return
-        if self._is_throttled(str(update.effective_chat.id), threshold=2, action_key="paper"): return
-        chat_id = str(update.effective_chat.id)
-        user = user_db.get_user(chat_id)
-        if not user: return await self.cmd_start(update, ctx)
-        
-        user.config.bot_mode = BotMode.PAPER
-        user.paper_balance_usd = config.PAPER_BALANCE_USD
-        user_db.update_user(user)
-        
-        if self.bot_app:
-            # Drop current session and reload fresh
-            self.bot_app.sessions.pop(chat_id, None)
-            await self.bot_app.get_session(chat_id)
-            
-        await self.bot_app.get_session(chat_id)
-        
-        await update.effective_message.reply_html(
-            "🌸 <b>Kembali ke Paper Mode!</b>\n\n"
-            "Saldo virtual Anda telah direset kembali menjadi <b>Rp1.000.000</b>. Mari kita belajar hasilkan profit lagi!"
-        )
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
@@ -1258,8 +1236,8 @@ class KaraTelegram:
         user = user_db.get_user(chat_id)
         if not user: return
 
-        from core.db import user_db
         user.config.bot_mode = BotMode.PAPER
+        user.paper_balance_usd = config.PAPER_BALANCE_USD
         user.wallet_authorized = False
         user_db.update_user(user)
 
@@ -1273,9 +1251,9 @@ class KaraTelegram:
             del self.bot_app.sessions[chat_id]
 
         await update.effective_message.reply_html(
-            "🧪 <b>Mode Switched to PAPER</b>\n\n"
-            "Saldo virtual telah di-reset. Semua posisi live dihentikan (di bot). "
-            "KARA sekarang berjalan aman dengan dana simulasi. 🌸"
+            "🌸 <b>Kembali ke Paper Mode!</b>\n\n"
+            "Saldo virtual Anda telah direset menjadi <b>Rp1.000.000</b>. Semua posisi live (jika ada) telah dihentikan di bot.\n\n"
+            "Mari kita belajar hasilkan profit lagi dengan dana simulasi! 🧪✨"
         )
 
     async def cmd_live(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
