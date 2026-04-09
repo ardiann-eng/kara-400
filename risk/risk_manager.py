@@ -320,10 +320,6 @@ class RiskManager:
         self, signal: TradeSignal, account: AccountState
     ) -> float:
         """Margin = notional / leverage"""
-        # Daily loss/drawdown check
-        approved, _ = self.pre_trade_check(signal, account, [])
-        if not approved: return 0.0
-        
         _, contracts, lev = self.calculate_position_size(signal, account.total_equity)
         notional = contracts * signal.entry_price
         return notional / lev
