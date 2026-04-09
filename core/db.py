@@ -4,7 +4,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
-from threading import Lock
+from threading import RLock
 
 from models.schemas import User, UserConfig, BotMode, Position, TradeSignal
 import config
@@ -28,7 +28,7 @@ class UserDB:
     def __init__(self, file_path: str = None, db_path: str = None):
         self.file_path = file_path or config.USER_DB_PATH
         self.db_path = db_path or config.DB_PATH
-        self._lock = Lock()
+        self._lock = RLock()
         self.users: Dict[str, User] = {}
         
         # Ensure data dir exists
