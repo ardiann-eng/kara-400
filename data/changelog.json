@@ -1,0 +1,44 @@
+{
+  "version": "6.2.0",
+  "release_id": "HL-400-MULTI-WALLET",
+  "date": "2026-04-09",
+  "features": [
+    "NEW: Secure Multi-User Multi-Wallet System 🛡️",
+    "SECURE: Fernet (AES) Encryption for Agent Secrets at-rest.",
+    "NEW: Integrated Onboarding flow for Agent Wallet setup.",
+    "FIX: Async-Native UserSession initialization (Eliminates login delays).",
+    "FEATURE: Agent Authorization verification via on-chain data check."
+  ],
+  "history": [
+    {
+      "version": "6.2.0",
+      "date": "2026-04-09",
+      "notes": "Multi-User & Multi-Wallet Support with Fernet Encryption."
+    },
+    {
+      "version": "6.1.1",
+      "date": "2026-04-09",
+      "notes": "Leverage bypass bug fix & Market-Aware Dynamic Leverage (Triple-Cap Logic)."
+    },
+    {
+      "version": "6.1.0",
+      "date": "2026-04-08",
+      "notes": "Scoring engine calibration & compounding-aware position sizing."
+    },
+    {
+      "version": "6.0.0",
+      "date": "2026-04-07",
+      "notes": "Dashboard synchronization stabilization & positions serialization fix."
+    },
+    {
+      "version": "5.1.0",
+      "date": "2026-04-07",
+      "notes": "Telegram UI refinements & Daily PnL 'Amnesia' fix."
+    },
+    {
+      "version": "5.0.0",
+      "date": "2026-04-06",
+      "notes": "Initial release of V6 Dashboard architecture with multi-user awareness."
+    }
+  ]
+}
