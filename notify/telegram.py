@@ -792,7 +792,22 @@ class KaraTelegram:
         import config
         from models.schemas import BotMode
         
-        acc = await session.get_account_state()
+        try:
+            acc = await session.get_account_state()
+        except Exception as e:
+            log.warning(f"Status error for {session.user.chat_id}: {e}")
+            text = (
+                f"🌸 <b>KARA System Status</b>\n\n"
+                f"⚠️ <b>Koneksi Wallet Bermasalah</b>\n"
+                f"KARA tidak bisa terhubung ke wallet utama/agent anda saat ini.\n\n"
+                f"📝 <b>Detail:</b> <code>{e}</code>\n\n"
+                f"Silakan cek koneksi internet atau status Hyperliquid API."
+            )
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data="status_refresh")
+            ]])
+            return text, keyboard
+
         risk_status = session.risk_mgr.status
 
         mode_str  = "PAPER" if acc.mode == BotMode.PAPER else "LIVE"

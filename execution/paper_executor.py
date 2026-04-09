@@ -78,7 +78,7 @@ class PaperExecutor:
     # ACCOUNT STATE
     # ──────────────────────────────────────────
 
-    def get_account_state(self) -> AccountState:
+    async def get_account_state(self) -> AccountState:
         unrealized = sum(
             p.pnl_unrealized for p in self._positions.values()
             if p.status == PositionStatus.OPEN

@@ -298,7 +298,8 @@ class ScoringEngine:
         score = max(0, min(score, 100))
 
         # 4. Build signal with scalper TP/SL
-        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, mtf_regime, session_bonus)
+        from models.schemas import MarketRegime
+        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, MarketRegime.NORMAL, session_bonus)
         signal.meta_pattern_key = pattern_key
         signal.meta_score_delta = meta_delta
         
