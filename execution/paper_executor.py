@@ -133,7 +133,7 @@ class PaperExecutor:
         Open a paper position from a confirmed signal.
         Simulates realistic fill (spread slippage).
         """
-        account = self.get_account_state()
+        account = await self.get_account_state()
 
         # Risk check
         approved, reason = self.risk.pre_trade_check(

@@ -86,7 +86,7 @@ async def get_overview():
     if _sessions:
         for chat_id, session in _sessions.items():
             try:
-                acc = session.get_account_state()
+                acc = await session.get_account_state()
                 total_positions += len(session.executor.open_positions)
                 global_pnl_today += acc.daily_pnl
             except Exception:
@@ -163,7 +163,7 @@ async def get_all_users():
 
         if session:
             try:
-                acc = session.get_account_state()
+                acc = await session.get_account_state()
                 open_positions = len(session.executor.open_positions)
                 current_equity = acc.total_equity
                 daily_pnl      = acc.daily_pnl
@@ -218,7 +218,7 @@ async def get_user_detail(chat_id: str):
 
     if session:
         try:
-            acc = session.get_account_state()
+            acc = await session.get_account_state()
             acc_data = {
                 "total_equity":   round(acc.total_equity, 2),
                 "wallet_balance": round(acc.wallet_balance, 2),
@@ -329,7 +329,7 @@ async def get_account(chat_id: str = None):
     session = get_active_session(chat_id)
     if session:
         try:
-            acc = session.get_account_state()
+            acc = await session.get_account_state()
             return {
                 "total_equity":   round(acc.total_equity, 2),
                 "wallet_balance": round(acc.wallet_balance, 2),
