@@ -547,10 +547,42 @@ class KaraTelegram:
             except BadRequest as e:
                 if "not modified" not in str(e).lower(): raise
                 await update.callback_query.answer("Sudah di layar ini")
-        else:
-            await update.effective_message.reply_html(text, reply_markup=reply_markup)
+    async def cmd_direct_set_config(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Unified handler for /setleverage 10 and /setmaxpos 5."""
+        if not self._is_authorized(update): return
         
-        return ConversationHandler.END
+        chat_id = str(update.effective_chat.id)
+        cmd = update.effective_message.text.split()[0].lower().replace("/", "")
+        args = ctx.args
+        
+        if not args:
+            await update.effective_message.reply_text(f"❌ Penggunaan: /{cmd} <angka>\nContoh: /{cmd} 10")
+            return
+
+        try:
+            val = int(args[0])
+            user = user_db.get_user(chat_id)
+            if not user: return
+
+            if "leverage" in cmd:
+                if not (1 <= val <= 30):
+                    await update.effective_message.reply_text("❌ Leverage harus antara 1 dan 30x.")
+                    return
+                user.config.max_leverage = val
+                field_name = "Leverage Maksimal"
+            else: # setmaxpos
+                if not (1 <= val <= 10):
+                    await update.effective_message.reply_text("❌ Maksimal posisi harus antara 1 dan 10.")
+                    return
+                user.config.max_concurrent_positions = val
+                field_name = "Maksimal Posisi"
+
+            user_db.update_user(user)
+            log.info(f"✅ User {chat_id} updated {field_name} to {val}")
+            await update.effective_message.reply_html(f"✅ <b>{field_name}</b> diperbarui menjadi: <code>{val}</code>")
+            
+        except (ValueError, IndexError):
+            await update.effective_message.reply_text(f"❌ Harap masukkan angka bulat (integer). Contoh: /{cmd} 5")
 
     async def cmd_set_config_value(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Process the text input for a specific config field."""

@@ -138,7 +138,17 @@ class UserDB:
                         updated_at REAL
                     )
                 """)
-                
+
+                # 9. Daily PnL History (For status charts)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS daily_pnl_history (
+                        chat_id    TEXT,
+                        timestamp  REAL,
+                        pnl_usd    REAL,
+                        PRIMARY KEY (chat_id, timestamp)
+                    )
+                """)
+
                 conn.commit()
                 # conn.close() # Connection pooling applied
                 log.info(f"✓ SQLite database initialized at {self.db_path}")

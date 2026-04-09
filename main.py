@@ -519,13 +519,16 @@ class KaraBot:
             await asyncio.sleep(1)
 
     async def get_session(self, chat_id: str) -> Optional[UserSession]:
-        if str(chat_id) not in self.sessions:
-            user = user_db.get_user(str(chat_id))
-            if user:
-                session = UserSession(user, mode_manager=self.mode_mgr, hl_client=self.hl_client)
-                await session.initialize()
-                self.sessions[str(chat_id)] = session
-        return self.sessions.get(str(chat_id))
+            if str(chat_id) not in self.sessions:
+                user = user_db.get_user(str(chat_id))
+                if user:
+                    session = UserSession(user, mode_manager=self.mode_mgr, hl_client=self.hl_client)
+                    try:
+                        await session.initialize()
+                    except Exception as e:
+                        log.error(f"❌ Failed to initialize session for {chat_id}: {e}")
+                    self.sessions[str(chat_id)] = session
+            return self.sessions.get(str(chat_id))
 
     async def _broadcast_heartbeat(self):
         """Dashboard heartbeat - handles real-time updates for the web UI."""
@@ -539,6 +542,9 @@ class KaraBot:
         try:
             # 1. Get current account state
             acc = await session.get_account_state()
+        except Exception as e:
+            # log.debug(f"Dashboard: Could not fetch state for session: {e}")
+            return # Skip heartbeat for this tick
             
             # 2. Broadcast account summary
             await broadcast({
@@ -832,7 +838,11 @@ class KaraBot:
 
         # 3. Apply updates to each user
         for chat_id, session in self.sessions.items():
-            acc = await session.get_account_state()
+            try:
+                acc = await session.get_account_state()
+            except Exception as e:
+                log.error(f"⚠️ [TRADE_LOOP] Could not fetch account state for {chat_id}: {e}")
+                continue # Skip this user for this cycle
             
             # ── Daily Reset Check ───────────────────────────────────────
             # BUG FIX: This must run even if there are no open positions!
