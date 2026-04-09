@@ -248,6 +248,17 @@ class KaraBot:
         # Connect to Hyperliquid
         await self.hl_client.connect()
 
+        # ── ONE-TIME HARD RESET ──────────────────────────────────────────
+        # If env var is set, wipe everything and start fresh.
+        if os.getenv("KARA_HARD_RESET", "").lower() == "true":
+            log.warning("🧹 [KARA_RESET] Detected KARA_HARD_RESET=true environment variable.")
+            log.warning("🧹 [KARA_RESET] Initiating full data wipe and balance reset...")
+            success = user_db.hard_reset_all_data()
+            if success:
+                log.info("✨ [KARA_RESET] Hard reset completed. Users can now start from fresh Rp1.000.000.")
+            else:
+                log.error("❌ [KARA_RESET] Hard reset failed! See logs for details.")
+
         # Load market list (always top volume as requested)
         log.info("Loading top volume markets...")
         self.watched_assets = await self.hl_client.get_top_volume_markets(top_n=100)
@@ -527,7 +538,7 @@ class KaraBot:
 
         try:
             # 1. Get current account state
-            acc = session.get_account_state()
+            acc = await session.get_account_state()
             
             # 2. Broadcast account summary
             await broadcast({
@@ -636,7 +647,7 @@ class KaraBot:
                 
                 for session in self.sessions.values():
                     try:
-                        acc = session.get_account_state()
+                        acc = await session.get_account_state()
                         global_equity += acc.total_equity
                         # Use daily_pnl to represent "total pnl all users (today)"
                         # so dashboard card/chart stays consistent and not flat at 0
@@ -726,7 +737,7 @@ class KaraBot:
             user_signal.localize_for_user(user_mode, atr_value=atr_value)
             self._apply_meta_score_delta(user_signal, user_mode)
             
-            acc = session.get_account_state()
+            acc = await session.get_account_state()
 
             # Full-auto only behavior requested:
             # - only process signals that meet auto threshold
@@ -778,7 +789,7 @@ class KaraBot:
 
         # Pre-check first so user gets the exact reason (cooldown, max pos, etc.)
         try:
-            acc = session.get_account_state()
+            acc = await session.get_account_state()
             approved, reason = session.risk_mgr.pre_trade_check(
                 signal, acc, session.executor.open_positions
             )
@@ -821,7 +832,7 @@ class KaraBot:
 
         # 3. Apply updates to each user
         for chat_id, session in self.sessions.items():
-            acc = session.get_account_state()
+            acc = await session.get_account_state()
             
             # ── Daily Reset Check ───────────────────────────────────────
             # BUG FIX: This must run even if there are no open positions!
@@ -864,14 +875,15 @@ class KaraBot:
                 await self.telegram.send_position_event(action, prices, target_chat_id=chat_id)
             
             # Save user state after positional update to persist PnL changes
-            session.user.paper_balance_usd = session.get_account_state().total_equity
+            acc_state = await session.get_account_state()
+            session.user.paper_balance_usd = acc_state.total_equity
             user_db.update_user(session.user)
 
     async def _send_hourly_summary(self):
         """Send hourly PnL summary to all users."""
         for chat_id, session in self.sessions.items():
             try:
-                acc = session.get_account_state()
+                acc = await session.get_account_state()
                 open_count = len(session.executor.open_positions)
                 await self.telegram.send_hourly_summary(acc, open_count, target_chat_id=chat_id)
             except Exception as e:

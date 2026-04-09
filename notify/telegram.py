@@ -35,6 +35,7 @@ log = logging.getLogger("kara.telegram")
 # ConversationHandler State
 WAITING_CODE = 1
 WAITING_CONFIG_VALUE = 2
+WAITING_MAIN_ADDRESS = 3
 
 DAILY_REPORT_TEMPLATE = """
 📊 <b>KARA DAILY INSIGHTS</b> 🌸
@@ -269,9 +270,21 @@ class KaraTelegram:
                 allow_reentry=True
             )
 
+            # Live Setup ConversationHandler
+            live_conv = ConversationHandler(
+                entry_points=[CommandHandler("live", self.cmd_live)],
+                states={
+                    WAITING_MAIN_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_main_address)],
+                },
+                fallbacks=[CommandHandler("cancel", self.cmd_cancel), CommandHandler("live", self.cmd_live)],
+                per_user=True,
+                allow_reentry=True
+            )
+
             handlers = [
                 access_conv,
                 settings_conv,
+                live_conv,
                 CommandHandler("help",     self.cmd_help),
                 CommandHandler("status",   self.cmd_status),
                 CommandHandler("pos",      self.cmd_positions),
@@ -282,7 +295,6 @@ class KaraTelegram:
                 CommandHandler("scalper",  self.cmd_scalper),
                 CommandHandler("standard", self.cmd_standard),
                 CommandHandler("paper",    self.cmd_paper),
-                CommandHandler("live",     self.cmd_live),
                 CommandHandler("settings", self.cmd_settings),
                 CommandHandler("signal",   self.cmd_signal),
                 
@@ -579,7 +591,50 @@ class KaraTelegram:
             await update.effective_message.reply_text("❌ Harap masukkan angka bulat (integer). Coba lagi:")
             return WAITING_CONFIG_VALUE
 
-    async def cmd_direct_set_config(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    async def handle_main_address(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Step 2 of Live Setup: Capture the Main Wallet Address from user reply."""
+        if not self._is_authorized(update): return ConversationHandler.END
+        
+        main_address = update.effective_message.text.strip()
+        chat_id = str(update.effective_chat.id)
+        
+        # Simple validation
+        if not (main_address.startswith("0x") and len(main_address) == 42):
+            await update.effective_message.reply_html("❌ Alamat tidak valid. Pastikan alamat dimulai dengan <code>0x</code> dan terdiri dari 42 karakter.")
+            return WAITING_MAIN_ADDRESS
+
+        user = user_db.get_user(chat_id)
+        if not user: return ConversationHandler.END
+        
+        # Save main address
+        user.hl_main_address = main_address
+        
+        # Now generate the Agent Wallet for them
+        import eth_account
+        acc = eth_account.Account.create()
+        address = acc.address
+        private_key = acc.key.hex()
+        
+        user.hl_agent_address = address
+        user.hl_agent_secret = private_key # Will be encrypted on save
+        user.wallet_authorized = False
+        user_db.update_user(user)
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Saya Sudah Authorize", callback_data="authorize_final")],
+            [InlineKeyboardButton("❌ Batal / Ganti Wallet", callback_data="close_settings")]
+        ])
+        
+        from notify.telegram_templates import AGENT_WALLET_CREATED_TEMPLATE
+        await update.effective_message.reply_html(
+            AGENT_WALLET_CREATED_TEMPLATE.format(
+                address=address,
+                private_key=private_key
+            ),
+            reply_markup=keyboard,
+            disable_web_page_preview=True
+        )
+        return ConversationHandler.END
         """Handle direct commands like /setleverage 20 or /setmaxpos 3."""
         if not self._is_authorized(update): return
         
@@ -679,27 +734,12 @@ class KaraTelegram:
             self.bot_app.sessions.pop(chat_id, None)
             await self.bot_app.get_session(chat_id)
             
+        await self.bot_app.get_session(chat_id)
+        
         await update.effective_message.reply_html(
             "🌸 <b>Kembali ke Paper Mode!</b>\n\n"
             "Saldo virtual Anda telah direset kembali menjadi <b>Rp1.000.000</b>. Mari kita belajar hasilkan profit lagi!"
         )
-
-    async def cmd_live(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update): return
-        if self._is_throttled(str(update.effective_chat.id), threshold=2, action_key="live"): return
-        
-        text = (
-            f"{RISK_WARNING_TEXT}\n"
-            "⚡ <b>UPGRADE KE LIVE MODE</b> ⚡\n\n"
-            "KARA dapat menggunakan <b>Agent Wallet (L1)</b> di Hyperliquid, sehingga kamu <b>TIDAK PERLU</b> memberikan Private Key dompet utamamu ke bot ini.\n\n"
-            "Ikuti langkah ini:\n"
-            "1. Buka <a href='https://app.hyperliquid.xyz/API'>Halaman API Hyperliquid</a>\n"
-            "2. Hubungkan wallet utamamu.\n"
-            "3. Buat dan izinkan Agent Wallet baru.\n"
-            "4. Kirimkan alamat agen dan secret key ke bot melalui DM ke admin. (Otomatisasi akan datang segera!)\n\n"
-            "<i>Untuk sekarang API key setup harus via enviroment. Bot is currently under construction.</i>"
-        )
-        await update.effective_message.reply_html(text)
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
@@ -709,18 +749,18 @@ class KaraTelegram:
         if not session: return await self.cmd_start(update, ctx)
         
         try:
-            text, keyboard = self._get_status_content(session)
+            text, keyboard = await self._get_status_content(session)
             await update.effective_message.reply_html(text, reply_markup=keyboard)
         except Exception as e:
             log.error(f"Status error: {e}", exc_info=True)
             await update.effective_message.reply_text(f"❌ Error: {e}")
 
-    def _get_status_content(self, session) -> Tuple[str, InlineKeyboardMarkup]:
+    async def _get_status_content(self, session) -> Tuple[str, InlineKeyboardMarkup]:
         """Centralized status message and keyboard generator to prevent refresh bugs."""
         import config
         from models.schemas import BotMode
         
-        acc = session.get_account_state()
+        acc = await session.get_account_state()
         risk_status = session.risk_mgr.status
 
         mode_str  = "PAPER" if acc.mode == BotMode.PAPER else "LIVE"
@@ -926,7 +966,7 @@ class KaraTelegram:
         if not session: return await self.cmd_start(update, ctx)
         
         try:
-            acc = session.get_account_state()
+            acc = await session.get_account_state()
             daily_sign = "+" if acc.daily_pnl >= 0 else ""
             mode_str   = "PAPER 📝" if acc.mode.value == "paper" else "LIVE ⚡"
 
@@ -957,7 +997,7 @@ class KaraTelegram:
         session = await self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return
         
-        acc = session.get_account_state()
+        acc = await session.get_account_state()
         pos_count = len(session.executor.open_positions)
         await self.send_daily_report(acc, pos_count, target_chat_id=chat_id)
 
@@ -1193,12 +1233,12 @@ class KaraTelegram:
 
     async def cmd_live(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Start the Live Mode setup with risk warning."""
-        if not self._is_authorized(update): return
-        if self._is_throttled(str(update.effective_chat.id), threshold=5, action_key="live"): return
+        if not self._is_authorized(update): return ConversationHandler.END
+        if self._is_throttled(str(update.effective_chat.id), threshold=5, action_key="live"): return ConversationHandler.END
         
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🚀 Lanjut Setup", callback_data="confirm_live"),
+                InlineKeyboardButton("🚀 Lanjut Setup", callback_data="setup_live_start"),
                 InlineKeyboardButton("❌ Batal", callback_data="close_settings")
             ]
         ])
@@ -1207,6 +1247,7 @@ class KaraTelegram:
             LIVE_SETUP_RISK_WARNING,
             reply_markup=keyboard
         )
+        return WAITING_MAIN_ADDRESS
 
     async def cmd_scalper(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
@@ -1551,7 +1592,7 @@ class KaraTelegram:
             try:
                 # Removed: edit_message_text("⏳ Refreshing data...") to avoid disruptive UI flicker
                 
-                text, keyboard = self._get_status_content(session)
+                text, keyboard = await self._get_status_content(session)
                 await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
             except BadRequest as e:
                 if "not modified" not in str(e).lower(): 
@@ -1616,63 +1657,53 @@ class KaraTelegram:
             return
 
         # ── LIVE SETUP FLOW ──
-        if query.data == "confirm_live":
+        if query.data == "setup_live_start":
             await query.answer()
-            chat_id = str(query.message.chat_id)
-            user = user_db.get_user(chat_id)
-            
-            # Generate Agent Wallet
-            acc = eth_account.Account.create()
-            address = acc.address
-            private_key = acc.key.hex()
-            
-            # Save to user (DB will encrypt automatically on save)
-            user.hl_agent_address = address
-            user.hl_agent_secret = private_key
-            user.wallet_authorized = False
-            user_db.update_user(user)
-            
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Saya Sudah Authorize", callback_data="authorize_final")]
-            ])
-            
             await query.edit_message_text(
-                AGENT_WALLET_CREATED_TEMPLATE.format(
-                    address=address,
-                    private_key=private_key
-                ),
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard,
-                disable_web_page_preview=True
+                "🛡️ <b>LANGKAH 1: IDENTITAS WALLET</b>\n\n"
+                "KARA perlu tahu alamat wallet utama bosku untuk memverifikasi izin Agent nantinya.\n\n"
+                "Silakan <b>BALAS</b> pesan ini dengan Alamat Wallet Utama (Public Address) Hyperliquid bosku.\n"
+                "<i>Contoh: 0x123...abc</i>",
+                parse_mode=ParseMode.HTML
             )
+            return WAITING_MAIN_ADDRESS
 
         elif query.data == "authorize_final":
-            await query.answer("Sedang memverifikasi...", show_alert=False)
+            await query.answer("Sedang memverifikasi koneksi...", show_alert=False)
             chat_id = str(query.message.chat_id)
             user = user_db.get_user(chat_id)
             
-            if not user or not user.hl_agent_secret:
-                await query.edit_message_text("❌ Terjadi kesalahan. Silakan ketik /live lagi.")
+            if not user or not user.hl_agent_address or not user.hl_main_address:
+                await query.edit_message_text("❌ Data tidak lengkap. Silakan ketik /live lagi.")
                 return
 
-            # Test connection
+            # Robust verification
             try:
                 from data.hyperliquid_client import HyperliquidClient
-                test_client = HyperliquidClient(
-                    wallet_address=user.hl_agent_address,
-                    private_key=user.hl_agent_secret
-                )
-                await test_client.connect()
+                verify_client = HyperliquidClient() # Use global config-based client for discovery
+                await verify_client.connect()
                 
-                # Try to fetch user state
-                state = await test_client.get_user_state()
-                if not state:
-                    raise Exception("Gagal mengambil data akun. Pastikan sudah Authorize di HL.")
+                is_ok = await verify_client.verify_agent_authorization(
+                    user.hl_main_address, 
+                    user.hl_agent_address
+                )
+                
+                if not is_ok:
+                    await query.message.reply_html(
+                        f"❌ <b>Verifikasi Gagal!</b>\n\n"
+                        f"KARA belum mendeteksi alamat agent ini terhubung ke wallet utama bosku.\n\n"
+                        f"• Wallet Utama: <code>{user.hl_main_address}</code>\n"
+                        f"• Agent Wallet: <code>{user.hl_agent_address}</code>\n\n"
+                        f"Pastikan bosku sudah klik <b>'Authorize'</b> di dashboard Hyperliquid untuk alamat agent di atas."
+                    )
+                    return
                 
                 # Connection Success!
                 user.wallet_authorized = True
                 user.config.bot_mode = BotMode.LIVE
                 user_db.update_user(user)
+                
+                await query.edit_message_text("✅ <b>VERIFIKASI BERHASIL!</b>\n\nAgent Wallet telah terhubung secara sah ke Wallet Utama bosku. KARA sekarang berjalan dalam <b>LIVE MODE</b>. 🚀")
                 
                 # Re-initialize user session in main app
                 if self.bot_app:
@@ -2117,7 +2148,18 @@ class KaraTelegram:
 
     def _get_changelog_text(self, version: str, release_tag: str = "", extra_notes: Optional[list[str]] = None) -> str:
         """KARA dynamic update card with friendly style ✨."""
-        bullets = self._build_dynamic_update_items(version=version)
+        if version == "6.2.0":
+            bullets = [
+                "<b>Arsitektur Multi-User</b>: KARA kini mendukung banyak pengguna dengan dompet terpisah secara sirkular.",
+                "<b>Secure Agent Wallet</b>: Sistem L1 Agent yang terverifikasi on-chain untuk keamanan maksimal.",
+                "<b>Enkripsi Tingkat Tinggi (Fernet)</b>: Semua private key agen kini dienkripsi secara militer di database.",
+                "<b>Locked-Down Onboarding</b>: Alur aktivasi Live Mode yang jauh lebih aman dan teratur.",
+                "<b>Smart Multi-Step Verification</b>: Verifikasi izin agen langsung ke blockchain Hyperliquid.",
+                "<b>Maintenance Script</b>: Fitur hard-reset saldo untuk simulasi ulang yang bersih."
+            ]
+        else:
+            bullets = self._build_dynamic_update_items(version=version)
+
         if extra_notes:
             bullets = list(extra_notes) + bullets
         items = "\n".join([f"• {b}" for b in bullets]) if bullets else "• Perbaikan stabilitas dan optimasi sistem."

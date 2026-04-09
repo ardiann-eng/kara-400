@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple, List
 import uuid
 
+import config
 from config import SIGNAL, RISK
 from models.schemas import (
     TradeSignal, ScoreBreakdown, SignalStrength, Side, MarketRegime,
@@ -71,14 +72,9 @@ class ScoringEngine:
 
         # OI history for change calculation: asset -> [(ts, oi_usd)]
         from core.db import user_db
-        self._oi_snapshots: Dict[str, list] = user_db.load_all_oi_snapshots()
+        self._oi_snapshots = user_db.load_all_oi_snapshots()
         if self._oi_snapshots:
             log.info(f"💾 Loaded {len(self._oi_snapshots)} cached OI snapshot histories from DB.")
-
-    def dump_oi_state(self):
-        """Persist OI snapshots to database to prevent amnesia on restart."""
-        from core.db import user_db
-        user_db.save_oi_snapshots_batch(self._oi_snapshots)
 
         # Volatility cache: asset -> (ts, regime, realized_vol, trend)
         self._vol_cache: Dict[str, tuple] = {}
@@ -89,6 +85,11 @@ class ScoringEngine:
 
         # MTF Trend Cache: asset -> (timestamp, trend_string)
         self._mtf_cache: Dict[str, Tuple[float, str]] = {}
+
+    def dump_oi_state(self):
+        """Persist OI snapshots to database to prevent amnesia on restart."""
+        from core.db import user_db
+        user_db.save_oi_snapshots_batch(self._oi_snapshots)
 
     # ──────────────────────────────────────────
     # PUBLIC
@@ -306,7 +307,6 @@ class ScoringEngine:
 
     async def _fetch_scalper_mtf_candles(self, asset: str) -> list:
         """Fetch higher-timeframe candles for scalper confirmation."""
-        import config
         candles_15m = []
         try:
             async with self.candle_sem:

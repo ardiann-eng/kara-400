@@ -367,6 +367,7 @@ class User(BaseModel):
     is_active:         bool = True         # Allow disabling users
     
     # Live mode auth
+    hl_main_address:   Optional[str] = None
     hl_agent_address:  Optional[str] = None
     hl_agent_secret:   Optional[str] = None
     wallet_authorized: bool = False

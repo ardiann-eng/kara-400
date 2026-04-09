@@ -145,6 +145,45 @@ class UserDB:
             except Exception as e:
                 log.error(f"Failed to init SQLite: {e}")
 
+    def hard_reset_all_data(self):
+        """Wipes all positions, pnl history, and resets all user balances to default."""
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                
+                # 1. Clear SQLite tables
+                tables_to_clear = [
+                    "paper_positions",
+                    "paper_state",
+                    "daily_pnl_history"
+                ]
+                
+                reset_stats = {}
+                for table in tables_to_clear:
+                    cursor.execute(f"DELETE FROM {table}")
+                    reset_stats[table] = cursor.rowcount
+                
+                conn.commit()
+                log.info(f"🛡️ [KARA_RESET] SQLite wipe complete: {reset_stats}")
+
+                # 2. Reset users.json info
+                reset_count = 0
+                for chat_id, user in self.users.items():
+                    user.paper_balance_usd = config.PAPER_BALANCE_USD
+                    # We don't wipe hl_agent_address/secret so they don't have to re-setup wallets,
+                    # but we ensure the 'trading state' is fresh.
+                    user.wallet_authorized = False # Forces them to click 'Authorize' check again for safety
+                    reset_count += 1
+                
+                self.save()
+                log.info(f"🛡️ [KARA_RESET] JSON wipe complete: {reset_count} users reset to ${config.PAPER_BALANCE_USD:.2f}")
+                
+                return True
+            except Exception as e:
+                log.error(f"❌ [KARA_RESET] Hard reset failed: {e}")
+                return False
+
     # ── OI SNAPSHOTS ──────────────────────────────────────────────────
 
     def save_oi_snapshots_batch(self, snapshots_dict: Dict[str, list]):

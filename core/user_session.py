@@ -47,5 +47,5 @@ class UserSession:
             await self.user_client.connect()
             log.info(f"✓ UserSession {self.user.chat_id}: Live client connected.")
 
-    def get_account_state(self):
-        return self.executor.get_account_state()
+    async def get_account_state(self):
+        return await self.executor.get_account_state()

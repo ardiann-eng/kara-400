@@ -14,7 +14,7 @@ load_dotenv()
 # ──────────────────────────────────────────────
 # ENVIRONMENT
 # ──────────────────────────────────────────────
-KARA_VERSION = "6.1.1"  # Current Release Version
+KARA_VERSION = "6.2.0"  # Current Release Version
 DATA_SOURCE = os.getenv("KARA_DATA_SOURCE", "mainnet").lower() # "mainnet" | "testnet"
 TRADE_MODE  = os.getenv("KARA_TRADE_MODE", "paper").lower()    # "paper" | "live"
 FULL_AUTO   = True  # Force auto execution mode as requested

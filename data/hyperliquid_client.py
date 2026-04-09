@@ -308,16 +308,19 @@ class HyperliquidClient:
             payload = {"type": "metaAndAssetCtxs"}
             resp = await self._http_data.post("/info", json=payload)
             data = resp.json()
+            if not isinstance(data, list) or len(data) < 2:
+                log.error(f"get_top_volume_markets: Invalid response structure: {data}")
+                return []
             
-            universe = data[0].get("universe", []) if isinstance(data[0], dict) else data[0]
-            contexts = data[1]
+            universe = data[0].get("universe", []) if isinstance(data[0], dict) else []
+            contexts = data[1] if isinstance(data[1], list) else []
             
             markets = []
             for i, ctx in enumerate(contexts):
                 if i < len(universe):
                     name = universe[i].get("name")
                     if name:
-                        vol = float(ctx.get("dayNtlVlm", 0))
+                        vol = float(ctx.get("dayNtlVlm") or 0)
                         if vol > 0:
                             markets.append((name, vol))
                             
@@ -523,9 +526,9 @@ class HyperliquidClient:
 
         return FundingData(
             asset=asset,
-            funding_rate=float(ctx.get("funding", 0)),
-            premium=float(ctx.get("premium", 0)),
-            predicted_rate=float(ctx.get("predictedFunding", 0)),
+            funding_rate=float(ctx.get("funding") or 0),
+            premium=float(ctx.get("premium") or 0),
+            predicted_rate=float(ctx.get("predictedFunding") or 0),
             hourly_trend=[]
         )
 
@@ -561,15 +564,13 @@ class HyperliquidClient:
             # Rough approximation: vol-to-OI ratio indicates activity level
             # Clamp to ±50% to avoid extreme outliers from thinly-traded assets
             oi_change_24h_proxy = min(day_vol / oi_usd - 1.0, 0.50)
-        else:
-            oi_change_24h_proxy = 0.0
-
         return OIData(
             asset=asset,
-            open_interest=oi_usd,
-            oi_change_pct=0.0,          # computed by scoring engine from live snapshots
-            oi_change_24h=oi_change_24h_proxy,
-            oracle_price=float(ctx.get("oraclePx", mark))
+            open_interest=float(ctx.get("openInterest") or 0),
+            oi_change_pct=0.0,  # Calculated elsewhere
+            oi_change_24h=0.0,
+            volume_24h_usd=float(ctx.get("dayNtlVlm") or 0),
+            oracle_price=float(ctx.get("oraclePx") or 0)
         )
 
     async def get_orderbook(self, asset: str, depth: int = 20) -> OrderbookSnapshot:
@@ -698,6 +699,29 @@ class HyperliquidClient:
         except Exception as e:
             log.error(f"get_user_state: {e}")
             return {}
+
+    async def verify_agent_authorization(self, main_address: str, target_agent: str) -> bool:
+        """
+        Verify if 'target_agent' is the authorized agent for 'main_address'.
+        Target agent must be lowercase for comparison.
+        """
+        try:
+            await self._ensure_info()
+            if not self._info:
+                return False
+            
+            state = await self._run(self._info.user_state, main_address)
+            if not state:
+                return False
+            
+            authorized_agent = state.get("agentAddress")
+            if not authorized_agent:
+                return False
+            
+            return authorized_agent.lower() == target_agent.lower()
+        except Exception as e:
+            log.error(f"verify_agent_authorization failed: {e}")
+            return False
 
     # ──────────────────────────────────────────
     # ORDER EXECUTION
