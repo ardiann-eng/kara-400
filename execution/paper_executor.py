@@ -62,7 +62,7 @@ class PaperExecutor:
         if state:
             self._balance = state["balance"]
             self._available = state["balance"]
-            self._daily_start_balance = state["balance"]
+            # Remove direct overwrite of _daily_start_balance to use RiskManager instead
             self._peak_balance = max(state["balance"], state.get("equity", 0))
             log.info(f" [PAPER] Restored balance from DB: {format_usd(self._balance)}")
         
@@ -95,8 +95,10 @@ class PaperExecutor:
         )
         
         # Daily PnL includes both realized trades today AND current floating profit
-        daily_pnl = (total_equity - self._daily_start_balance)
-        daily_pnl_pct = daily_pnl / max(self._daily_start_balance, 1)
+        # BASELINE: Use RiskManager's start-of-day balance (persists across restarts)
+        start_bal = self.risk.status.get("session_start_balance", self._daily_start_balance)
+        daily_pnl = (total_equity - start_bal)
+        daily_pnl_pct = daily_pnl / max(start_bal, 1)
 
         return AccountState(
             total_equity=round(total_equity, 2),
@@ -141,19 +143,19 @@ class PaperExecutor:
             log.warning(f" Trade blocked: {reason}")
             return None
 
-        # Calculate size
-        size_usd, contracts = self.risk.calculate_position_size(
+        # Calculate size & leverage
+        size_usd, contracts, actual_lev = self.risk.calculate_position_size(
             signal, self._balance
         )
-        margin = size_usd * signal.suggested_leverage / signal.suggested_leverage
+        
         # Isolated margin = notional / leverage
-        margin = (contracts * signal.entry_price) / signal.suggested_leverage
+        margin = (contracts * signal.entry_price) / actual_lev
 
         # Simulate fill (add small spread)
         fill_price = self._simulate_fill(signal.entry_price, signal.side)
 
         # Build position
-        liq_price = self._calculate_liquidation_price(fill_price, signal.side, signal.suggested_leverage)
+        liq_price = self._calculate_liquidation_price(fill_price, signal.side, actual_lev)
 
         pos = Position(
             position_id=gen_id("POS"),
@@ -162,7 +164,7 @@ class PaperExecutor:
             entry_price=fill_price,
             size_initial=contracts,
             size_current=contracts,
-            leverage=signal.suggested_leverage,
+            leverage=actual_lev,
             margin_usd=margin,
             stop_loss=signal.stop_loss,
             tp1=signal.tp1,
@@ -172,6 +174,7 @@ class PaperExecutor:
             liquidation_price=liq_price,
             signal_id=signal.signal_id,
             is_paper=True,
+            entry_score=signal.score,
         )
 
         # Update balances
@@ -192,7 +195,8 @@ class PaperExecutor:
             "asset":    signal.asset,
             "side":     signal.side.value,
             "price":    fill_price,
-            "size_usd": size_usd,
+            "size":     contracts,
+            "notional": contracts * fill_price,
             "margin":   margin,
             "score":    signal.score,
             "timestamp":utcnow(),
@@ -285,6 +289,15 @@ class PaperExecutor:
         total_pnl = pos.pnl_realized
         self.risk.record_pnl(total_pnl, self._balance)
 
+        # Meta-scoring feedback loop: update pattern outcome from closed trade.
+        try:
+            if pos.signal_id:
+                sig = user_db.get_signal_by_id(pos.signal_id)
+                if sig and getattr(sig, "meta_pattern_key", None):
+                    user_db.update_meta_pattern_outcome(sig.meta_pattern_key, total_pnl)
+        except Exception as e:
+            log.debug(f"[META] Failed updating pattern outcome for {pos.signal_id}: {e}")
+
         log_data = {
             "type":      "close",
             "pos_id":    position_id,
@@ -292,8 +305,11 @@ class PaperExecutor:
             "side":      pos.side.value,
             "reason":    reason,
             "exit_price":fill_price,
+            "size":      pos.size_initial,
+            "notional":  pos.size_initial * pos.entry_price,
             "pnl":       total_pnl,
             "pnl_pct":   pos.floating_pct(fill_price),
+            "score":     pos.entry_score,
             "timestamp": utcnow(),
         }
         self._trade_log.append(log_data)
@@ -365,7 +381,7 @@ class PaperExecutor:
             pos.tp2_hit = True
             log.info(f" [PAPER] TP2 hit on {pos.asset}")
 
-        elif action["action"] in ("trailing_stop", "stop_loss"):
+        elif action["action"] in ("trailing_stop", "stop_loss", "time_exit"):
             # Full close
             await self.close_position(
                 pos.position_id, current_price, action["action"]

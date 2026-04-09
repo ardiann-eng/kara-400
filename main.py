@@ -14,6 +14,7 @@ import logging
 import sys
 import os
 import signal
+import uuid
 from typing import Dict, List, Optional, Any
 # Ensure root directory is in path for module discovery (Railway/Docker Fix)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -97,6 +98,139 @@ class KaraBot:
 
         self._running   = False
 
+    def _enforce_locked_score_thresholds(self):
+        """Force fixed score thresholds for all users/modes."""
+        changed = 0
+        for u in user_db.get_all_users():
+            cfg = u.config
+            dirty = False
+            if cfg.std_min_score_to_signal != 58:
+                cfg.std_min_score_to_signal = 58
+                dirty = True
+            if cfg.std_min_score_to_auto_trade != 65:
+                cfg.std_min_score_to_auto_trade = 65
+                dirty = True
+            if cfg.scl_min_score_to_signal != 50:
+                cfg.scl_min_score_to_signal = 50
+                dirty = True
+            if cfg.scl_min_score_to_auto_trade != 57:
+                cfg.scl_min_score_to_auto_trade = 57
+                dirty = True
+            if dirty:
+                user_db.update_user(u)
+                changed += 1
+        if changed:
+            log.info(f"🔒 Locked score thresholds enforced for {changed} user(s).")
+
+    def _run_one_time_release_reset(self, release_tag: str) -> bool:
+        """
+        One-time reset per release_tag:
+        - clear all open paper positions/state/risk state
+        - reset user paper balance to default
+        """
+        marker_path = os.path.join(config.STORAGE_DIR, f"release_reset_{release_tag}.done")
+        if os.path.exists(marker_path):
+            return False
+
+        users_to_reset = user_db.get_all_users()
+        if not users_to_reset:
+            return False
+
+        reset_count = 0
+        for u in users_to_reset:
+            try:
+                user_db.clear_paper_positions(u.chat_id)
+                user_db.clear_paper_state(u.chat_id)
+                user_db.clear_risk_state(u.chat_id)
+                u.paper_balance_usd = config.PAPER_BALANCE_USD
+                user_db.update_user(u)
+                reset_count += 1
+            except Exception as e:
+                log.error(f"Failed one-time reset for {u.chat_id}: {e}")
+
+        if reset_count:
+            try:
+                with open(marker_path, "w", encoding="utf-8") as f:
+                    f.write(utcnow().isoformat())
+            except Exception as e:
+                log.warning(f"Could not write release reset marker: {e}")
+            log.warning(f"🧹 One-time release reset applied for {reset_count} user(s) [{release_tag}]")
+            return True
+        return False
+
+    def _bucket_component(self, x: float) -> str:
+        if x >= 10:
+            return "pos"
+        if x <= -10:
+            return "neg"
+        return "neu"
+
+    def _build_meta_pattern_key(self, signal, user_mode: str) -> str:
+        bd = getattr(signal, "breakdown", None)
+        oi = float(getattr(bd, "oi_funding_score", 0) or 0)
+        ob = float(getattr(bd, "orderbook_score", 0) or 0)
+        liq = float(getattr(bd, "liquidation_score", 0) or 0)
+        ses = int(getattr(bd, "session_bonus", 0) or 0)
+        regime = getattr(getattr(signal, "regime", None), "value", "unknown")
+        side = getattr(getattr(signal, "side", None), "value", "long")
+
+        if ses >= int(config.SIGNAL.ny_session_bonus):
+            ses_tag = "ny"
+        elif ses > 0:
+            ses_tag = "lon"
+        elif ses < 0:
+            ses_tag = "asia"
+        else:
+            ses_tag = "off"
+
+        return (
+            f"m:{user_mode}|r:{regime}|s:{ses_tag}|"
+            f"oi:{self._bucket_component(oi)}|"
+            f"ob:{self._bucket_component(ob)}|"
+            f"liq:{self._bucket_component(liq)}|"
+            f"side:{side}"
+        )
+
+    def _apply_meta_score_delta(self, signal, user_mode: str) -> int:
+        """
+        Boost/penalize score from rolling pattern winrate.
+        Conservative and bounded to avoid overfitting.
+        """
+        key = self._build_meta_pattern_key(signal, user_mode)
+        signal.meta_pattern_key = key
+        stats = user_db.get_meta_pattern_stats(key)
+        if not stats:
+            signal.meta_score_delta = 0
+            return 0
+
+        samples = int(stats.get("samples", 0))
+        winrate = float(stats.get("winrate_ema", 0.5))
+        pnl_ema = float(stats.get("pnl_ema", 0.0))
+
+        # Need enough observations before affecting score materially.
+        if samples < 8:
+            signal.meta_score_delta = 0
+            return 0
+
+        # Core signal from winrate around 50%; bounded to [-6, +6].
+        delta = int(round((winrate - 0.5) * 20))
+        if pnl_ema < 0:
+            delta -= 1
+        elif pnl_ema > 0:
+            delta += 1
+        delta = max(-6, min(6, delta))
+
+        signal.meta_score_delta = delta
+        signal.score = max(0, min(100, int(signal.score + delta)))
+
+        # Keep explanation visible in saved signal detail.
+        if getattr(signal, "breakdown", None) and hasattr(signal.breakdown, "warnings"):
+            signal.breakdown.warnings.append(
+                f"Meta-score delta {delta:+d} (wr={winrate:.2f}, n={samples})"
+            )
+        return delta
+
+
     # ──────────────────────────────────────────
     # STARTUP
     # ──────────────────────────────────────────
@@ -125,7 +259,55 @@ class KaraBot:
         # Setup WebSocket subscriptions
         await self._setup_websocket()
 
+        # Release tag used for one-time actions and update notification
+        current_version = config.KARA_VERSION
+        
+        # ── AI-DRIVEN CHANGELOG DISCOVERY ──────────────────────────────
+        changelog_data = {}
+        changelog_path = os.path.join(os.getcwd(), "data", "changelog.json")
+        if os.path.exists(changelog_path):
+            try:
+                import json
+                with open(changelog_path, 'r', encoding='utf-8') as f:
+                    changelog_data = json.load(f)
+            except Exception as e:
+                log.warning(f"Could not load AI changelog: {e}")
+        
+        if changelog_data.get("version"):
+            current_version = changelog_data["version"]
+            
+        deploy_id = (
+            os.getenv("RAILWAY_DEPLOYMENT_ID", "") or
+            os.getenv("RAILWAY_RUN_ID", "") or
+            os.getenv("RENDER_DEPLOY_ID", "")
+        ).strip()
+        deploy_sha = (
+            os.getenv("RAILWAY_GIT_COMMIT_SHA", "") or
+            os.getenv("GIT_COMMIT_SHA", "") or
+            os.getenv("RENDER_GIT_COMMIT", "") or
+            changelog_data.get("release_id", "")
+        ).strip()
+        
+        short_sha = deploy_sha[:8] if deploy_sha else ""
+        short_dep = deploy_id[:8] if deploy_id else ""
+        
+        if short_dep:
+            release_tag = f"{current_version}-d{short_dep}"
+        elif short_sha:
+            release_tag = f"{current_version}-{short_sha}"
+        else:
+            release_tag = current_version
+
+        users_to_update = [
+            u for u in user_db.users.values()
+            if u.is_authorized and u.last_seen_version != release_tag
+        ]
+
+        # Reset saldo/posisi on deploy is disabled by user request.
+        did_release_reset = False
+
         # Initialize User Sessions from DB
+        self._enforce_locked_score_thresholds()
         for u in user_db.get_all_users():
             session = UserSession(u, mode_manager=self.mode_mgr, hl_client=self.hl_client)
             if hasattr(session.executor, 'load_from_db'):
@@ -143,6 +325,39 @@ class KaraBot:
             log.warning(f"  Telegram startup failed: {e}")
             log.warning("   Bot will continue without Telegram notifications")
 
+        # ── Update Notification System ────────────────────────────────
+        if self.telegram and self.telegram._bot_started:
+            # Prefer Telegram active/authorized chats so notifications are sent
+            # even if DB authorization flags are stale.
+            target_chat_ids = list(self.telegram._authorized_chat_ids)
+            if not target_chat_ids:
+                target_chat_ids = [u.chat_id for u in users_to_update]
+
+            if target_chat_ids:
+                log.info(
+                    f"📢 Sending update notification to {len(target_chat_ids)} chat(s) "
+                    f"(release={release_tag}, deploy_id={'yes' if short_dep else 'no'}, sha={'yes' if short_sha else 'no'})"
+                )
+                for chat_id in target_chat_ids:
+                    extra_notes = []
+                    if did_release_reset:
+                        extra_notes.append(
+                            "Reset khusus update ini: semua posisi sebelumnya dikosongkan dan saldo dikembalikan ke saldo normal."
+                        )
+                    success = await self.telegram.send_update_notification(
+                        chat_id,
+                        release_tag=release_tag,
+                        extra_notes=extra_notes
+                    )
+                    if success:
+                        u = user_db.get_user(chat_id)
+                        if u:
+                            u.last_seen_version = release_tag
+                            user_db.update_user(u)
+                    await asyncio.sleep(0.1) # Rate limit safety
+            else:
+                log.info(f"📭 No target chats for update notification ({release_tag})")
+
         # ── Calibration Check ─────────────────────────────────────────
         try:
             from models.schemas import MarketRegime
@@ -154,10 +369,10 @@ class KaraBot:
                 "oi_change_1h": 0.008,
                 "imbalance": 0.52,
                 "vwap_dev": -0.0025,
-                "session_bonus": SIGNAL.ny_session_bonus + SIGNAL.london_session_bonus,
+                "session_bonus": int(SIGNAL.ny_session_bonus) + int(SIGNAL.london_session_bonus),
                 "regime": MarketRegime.TRENDING
             })
-            log.info(f"   Realistic params → Score: {realistic['score']}/100 ✓ (Expected: 45-65)")
+            log.info(f"   Realistic params → Score: {realistic['score']}/100 ✓ (Expected: 56-75)")
             
             # 2. Strong
             strong = await self.scorer.simulate_score({
@@ -166,18 +381,21 @@ class KaraBot:
                 "cascade_risk": 0.4,
                 "imbalance": 0.65,
                 "vwap_dev": -0.004,
-                "session_bonus": SIGNAL.ny_session_bonus,
+                "session_bonus": int(SIGNAL.ny_session_bonus),
                 "regime": MarketRegime.TRENDING,
                 "trend_pct": 0.03  # Added to trigger the 1.1x trend multiplier
             })
-            log.info(f"   Strong signal    → Score: {strong['score']}/100 ✓ (Expected: 72-85)")
+            log.info(f"   Strong signal    → Score: {strong['score']}/100 ✓ (Expected: 78-95)")
         except Exception as e:
             log.error(f"   Calibration test failed: {e}")
 
         self._running = True
 
+        # Start Snapshot Loop (Phase 2: History Tracking)
+        asyncio.create_task(self._snapshot_loop())
+
         # Greeting log
-        mode_emoji = "" if MODE == "paper" else ""
+        mode_emoji = "🧪" if config.TRADE_MODE == "paper" else "💰"
         log.info(f"{mode_emoji} KARA is ready! Starting trading loop...")
 
     # ──────────────────────────────────────────
@@ -197,18 +415,47 @@ class KaraBot:
 
         await self.ws_client.start()
 
-        # Subscribe to each watched asset
-        for asset in self.watched_assets:
+        # Subscribe to each watched asset — throttled to avoid HL WS rate limits.
+        # Sending 100 subscriptions instantly causes Hyperliquid to silently drop many.
+        # Strategy: 50ms between each asset, global feeds subscribed last.
+        SUBSCRIBE_DELAY_S = 0.05   # 50ms per asset = ~5s total for 100 assets
+
+        log.info(f"📡 WS subscribing to {len(self.watched_assets)} assets (throttled {int(SUBSCRIBE_DELAY_S*1000)}ms/asset)...")
+        for i, asset in enumerate(self.watched_assets):
             await self.ws_client.subscribe_orderbook(asset)
             await self.ws_client.subscribe_trades(asset)
             await self.ws_client.subscribe_funding(asset)
+            # Throttle every asset to spread load across Hyperliquid's WS server
+            await asyncio.sleep(SUBSCRIBE_DELAY_S)
+            # Progress milestone every 25 assets
+            if (i + 1) % 25 == 0:
+                log.info(f"   📡 WS progress: {i+1}/{len(self.watched_assets)} assets subscribed")
 
         await self.ws_client.subscribe_liquidations()
 
         if config.WALLET_ADDRESS:
             await self.ws_client.subscribe_user_events(config.WALLET_ADDRESS)
 
-        log.info(f" WS subscribed: {', '.join(self.watched_assets)}")
+        log.info(f"✅ WS fully subscribed: {len(self.watched_assets)} assets (OB + Trades + Funding) + Liquidations")
+
+        # Diagnostic warmup check — runs 15s after subscription completes
+        # Tells us if Hyperliquid is actually streaming data back
+        async def _check_ws_warmup():
+            await asyncio.sleep(15)
+            cached_obs = sum(1 for a in self.watched_assets if getattr(self.cache, 'orderbook', {}).get(a))
+            cached_trades = sum(1 for a in self.watched_assets if getattr(self.cache, 'trades', {}).get(a))
+            cached_funding = sum(1 for a in self.watched_assets if getattr(self.cache, 'funding', {}).get(a))
+            total = len(self.watched_assets)
+            log.info(
+                f"📊 WS warmup check (15s): "
+                f"OB={cached_obs}/{total} | Trades={cached_trades}/{total} | Funding={cached_funding}/{total}"
+            )
+            if cached_obs < total * 0.5:
+                log.warning(
+                    f"⚠️  WS orderbook cache LOW ({cached_obs}/{total}). "
+                    f"Scoring engine will fall back to REST for missing assets."
+                )
+        asyncio.create_task(_check_ws_warmup())
 
     # ──────────────────────────────────────────
     # MAIN TRADING LOOP
@@ -250,9 +497,9 @@ class KaraBot:
                 await self._scan_all_assets()
                 last_scan = now
 
-            # ── Hourly PnL summary ────────────────────────────────────
-            if now - last_hourly >= hourly_interval and last_hourly > 0:
-                await self._send_hourly_summary()
+            # ── Hourly PnL summary (DISABLED BY USER) ────────────────────────────────────
+            # if now - last_hourly >= hourly_interval and last_hourly > 0:
+            #     await self._send_hourly_summary()
             if last_hourly == 0.0:
                 last_hourly = now   # start the clock without sending immediately
             elif now - last_hourly >= hourly_interval:
@@ -322,26 +569,89 @@ class KaraBot:
             active_modes_list = list(active_modes)
 
             # 2. Parallel scan with Semaphore(5)
+            max_score = 0
+            sig_count = 0
+            top_scorers = [] # List of (asset, score)
+            
             async def _scan_one(asset):
+                nonlocal max_score, sig_count
                 async with self.scan_sem:
                     try:
-                        # ScoringEngine returns Dict[str, TradeSignal]
-                        signals_dict = await self.scorer.run_asset(asset, active_modes=active_modes_list, meta_data=all_meta)
+                        # ScoringEngine returns Tuple[Dict[str, TradeSignal], int]
+                        signals_dict, asset_max_score = await self.scorer.run_asset(asset, active_modes=active_modes_list, meta_data=all_meta)
+                        
+                        # Track signals
                         if signals_dict:
+                            sig_count += len(signals_dict)
                             await self._handle_signals(signals_dict)
+                        
+                        # Track highest score regardless of signal
+                        if asset_max_score > 0:
+                            top_scorers.append((asset, asset_max_score))
+                            if asset_max_score > max_score:
+                                max_score = asset_max_score
+                            
+                            # Update RiskManagers
+                            for cid in target_ids:
+                                session = self.get_session(cid)
+                                if session:
+                                    session.risk_mgr.update_score(asset, asset_max_score)
+                            
                     except Exception as e:
                         # Log errors but don't stop the whole scan
                         if "429" in str(e):
-                            log.warning(f" ⚠️ Rate limited on {asset}")
+                            log.debug(f" ⚠️ Rate limited on {asset}")
                         else:
                             log.error(f" ❌ Scan error for {asset}: {e}")
 
             tasks = [_scan_one(asset) for asset in self.watched_assets]
             await asyncio.gather(*tasks)
-            log.info(f" 🏁 Scan complete for {len(self.watched_assets)} markets.")
+            
+            # Sort and format top scorers for the user
+            top_scorers.sort(key=lambda x: x[1], reverse=True)
+            top_str = ", ".join([f"{a}:{s}" for a, s in top_scorers[:5]])
+            
+            # Smart log: If top score is still low, be honest but show we are alive
+            log.info(f" 🏁 Scan complete for {len(self.watched_assets)} markets. Signals: {sig_count} | Top Scorers: [{top_str or 'None'}]")
+            
+            # Persist OI snapshots to prevent amnesia
+            self.scorer.dump_oi_state()
             
         except Exception as e:
             log.error(f" [FATAL] Scan loop failure: {e}", exc_info=True)
+
+    async def _snapshot_loop(self):
+        """Background task to record bot performance every hour (Phase 2)."""
+        log.info("📊 History snapshot task started (hourly).")
+        
+        while self._running:
+            try:
+                total_users = len(user_db.users)
+                active_users = sum(1 for u in user_db.users.values() if u.is_authorized)
+                
+                global_equity = 0.0
+                global_pnl = 0.0
+                
+                for session in self.sessions.values():
+                    try:
+                        acc = session.get_account_state()
+                        global_equity += acc.total_equity
+                        # Use daily_pnl to represent "total pnl all users (today)"
+                        # so dashboard card/chart stays consistent and not flat at 0
+                        # when positions are closed.
+                        global_pnl += acc.daily_pnl
+                    except:
+                        pass
+                
+                # Save to DB
+                user_db.save_snapshot(total_users, active_users, global_pnl, global_equity)
+                log.debug(f"💾 Snapshot saved: Users={total_users}, Equity=${global_equity:,.2f}")
+                
+            except Exception as e:
+                log.error(f"Error in snapshot loop: {e}")
+            
+            # Wait 1 hour (3600s)
+            await asyncio.sleep(3600)
 
     async def _handle_signals(self, signals_dict: dict):
         """Distribute each mode's signal to the respective users in that mode."""
@@ -361,22 +671,39 @@ class KaraBot:
                 
             user_mode = getattr(session.user.config, 'trading_mode', 'standard')
             base_signal = signals_dict.get(user_mode)
+            fallback_from_standard = False
+
+            # If user is in scalper but dedicated scalper signal is not produced,
+            # allow standard signal as fallback so opportunities are not missed.
+            if user_mode == "scalper" and not base_signal:
+                std_fallback = signals_dict.get("standard")
+                if std_fallback:
+                    base_signal = std_fallback
+                    fallback_from_standard = True
             
             if not base_signal:
                 continue
 
-            # ── Per-User Threshold Check ──────────────────
+            # ── Per-User Threshold Check (AUTO-ONLY POLICY) ──────────────────
             user_cfg = session.user.config
             is_scl = (user_mode == 'scalper')
-            sig_threshold = user_cfg.scl_min_score_to_signal if is_scl else user_cfg.std_min_score_to_signal
-            auto_threshold = user_cfg.scl_min_score_to_auto_trade if is_scl else user_cfg.std_min_score_to_auto_trade
+            auto_threshold = int(user_cfg.scl_min_score_to_auto_trade if is_scl else user_cfg.std_min_score_to_auto_trade)
 
-            if base_signal.score < sig_threshold:
-                continue # User doesn't want signals this weak
+            # ── MULTI-USER FIX: Deep-copy signal with a UNIQUE signal_id per user ──
+            # model_copy() copies ALL fields including signal_id.
+            # If two users share the same signal_id, User A confirming/skipping
+            # calls _pending_signals.pop(sig_id) which ALSO removes User B's signal.
+            # Fix: assign a fresh UUID immediately after copy so each user's
+            # signal is stored and resolved independently in _pending_signals.
+            # Deep copy so nested breakdown/warnings are not shared across users/cycles.
+            user_signal = base_signal.model_copy(deep=True)
+            user_signal.signal_id = f"{base_signal.signal_id[:4]}{uuid.uuid4().hex[:4].upper()}"
+            if fallback_from_standard and user_signal.breakdown and hasattr(user_signal.breakdown, "warnings"):
+                fb_msg = "Scalper fallback: using standard signal due to missing dedicated scalper signal this cycle."
+                if fb_msg not in user_signal.breakdown.warnings:
+                    user_signal.breakdown.warnings.append(fb_msg)
 
-            # Copy signal to avoid shared reference issues
-            user_signal = base_signal.model_copy()
-            
+
             # ── Fetch Dynamic ATR (calculated once per signal if needed)
             atr_value = 0.0
             if getattr(config, 'RISK', None) and getattr(config.RISK, 'enable_atr_sl', False):
@@ -395,26 +722,38 @@ class KaraBot:
                     log.error(f"Failed to calculate dynamic ATR for {user_signal.asset}: {e}")
                 
             user_signal.localize_for_user(user_mode, atr_value=atr_value)
+            self._apply_meta_score_delta(user_signal, user_mode)
             
             acc = session.get_account_state()
+
+            # Full-auto only behavior requested:
+            # - only process signals that meet auto threshold
+            # - anything below threshold is fully skipped (no Telegram signal)
+            effective_auto_threshold = auto_threshold
+            if user_signal.score < effective_auto_threshold:
+                continue
             
             # Enrich signal with position sizing for THIS user
-            size_usd, contracts = session.risk_mgr.calculate_position_size(
+            size_usd, contracts, actual_lev = session.risk_mgr.calculate_position_size(
                 user_signal, acc.total_equity
             )
             user_signal.suggested_size_usd   = size_usd
             user_signal.suggested_contracts  = contracts
+            user_signal.suggested_leverage   = actual_lev
 
-            # ⚡ PRE-TRADE VALIDATION (Before Notification)
-            # We only auto-trade if score >= user's auto_threshold AND not a pyramid re-entry
-            if config.FULL_AUTO and user_signal.score >= auto_threshold and not getattr(user_signal, 'is_pyramid', False):
+            # ⚡ PRE-TRADE VALIDATION (AUTO-ONLY)
+            if config.FULL_AUTO and not getattr(user_signal, 'is_pyramid', False):
                 approved, reason = session.risk_mgr.pre_trade_check(
                     user_signal, acc, session.executor.open_positions
                 )
                 
                 if not approved:
-                    log.info(f"🔇 Sinyal {user_signal.asset} dibisukan (Muted): {reason}")
-                    continue  # SILENT SKIP
+                    # FULL_AUTO policy: do not notify non-executed signals.
+                    log.info(
+                        f"⛔ [AUTO_BLOCKED] user={chat_id} mode={user_mode} asset={user_signal.asset} "
+                        f"score={user_signal.score} auto_threshold={effective_auto_threshold} reason={reason}"
+                    )
+                    continue
                 
                 # If approved, proceed to auto-execution
                 user_signal.auto_executed = True
@@ -425,20 +764,41 @@ class KaraBot:
                 if pos:
                     await self.telegram.send_position_opened(pos, user_signal, target_chat_id=chat_id)
             else:
-                # Manual mode: always send so the user can decide
-                user_db.save_signal(user_signal) # v17 Sync
-                await self.telegram.send_signal(user_signal, target_chat_id=chat_id)
+                # AUTO-ONLY policy: no manual signal dispatch.
+                continue
 
     async def _on_trade_confirmed(self, signal, chat_id: str):
         session = self.get_session(chat_id)
-        if not session: return
+        if not session:
+            return False, "Sesi user tidak ditemukan."
         
         log.info(f" User {chat_id} confirmed trade: {signal.asset}")
+
+        # Pre-check first so user gets the exact reason (cooldown, max pos, etc.)
+        try:
+            acc = session.get_account_state()
+            approved, reason = session.risk_mgr.pre_trade_check(
+                signal, acc, session.executor.open_positions
+            )
+            if not approved:
+                await self.telegram.send_text(
+                    f"❌ <b>Trade {signal.asset} ditolak.</b>\n<i>{reason}</i>",
+                    target_chat_id=chat_id
+                )
+                return False, reason
+        except Exception as e:
+            log.error(f"Pre-trade check failed for {chat_id} {signal.asset}: {e}")
+
         pos = await session.executor.open_position(signal)
         if pos:
             await self.telegram.send_position_opened(pos, signal, target_chat_id=chat_id)
+            return True, "ok"
         else:
-            await self.telegram.send_text(f"❌ Gagal mengeksekusi <b>{signal.asset}</b>.", target_chat_id=chat_id)
+            await self.telegram.send_text(
+                f"❌ Gagal mengeksekusi <b>{signal.asset}</b>. Silakan coba lagi saat kondisi risk sudah aman.",
+                target_chat_id=chat_id
+            )
+            return False, "executor_failed"
 
     async def _update_positions(self):
         """Update unrealized PnL and check TP/SL for all users."""
@@ -459,18 +819,46 @@ class KaraBot:
 
         # 3. Apply updates to each user
         for chat_id, session in self.sessions.items():
-            if not hasattr(session.executor, 'open_positions') or not session.executor.open_positions:
-                continue
+            acc = session.get_account_state()
             
             # ── Daily Reset Check ───────────────────────────────────────
-            acc = session.get_account_state()
+            # BUG FIX: This must run even if there are no open positions!
+            # Otherwise, days will roll over without sending the daily report
+            # for users who are flat (sitting in cash).
             if session.risk_mgr.reset_daily(acc.total_equity):
-                pos_count = len(session.executor.open_positions)
+                pos_count = len(getattr(session.executor, 'open_positions', []))
                 await self.telegram.send_daily_report(acc, pos_count, target_chat_id=chat_id)
                 log.info(f"📬 Daily report sent to {chat_id}")
 
+            # Now skip position updates if they have no open positions
+            if not hasattr(session.executor, 'open_positions') or len(session.executor.open_positions) == 0:
+                continue
+
             actions = await session.executor.update_positions(prices)
-            for action in actions:
+            time_exit_actions = [a for a in actions if a.get("action") == "time_exit"]
+            other_actions = [a for a in actions if a.get("action") != "time_exit"]
+
+            # Batch scalper max-hold notifications to avoid one-by-one spam.
+            if time_exit_actions:
+                exit_lines = []
+                total_pnl = 0.0
+                for a in time_exit_actions:
+                    pos = session.executor._positions.get(a.get("position_id", "")) if hasattr(session.executor, "_positions") else None
+                    asset = pos.asset if pos else "?"
+                    pnl = float(a.get("pnl", 0.0))
+                    total_pnl += pnl
+                    sign = "+" if pnl >= 0 else ""
+                    exit_lines.append(f"• {asset}: {sign}{pnl:.2f} USD")
+                total_sign = "+" if total_pnl >= 0 else ""
+                await self.telegram.send_text(
+                    "⚡ <b>Scalper max-hold batch exit</b>\n"
+                    f"Posisi ditutup: <b>{len(time_exit_actions)}</b>\n"
+                    f"Total PnL: <b>{total_sign}{total_pnl:.2f} USD</b>\n"
+                    + "\n".join(exit_lines[:8]),
+                    target_chat_id=chat_id
+                )
+
+            for action in other_actions:
                 await self.telegram.send_position_event(action, prices, target_chat_id=chat_id)
             
             # Save user state after positional update to persist PnL changes

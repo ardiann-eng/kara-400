@@ -2,1426 +2,1557 @@
 <html lang="en">
 
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KARA | Futures Intelligence</title>
-
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&family=Playfair+Display:ital,wght@0,600;1,600&display=swap"
-        rel="stylesheet">
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-
-    <style>
-        :root {
-            --bg-base: #0d0d14;
-            --bg-surface: rgba(255, 255, 255, 0.04);
-            --bg-elevated: rgba(255, 255, 255, 0.08);
-            --primary: #c4b5fd;
-            --primary-dim: rgba(196, 181, 253, 0.15);
-            --primary-glow: rgba(196, 181, 253, 0.08);
-            --accent-green: #86efac;
-            --accent-red: #fca5a5;
-            --accent-blue: #93c5fd;
-            --text-primary: #f1f0f5;
-            --text-secondary: #9d9ab0;
-            --text-muted: #5c5a6e;
-            --border: rgba(196, 181, 253, 0.12);
-            --border-hover: rgba(196, 181, 253, 0.28);
-        }
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        body {
-            background-color: var(--bg-base);
-            color: var(--text-primary);
-            font-family: 'DM Sans', sans-serif;
-            overflow-x: hidden;
-            -webkit-font-smoothing: antialiased;
-        }
-
-        /* Noise Texture */
-        .noise-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            pointer-events: none;
-            z-index: 9999;
-            opacity: 0.03;
-            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
-        }
-
-        /* Ambient Orbs */
-        .orb {
-            position: fixed;
-            border-radius: 50%;
-            filter: blur(120px);
-            z-index: -1;
-            pointer-events: none;
-        }
-
-        .orb-1 {
-            width: 50vw;
-            height: 50vw;
-            top: -20vw;
-            left: -10vw;
-            background: var(--primary-glow);
-            animation: float-1 12s ease-in-out infinite alternate;
-        }
-
-        .orb-2 {
-            width: 40vw;
-            height: 40vw;
-            bottom: -15vw;
-            right: -10vw;
-            background: rgba(147, 197, 253, 0.05);
-            /* very soft blue */
-            animation: float-2 10s ease-in-out infinite alternate;
-        }
-
-        @keyframes float-1 {
-            to {
-                transform: translate(30px, 20px);
-            }
-        }
-
-        @keyframes float-2 {
-            to {
-                transform: translate(-30px, -20px);
-            }
-        }
-
-        /* Typography */
-        .display-font {
-            font-family: 'Playfair Display', serif;
-        }
-
-        .mono {
-            font-family: 'JetBrains Mono', monospace;
-        }
-
-        .text-green {
-            color: var(--accent-green);
-        }
-
-        .text-red {
-            color: var(--accent-red);
-        }
-
-        .text-muted {
-            color: var(--text-muted);
-        }
-
-        /* Layout */
-        .layout {
-            display: flex;
-            height: 100vh;
-            overflow: hidden;
-        }
-
-        /* Sidebar */
-        .sidebar {
-            width: 240px;
-            flex-shrink: 0;
-            background: var(--bg-surface);
-            backdrop-filter: blur(20px) saturate(180%);
-            -webkit-backdrop-filter: blur(20px) saturate(180%);
-            border-right: 1px solid var(--border);
-            display: flex;
-            flex-direction: column;
-            padding: 24px 0;
-            z-index: 10;
-        }
-
-        .sidebar-header {
-            padding: 0 24px 32px 24px;
-        }
-
-        .logo {
-            font-family: 'Playfair Display', serif;
-            font-size: 32px;
-            font-style: italic;
-            background: linear-gradient(to right, #ffffff, var(--primary));
-            -webkit-background-clip: text;
-            background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 4px;
-        }
-
-        .subtitle {
-            font-size: 12px;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-            color: var(--text-secondary);
-        }
-
-        .nav-menu {
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-            padding: 0 12px;
-            flex-grow: 1;
-        }
-
-        .nav-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 12px 16px;
-            color: var(--text-secondary);
-            text-decoration: none;
-            border-radius: 12px;
-            transition: all 0.2s;
-            border-left: 2px solid transparent;
-        }
-
-        .nav-item:hover {
-            background: var(--bg-surface);
-            color: var(--text-primary);
-        }
-
-        .nav-item.active {
-            background: var(--primary-dim);
-            border-left: 2px solid var(--primary);
-            color: var(--primary);
-        }
-
-        .nav-item svg {
-            width: 18px;
-            height: 18px;
-            opacity: 0.8;
-            fill: currentColor;
-        }
-
-        .connection-status {
-            padding: 24px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 12px;
-            color: var(--text-secondary);
-            margin-top: auto;
-        }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: var(--accent-green);
-            box-shadow: 0 0 8px var(--accent-green);
-        }
-
-        .status-dot.reconnecting {
-            background: #fbbf24;
-            box-shadow: 0 0 8px #fbbf24;
-            animation: pulse 1s infinite;
-        }
-
-        .status-dot.disconnected {
-            background: var(--accent-red);
-            box-shadow: 0 0 8px var(--accent-red);
-        }
-
-        @keyframes pulse {
-            50% {
-                opacity: 0.4;
-            }
-        }
-
-        /* Main Content */
-        .main-content {
-            flex-grow: 1;
-            display: flex;
-            flex-direction: column;
-            overflow-y: auto;
-            position: relative;
-        }
-
-        .top-bar {
-            position: sticky;
-            top: 0;
-            z-index: 5;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 20px 32px;
-            background: linear-gradient(to bottom, var(--bg-base), transparent);
-        }
-
-        .page-title {
-            font-family: 'Playfair Display', serif;
-            font-size: 24px;
-            font-weight: 600;
-        }
-
-        .top-stats {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-            font-size: 14px;
-        }
-
-        .glass-card {
-            background: var(--bg-surface);
-            backdrop-filter: blur(20px) saturate(180%);
-            -webkit-backdrop-filter: blur(20px) saturate(180%);
-            border: 1px solid var(--border);
-            border-radius: 20px;
-            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            padding: 24px;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .glass-card:hover {
-            border-color: var(--border-hover);
-            background: var(--bg-elevated);
-            transform: translateY(-4px) scale(1.01);
-            box-shadow: 0 12px 24px -10px rgba(196, 181, 253, 0.15);
-        }
-
-        .badge.glass {
-            padding: 4px 12px;
-            border-radius: 20px;
-            background: var(--primary-dim);
-            color: var(--primary);
-            font-size: 11px;
-            letter-spacing: 1px;
-            border: 1px solid var(--border);
-        }
-
-        /* Page System */
-        .page {
-            display: none;
-            padding: 0 32px 32px 32px;
-            flex-direction: column;
-            gap: 24px;
-        }
-
-        .page.active {
-            display: flex;
-            animation: fade-in 0.3s ease-out forwards;
-        }
-
-        @keyframes fade-in {
-            from {
-                opacity: 0;
-                transform: translateY(10px);
-            }
-
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        #live-price-disp {
-            font-size: 24px;
-            font-weight: 700;
-            color: var(--text-primary);
-            transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-            display: inline-block;
-        }
-
-        .price-up { color: var(--accent-green) !important; transform: translateY(-2px); }
-        .price-down { color: var(--accent-red) !important; transform: translateY(2px); }
-
-        @keyframes slide-up-fade {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        @keyframes glow-pulse {
-            0% { box-shadow: 0 0 0 0 rgba(196, 181, 253, 0); }
-            50% { box-shadow: 0 0 20px 2px rgba(196, 181, 253, 0.2); }
-            100% { box-shadow: 0 0 0 0 rgba(196, 181, 253, 0); }
-        }
-
-        .glow-active {
-            animation: glow-pulse 1s ease-out;
-        }
-
-        .signal-item, tr {
-            animation: slide-up-fade 0.5s ease-out backwards;
-        }
-
-        .signal-item:nth-child(1) { animation-delay: 0.1s; }
-        .signal-item:nth-child(2) { animation-delay: 0.2s; }
-        .signal-item:nth-child(3) { animation-delay: 0.3s; }
-        .signal-item:nth-child(4) { animation-delay: 0.4s; }
-        .signal-item:nth-child(5) { animation-delay: 0.5s; }
-
-        /* Grid 4 */
-        .grid-4 {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 20px;
-        }
-
-        .stat-label {
-            font-size: 13px;
-            color: var(--text-secondary);
-            margin-bottom: 8px;
-        }
-
-        .stat-value {
-            font-size: 28px;
-            font-weight: 500;
-            margin-bottom: 4px;
-        }
-
-        .stat-sub {
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        /* BTC Chart Area */
-        .chart-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 16px;
-        }
-
-        .chart-title {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .live-pill {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 10px;
-            color: var(--accent-green);
-            background: rgba(134, 239, 172, 0.1);
-            padding: 4px 8px;
-            border-radius: 12px;
-            border: 1px solid rgba(134, 239, 172, 0.2);
-        }
-
-        .live-dot {
-            width: 6px;
-            height: 6px;
-            background: var(--accent-green);
-            border-radius: 50%;
-            animation: pulse 2s infinite;
-        }
-
-        #chart-container {
-            width: 100%;
-            height: 350px;
-            position: relative;
-        }
-
-        #live-price-disp {
-            font-size: 32px;
-            font-weight: 600;
-            text-align: right;
-            margin-bottom: -10px;
-            transition: color 0.3s;
-        }
-
-        .mini-stats-row {
-            display: flex;
-            gap: 12px;
-            margin-top: 16px;
-        }
-
-        .mini-pill {
-            font-size: 12px;
-            color: var(--text-secondary);
-            padding: 6px 16px;
-            background: var(--bg-elevated);
-            border: 1px solid var(--border);
-            border-radius: 20px;
-            display: flex;
-            gap: 8px;
-        }
-
-        /* Split layout */
-        .split-layout {
-            display: grid;
-            grid-template-columns: 3fr 2fr;
-            gap: 24px;
-            min-height: 400px;
-        }
-
-        .card-header {
-            font-family: 'Playfair Display', serif;
-            font-size: 18px;
-            margin-bottom: 20px;
-            color: var(--text-primary);
-        }
-
-        /* Tables & Lists */
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            text-align: left;
-        }
-
-        th {
-            font-size: 12px;
-            color: var(--text-secondary);
-            padding-bottom: 16px;
-            font-weight: 500;
-        }
-
-        td {
-            padding: 12px 0;
-            border-bottom: 1px solid var(--bg-elevated);
-            font-size: 14px;
-        }
-
-        tr:last-child td {
-            border-bottom: none;
-        }
-
-        .dir-pill {
-            display: inline-block;
-            padding: 4px 10px;
-            border-radius: 6px;
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-        }
-
-        .dir-long {
-            background: rgba(134, 239, 172, 0.1);
-            color: var(--accent-green);
-            border: 1px solid rgba(134, 239, 172, 0.3);
-        }
-
-        .dir-short {
-            background: rgba(252, 165, 165, 0.1);
-            color: var(--accent-red);
-            border: 1px solid rgba(252, 165, 165, 0.3);
-        }
-
-        /* Progress Bar */
-        .tp-progress {
-            width: 100px;
-            height: 4px;
-            background: var(--bg-elevated);
-            border-radius: 2px;
-            position: relative;
-            display: inline-block;
-            vertical-align: middle;
-        }
-
-        .tp-fill {
-            height: 100%;
-            background: var(--primary);
-            border-radius: 2px;
-            transition: width 0.3s;
-        }
-
-        .tp-marker {
-            width: 4px;
-            height: 8px;
-            background: var(--text-secondary);
-            position: absolute;
-            top: -2px;
-            border-radius: 2px;
-        }
-
-        /* Signal Feed */
-        .signal-scroll {
-            height: 320px;
-            overflow-y: auto;
-            padding-right: 8px;
-        }
-
-        .signal-scroll::-webkit-scrollbar {
-            width: 4px;
-        }
-
-        .signal-scroll::-webkit-scrollbar-thumb {
-            background: var(--border-hover);
-            border-radius: 4px;
-        }
-
-        .signal-item {
-            padding: 16px 0;
-            border-bottom: 1px solid var(--bg-elevated);
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-
-        .signal-item:last-child {
-            border-bottom: none;
-        }
-
-        .signal-top {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .score-bar-bg {
-            width: 100px;
-            height: 4px;
-            background: var(--bg-elevated);
-            border-radius: 2px;
-        }
-
-        .score-bar-fill {
-            height: 100%;
-            background: var(--primary);
-            border-radius: 2px;
-        }
-
-        /* Flash animations */
-        @keyframes flash-green {
-            0% {
-                background: rgba(134, 239, 172, 0.2);
-            }
-
-            100% {
-                background: transparent;
-            }
-        }
-
-        @keyframes flash-red {
-            0% {
-                background: rgba(252, 165, 165, 0.2);
-            }
-
-            100% {
-                background: transparent;
-            }
-        }
-
-        .flash-up {
-            animation: flash-green 0.8s ease-out;
-        }
-
-        .flash-down {
-            animation: flash-red 0.8s ease-out;
-        }
-
-        /* ========================================= */
-        /* RESPONSIVE DESIGN - TABLET & MOBILE       */
-        /* ========================================= */
-
-        .mobile-nav {
-            display: none;
-        }
-
-        .mobile-positions {
-            display: none;
-        }
-
-        /* TABLET (769px to 1024px) */
-        @media (min-width: 769px) and (max-width: 1024px) {
-            .sidebar {
-                width: 60px;
-                padding: 24px 0;
-                align-items: center;
-            }
-
-            .logo {
-                font-size: 24px;
-                padding: 0;
-                margin-bottom: 0px;
-            }
-
-            .logo-text-full {
-                display: none;
-            }
-
-            .subtitle {
-                display: none;
-            }
-
-            .sidebar-header {
-                padding: 0 0 32px 0;
-                display: flex;
-                justify-content: center;
-                width: 100%;
-            }
-
-            .nav-item {
-                padding: 12px;
-                justify-content: center;
-                border-left: none;
-                position: relative;
-            }
-
-            .nav-item.active {
-                border-left: none;
-                background: var(--primary-dim);
-                border-radius: 12px;
-            }
-
-            .nav-text {
-                display: none;
-            }
-
-            .nav-item:hover::after {
-                content: attr(data-tooltip);
-                position: absolute;
-                left: 60px;
-                top: 12px;
-                background: var(--bg-elevated);
-                padding: 4px 8px;
-                border-radius: 4px;
-                color: var(--text-primary);
-                white-space: nowrap;
-                font-size: 12px;
-                z-index: 100;
-                backdrop-filter: blur(10px);
-                border: 1px solid var(--border);
-            }
-
-            .connection-status {
-                padding: 12px;
-                flex-direction: column;
-            }
-
-            .status-text {
-                display: none;
-            }
-
-            .grid-4 {
-                grid-template-columns: repeat(2, 1fr);
-            }
-
-            #chart-container {
-                height: 260px !important;
-            }
-        }
-
-        /* MOBILE (max-width: 768px) */
-        @media (max-width: 768px) {
-            .sidebar {
-                display: none;
-            }
-
-            .mobile-nav {
-                display: flex;
-                position: fixed;
-                bottom: 0;
-                left: 0;
-                right: 0;
-                height: 64px;
-                background: rgba(13, 13, 20, 0.95);
-                backdrop-filter: blur(12px);
-                -webkit-backdrop-filter: blur(12px);
-                border-top: 1px solid var(--border);
-                z-index: 100;
-                justify-content: space-around;
-                align-items: center;
-                padding: 0 8px;
-            }
-
-            .mobile-nav-item {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                gap: 4px;
-                color: var(--text-secondary);
-                text-decoration: none;
-                font-size: 10px;
-                min-width: 44px;
-                min-height: 44px;
-                position: relative;
-                -webkit-tap-highlight-color: transparent;
-                transition: transform 0.15s ease;
-            }
-
-            .mobile-nav-item:active {
-                transform: scale(0.95);
-                background-color: rgba(255, 255, 255, 0.05);
-                border-radius: 8px;
-            }
-
-            .mobile-nav-item svg {
-                width: 20px;
-                height: 20px;
-                fill: currentColor;
-            }
-
-            .mobile-nav-item.active {
-                color: var(--primary);
-            }
-
-            .mobile-nav-item.active::before {
-                content: '';
-                position: absolute;
-                top: 2px;
-                width: 4px;
-                height: 4px;
-                border-radius: 50%;
-                background: var(--primary);
-            }
-
-            .main-content {
-                padding-bottom: 80px;
-            }
-
-            .top-bar {
-                padding: 16px;
-            }
-
-            .page {
-                padding: 0 16px 16px 16px;
-                gap: 16px;
-            }
-
-            .glass-card {
-                padding: 16px;
-                border-radius: 16px;
-                backdrop-filter: blur(12px) saturate(180%) !important;
-                -webkit-backdrop-filter: blur(12px) saturate(180%) !important;
-            }
-
-            .orb {
-                animation: none !important;
-            }
-
-            .stat-value {
-                font-size: 28px;
-            }
-
-            .card-header {
-                font-size: 13px;
-            }
-
-            table td,
-            table th {
-                font-size: 12px;
-            }
-
-            .grid-4 {
-                grid-template-columns: 1fr;
-                gap: 16px;
-            }
-
-            #chart-container {
-                height: 220px !important;
-            }
-
-            .mini-stats-row {
-                flex-direction: row;
-                overflow-x: auto;
-                flex-wrap: nowrap;
-                padding-bottom: 8px;
-            }
-
-            .mini-pill {
-                flex-shrink: 0;
-            }
-
-            .split-layout {
-                grid-template-columns: 1fr;
-                gap: 16px;
-                min-height: auto;
-            }
-
-            #positions-table,
-            #positions-table thead,
-            #positions-table tbody {
-                display: none;
-            }
-
-            .mobile-positions {
-                display: flex;
-                flex-direction: column;
-                gap: 12px;
-            }
-
-            .signal-item {
-                padding: 12px 0;
-            }
-
-            .mobile-pos-card {
-                background: var(--bg-elevated);
-                border: 1px solid var(--border);
-                border-radius: 12px;
-                padding: 12px;
-                display: flex;
-                flex-direction: column;
-                gap: 8px;
-            }
-
-            .mp-header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-            }
-
-            .mp-row {
-                display: flex;
-                justify-content: space-between;
-                font-size: 12px;
-                color: var(--text-secondary);
-            }
-
-            .mp-divider {
-                height: 1px;
-                background: var(--bg-elevated);
-                margin: 4px 0;
-            }
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>KARA AI AGENT</title>
+  <meta name="description" content="KARA AI Trading Agent — Real-time multi-user dashboard." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet" />
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { theme: { extend: { fontFamily: { display: ['Playfair Display', 'serif'], body: ['DM Sans', 'sans-serif'], mono: ['JetBrains Mono', 'monospace'] }, colors: { lv: { 50: '#f5f3ff', 100: '#ede9fe', 200: '#ddd6fe', 300: '#c4b5fd', 400: '#a78bfa', 500: '#8b5cf6' } }, screens: { xs: '400px' } } } };
+  </script>
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box
+    }
+
+    html {
+      scroll-behavior: smooth
+    }
+
+    body {
+      background-color: #080810;
+      background-image: radial-gradient(ellipse 80% 50% at 20% -10%, rgba(139, 92, 246, .18) 0%, transparent 60%), radial-gradient(ellipse 60% 40% at 80% 110%, rgba(196, 181, 253, .08) 0%, transparent 55%);
+      min-height: 100vh;
+      font-family: 'DM Sans', sans-serif;
+      color: #e2e2f0;
+      overflow-x: hidden
+    }
+
+    .glass {
+      background: rgba(255, 255, 255, .04);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(196, 181, 253, .10);
+      border-radius: 16px
+    }
+
+    .glass-sm {
+      background: rgba(255, 255, 255, .05);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(196, 181, 253, .08);
+      border-radius: 12px
+    }
+
+    .glass-strong {
+      background: rgba(196, 181, 253, .06);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(196, 181, 253, .16);
+      border-radius: 16px
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      border-radius: 10px;
+      font-size: .875rem;
+      font-weight: 500;
+      color: rgba(196, 181, 253, .55);
+      cursor: pointer;
+      transition: all .2s;
+      white-space: nowrap
+    }
+
+    .nav-item:hover,
+    .nav-item:active {
+      background: rgba(196, 181, 253, .08);
+      color: #c4b5fd
+    }
+
+    .nav-item.active {
+      background: rgba(196, 181, 253, .13);
+      color: #c4b5fd;
+      box-shadow: inset 2px 0 0 #c4b5fd
+    }
+
+    .stat-card {
+      transition: transform .2s, box-shadow .2s
+    }
+
+    .stat-card:active {
+      transform: translateY(-1px)
+    }
+
+    @media(hover:hover) {
+      .stat-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 32px rgba(196, 181, 253, .08)
+      }
+    }
+
+    /* Tables — desktop */
+    table {
+      width: 100%;
+      border-collapse: collapse
+    }
+
+    thead th {
+      font-size: .7rem;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: rgba(196, 181, 253, .45);
+      padding: 10px 16px;
+      text-align: left;
+      border-bottom: 1px solid rgba(196, 181, 253, .08)
+    }
+
+    tbody tr {
+      border-bottom: 1px solid rgba(196, 181, 253, .04);
+      transition: background .15s;
+      cursor: pointer
+    }
+
+    tbody tr:active,
+    tbody tr:hover {
+      background: rgba(196, 181, 253, .05)
+    }
+
+    tbody td {
+      padding: 12px 16px;
+      font-size: .85rem
+    }
+
+    tbody tr:last-child {
+      border-bottom: none
+    }
+
+    /* Mobile card rows */
+    .row-card {
+      display: none
+    }
+
+    @media(max-width:767px) {
+      .desktop-table {
+        display: none
+      }
+
+      .row-card {
+        display: block;
+        padding: 14px 16px;
+        border-bottom: 1px solid rgba(196, 181, 253, .06);
+        cursor: pointer;
+        transition: background .15s
+      }
+
+      .row-card:active {
+        background: rgba(196, 181, 253, .07)
+      }
+
+      .row-card:last-child {
+        border-bottom: none
+      }
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: .72rem;
+      font-weight: 600;
+      letter-spacing: .04em
+    }
+
+    .badge-green {
+      background: rgba(52, 211, 153, .12);
+      color: #34d399;
+      border: 1px solid rgba(52, 211, 153, .2)
+    }
+
+    .badge-amber {
+      background: rgba(245, 158, 11, .12);
+      color: #f59e0b;
+      border: 1px solid rgba(245, 158, 11, .2)
+    }
+
+    .badge-red {
+      background: rgba(248, 113, 113, .12);
+      color: #f87171;
+      border: 1px solid rgba(248, 113, 113, .2)
+    }
+
+    .badge-lavender {
+      background: rgba(196, 181, 253, .12);
+      color: #c4b5fd;
+      border: 1px solid rgba(196, 181, 253, .2)
+    }
+
+    .badge-gray {
+      background: rgba(148, 163, 184, .1);
+      color: #94a3b8;
+      border: 1px solid rgba(148, 163, 184, .15)
+    }
+
+    .badge-amber {
+      background: rgba(251, 191, 36, .1);
+      color: #fbbf24;
+      border: 1px solid rgba(251, 191, 36, .2)
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      display: inline-block;
+      flex-shrink: 0
+    }
+
+    .dot-green {
+      background: #34d399;
+      box-shadow: 0 0 6px #34d399
+    }
+
+    .dot-red {
+      background: #f87171
+    }
+
+    .dot-amber {
+      background: #fbbf24;
+      box-shadow: 0 0 6px #fbbf24
+    }
+
+    .dot-gray {
+      background: #64748b
+    }
+
+    .form-input {
+      background: rgba(255, 255, 255, .04);
+      border: 1px solid rgba(196, 181, 253, .15);
+      color: #e2e2f0;
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-size: 16px;
+      font-family: 'JetBrains Mono', monospace;
+      width: 100%;
+      outline: none;
+      transition: border-color .2s;
+      min-height: 48px
+    }
+
+    .form-input:focus {
+      border-color: rgba(196, 181, 253, .4)
+    }
+
+    .form-label {
+      font-size: .72rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: rgba(196, 181, 253, .5);
+      font-weight: 600
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, rgba(139, 92, 246, .35), rgba(196, 181, 253, .2));
+      border: 1px solid rgba(196, 181, 253, .3);
+      color: #c4b5fd;
+      border-radius: 10px;
+      padding: 12px 22px;
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .2s;
+      min-height: 48px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center
+    }
+
+    .btn-primary:active {
+      background: linear-gradient(135deg, rgba(139, 92, 246, .5), rgba(196, 181, 253, .3))
+    }
+
+    @media(hover:hover) {
+      .btn-primary:hover {
+        background: linear-gradient(135deg, rgba(139, 92, 246, .5), rgba(196, 181, 253, .3));
+        box-shadow: 0 0 20px rgba(139, 92, 246, .25)
+      }
+    }
+
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid rgba(196, 181, 253, .15);
+      color: rgba(196, 181, 253, .6);
+      border-radius: 10px;
+      padding: 12px 22px;
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .2s;
+      min-height: 48px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center
+    }
+
+    .btn-ghost:active {
+      border-color: rgba(196, 181, 253, .3);
+      color: #c4b5fd
+    }
+
+    .page {
+      display: none
+    }
+
+    .page.active {
+      display: block;
+      animation: slideUp .25s ease both
+    }
+
+    ::-webkit-scrollbar {
+      width: 4px;
+      height: 4px
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: rgba(196, 181, 253, .2);
+      border-radius: 10px
+    }
+
+    .progress-bar {
+      height: 3px;
+      border-radius: 999px;
+      background: rgba(196, 181, 253, .1);
+      overflow: hidden
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #8b5cf6, #c4b5fd);
+      transition: width .5s ease
+    }
+
+    #modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      background: rgba(8, 8, 16, .8);
+      backdrop-filter: blur(6px);
+      display: none;
+      align-items: flex-end;
+      justify-content: center
+    }
+
+    @media(min-width:768px) {
+      #modal-overlay {
+        align-items: center
+      }
+    }
+
+    #modal-overlay.open {
+      display: flex
+    }
+
+    #modal-box {
+      width: 100%;
+      max-height: 90vh;
+      overflow-y: auto;
+      border-radius: 20px 20px 0 0
+    }
+
+    @media(min-width:768px) {
+      #modal-box {
+        max-width: 640px;
+        border-radius: 16px
+      }
+    }
+
+    .glow-line {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(196, 181, 253, .25), transparent)
+    }
+
+    @keyframes blink {
+
+      0%,
+      100% {
+        opacity: 1
+      }
+
+      50% {
+        opacity: .4
+      }
+    }
+
+    .blink {
+      animation: blink 2s ease-in-out infinite
+    }
+
+    @keyframes slideUp {
+      from {
+        opacity: 0;
+        transform: translateY(10px)
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0)
+      }
+    }
+
+    /* Bottom nav */
+    #bottom-nav {
+      display: none
+    }
+
+    @media(max-width:767px) {
+      #bottom-nav {
+        display: flex;
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        z-index: 50;
+        background: rgba(13, 13, 26, .95);
+        backdrop-filter: blur(20px);
+        border-top: 1px solid rgba(196, 181, 253, .07);
+        padding: 6px 0 env(safe-area-inset-bottom, 6px)
+      }
+
+      #sidebar {
+        display: none
+      }
+
+      main {
+        margin-left: 0 !important;
+        padding-bottom: 80px
+      }
+    }
+
+    .bnav-item {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      padding: 8px 4px;
+      cursor: pointer;
+      color: rgba(196, 181, 253, .4);
+      font-size: .65rem;
+      font-weight: 600;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      transition: color .2s
+    }
+
+    .bnav-item.active {
+      color: #c4b5fd
+    }
+
+    .bnav-item svg {
+      width: 22px;
+      height: 22px
+    }
+
+    /* Sidebar desktop nav */
+    .sidebar-nav-lock {
+      position: fixed;
+      inset-y: 0;
+      left: 0;
+      z-index: 40;
+      width: 240px;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 12px 24px;
+      gap: 4px;
+      background: rgba(13, 13, 26, .85);
+      backdrop-filter: blur(20px);
+      border-right: 1px solid rgba(196, 181, 253, .06)
+    }
+
+    @media(max-width:767px) {
+      .sidebar-nav-lock {
+        display: none
+      }
+    }
+
+    /* Topbar */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      background: rgba(8, 8, 16, .85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(196, 181, 253, .06)
+    }
+
+    @media(min-width:768px) {
+      .topbar {
+        padding: 14px 32px
+      }
+    }
+
+    #toast {
+      position: fixed;
+      bottom: 90px;
+      right: 16px;
+      z-index: 200;
+      transition: opacity .3s;
+      opacity: 0;
+      pointer-events: none
+    }
+
+    @media(min-width:768px) {
+      #toast {
+        bottom: 24px;
+        right: 24px
+      }
+    }
+
+    /* Premium Custom Select CSS */
+    .c-select-container {
+      position: relative;
+      user-select: none;
+    }
+
+    .c-select-trigger {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .c-select-trigger:hover {
+      border-color: rgba(196, 181, 253, 0.4);
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .c-select-trigger.open {
+      border-color: #c4b5fd;
+      background: rgba(196, 181, 253, 0.05);
+      box-shadow: 0 0 15px rgba(196, 181, 253, 0.1);
+    }
+
+    .c-select-options {
+      position: absolute;
+      top: calc(100% + 8px);
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(10px);
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      max-height: 300px;
+      overflow-y: auto;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+    }
+
+    .c-select-options.show {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }
+
+    .c-option {
+      padding: 12px 16px;
+      cursor: pointer;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      transition: all 0.2s;
+      color: rgba(196, 181, 253, 0.7);
+    }
+
+    .c-option:hover {
+      background: rgba(196, 181, 253, 0.12);
+      color: #c4b5fd;
+      padding-left: 20px;
+    }
+
+    .c-option.selected {
+      background: rgba(196, 181, 253, 0.2);
+      color: #fff;
+      font-weight: 600;
+    }
+
+    .chevron-icon {
+      transition: transform 0.3s;
+    }
+
+    .c-select-trigger.open .chevron-icon {
+      transform: rotate(180deg);
+    }
+  </style>
 </head>
 
 <body>
-    <div class="noise-overlay"></div>
-    <div class="orb orb-1"></div>
-    <div class="orb orb-2"></div>
 
-    <div class="layout">
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-header">
-                <h1 class="logo">K<span class="logo-text-full">ARA</span></h1>
-                <p class="subtitle">Futures Intelligence</p>
-            </div>
-
-            <nav class="nav-menu">
-                <a href="#" class="nav-item active" data-target="overview" data-tooltip="Overview">
-                    <svg viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z" />
-                    </svg> <span class="nav-text">Overview</span>
-                </a>
-                <a href="#" class="nav-item" data-target="performance" data-tooltip="Performance">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M12 20V10M18 20V4M6 20v-4" />
-                    </svg> <span class="nav-text">Performance</span>
-                </a>
-                <a href="#" class="nav-item" data-target="risk" data-tooltip="Risk Status">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                    </svg> <span class="nav-text">Risk Status</span>
-                </a>
-            </nav>
-
-            <div class="connection-status">
-                <div id="ws-dot" class="status-dot disconnected"></div>
-                <span id="ws-text" class="status-text">Connecting...</span>
-                <span style="font-size:10px; color:var(--text-muted); opacity:0.5; margin-left:8px">v2.0 Premium</span>
-            </div>
-        </aside>
-
-        <!-- Mobile Bottom Nav -->
-        <nav class="mobile-nav">
-            <a href="#" class="mobile-nav-item active" data-target="overview">
-                <svg viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z" />
-                </svg>
-                <span>Overview</span>
-            </a>
-            <a href="#" class="mobile-nav-item" data-target="overview" data-scroll="pos-section">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
-                </svg>
-                <span>Positions</span>
-            </a>
-            <a href="#" class="mobile-nav-item" data-target="overview" data-scroll="sig-section">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                <span>Signals</span>
-            </a>
-            <a href="#" class="mobile-nav-item" data-target="performance">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M12 20V10M18 20V4M6 20v-4" />
-                </svg>
-                <span>Perf</span>
-            </a>
-            <a href="#" class="mobile-nav-item" data-target="risk">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                </svg>
-                <span>Risk</span>
-            </a>
-        </nav>
-
-        <!-- Main Content -->
-        <main class="main-content">
-            <header class="top-bar">
-                <h2 class="page-title" id="page-title">Overview</h2>
-                <div class="top-stats">
-                    <span id="utc-clock" class="mono">--:--:-- UTC</span>
-                    <span id="mode-badge" class="badge glass">LOADING</span>
-                </div>
-            </header>
-
-            <!-- PAGE: OVERVIEW -->
-            <div id="overview" class="page active">
-                <div class="grid-4">
-                    <div class="glass-card">
-                        <div class="stat-label">Total Equity</div>
-                        <div class="stat-value mono" id="equity-val">$0.00</div>
-                    </div>
-                    <div class="glass-card">
-                        <div class="stat-label">Daily PnL</div>
-                        <div class="stat-value mono text-muted" id="pnl-val">$0.00</div>
-                        <div class="stat-sub mono" id="pnl-pct">0.00%</div>
-                    </div>
-                    <div class="glass-card">
-                        <div class="stat-label">Active Positions</div>
-                        <div class="stat-value mono" id="pos-count-val">0</div>
-                        <div class="stat-sub text-muted" id="pos-pills">-</div>
-                    </div>
-                    <div class="glass-card">
-                        <div class="stat-label">Max Drawdown</div>
-                        <div class="stat-value mono" id="dd-val">0.00%</div>
-                    </div>
-                </div>
-
-                <div class="glass-card">
-                    <div class="chart-header">
-                        <div class="chart-title">
-                            <span class="card-header" style="margin:0">BTC/USD</span>
-                            <div class="live-pill">
-                                <div class="live-dot"></div>LIVE
-                            </div>
-                        </div>
-                        <div id="live-price-disp" class="mono text-muted">Loading...</div>
-                    </div>
-                    <div id="chart-container"></div>
-                    <div class="mini-stats-row">
-                        <div class="mini-pill"><span>24h High:</span> <span class="mono" id="btc-high">--</span></div>
-                        <div class="mini-pill"><span>24h Low:</span> <span class="mono" id="btc-low">--</span></div>
-                    </div>
-                </div>
-
-                <div class="split-layout">
-                    <div class="glass-card" id="pos-section">
-                        <h3 class="card-header">Active Positions</h3>
-                        <table id="positions-table">
-                            <thead>
-                                <tr>
-                                    <th>Asset</th>
-                                    <th>Dir</th>
-                                    <th>Entry</th>
-                                    <th>Current</th>
-                                    <th>PnL</th>
-                                    <th>Progress</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <!-- JS Populated -->
-                            </tbody>
-                        </table>
-
-                        <!-- Mobile View for Positions -->
-                        <div id="mobile-positions" class="mobile-positions">
-                            <!-- JS Populated -->
-                        </div>
-
-                        <div id="pos-empty"
-                            style="text-align:center; padding: 40px 0; color: var(--text-muted); display:none;">
-                            <div style="font-family:'Playfair Display'">No active positions</div>
-                            <div style="font-size:12px; margin-top:8px">KARA is waiting for high-confidence signals
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="glass-card" id="sig-section">
-                        <h3 class="card-header">Signal Feed</h3>
-                        <div class="signal-scroll" id="signal-feed">
-                            <!-- JS Populated -->
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- PAGE: PERFORMANCE -->
-            <div id="performance" class="page">
-                <div class="glass-card" style="text-align: center; color: var(--text-muted); padding: 80px 0;">
-                    <h3 class="card-header">Trade Statistics</h3>
-                    <p>Performance history module under construction.</p>
-                </div>
-            </div>
-
-            <!-- PAGE: RISK -->
-            <div id="risk" class="page">
-                <div class="glass-card">
-                    <h3 class="card-header">Risk Profile & Status</h3>
-                    <div id="kill-switch-card" class="glass-card"
-                        style="margin-bottom: 24px; border-color: rgba(134,239,172,0.3); background: rgba(134,239,172,0.05);">
-                        <h4 style="color: var(--accent-green); margin-bottom: 4px;">Systems Normal</h4>
-                        <p style="font-size: 13px; color: var(--text-secondary)">Kill switch deactivated. Trading
-                            executing optimally.</p>
-                    </div>
-                    <table id="risk-table">
-                        <!-- Populated by JS -->
-                    </table>
-                </div>
-            </div>
-        </main>
+  <!-- SIDEBAR (desktop only) -->
+  <aside class="sidebar-nav-lock" id="sidebar">
+    <div class="flex items-center gap-3 px-3 mb-8">
+      <div class="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+        style="background:linear-gradient(135deg,rgba(139,92,246,.6),rgba(196,181,253,.3));border:1px solid rgba(196,181,253,.25)">
+        <svg class="w-4 h-4 text-lv-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2L2 7l10 5 10-5-10-5z" />
+          <path d="M2 17l10 5 10-5" />
+          <path d="M2 12l10 5 10-5" />
+        </svg>
+      </div>
+      <div>
+        <div class="font-display text-lg font-semibold text-white leading-none">KARA</div>
+        <div class="text-xs font-mono mt-0.5" style="color:rgba(196,181,253,.4)">agent v4.0</div>
+      </div>
     </div>
+    <nav class="flex flex-col gap-1">
+      <div class="nav-item active" onclick="navigate('overview')" data-page="overview">
+        <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <rect x="3" y="3" width="7" height="7" rx="1" />
+          <rect x="14" y="3" width="7" height="7" rx="1" />
+          <rect x="3" y="14" width="7" height="7" rx="1" />
+          <rect x="14" y="14" width="7" height="7" rx="1" />
+        </svg>
+        Overview
+      </div>
+      <div class="nav-item" onclick="navigate('all-users')" data-page="all-users">
+        <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+        </svg>
+        All Users
+      </div>
+      <div class="nav-item" onclick="navigate('user-settings')" data-page="user-settings">
+        <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <circle cx="12" cy="12" r="3" />
+          <path
+            d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+        </svg>
+        User Settings
+      </div>
+      <div class="nav-item" onclick="navigate('recent-trades')" data-page="recent-trades">
+        <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+        </svg>
+        Recent Trades
+      </div>
+    </nav>
+    <div class="glow-line my-4 mx-2"></div>
+    <div class="px-3 mt-auto">
+      <div class="text-xs uppercase tracking-widest font-semibold mb-2" style="color:rgba(196,181,253,.3)">System</div>
+      <div class="flex flex-col gap-2">
+        <div class="flex items-center justify-between"><span class="text-xs"
+            style="color:rgba(196,181,253,.5)">WebSocket</span><span class="dot dot-gray" id="sidebar-ws-dot"></span>
+        </div>
+        <div class="flex items-center justify-between"><span class="text-xs"
+            style="color:rgba(196,181,253,.5)">Telegram</span><span class="dot dot-gray" id="sidebar-tg-dot"></span>
+        </div>
+        <div class="flex items-center justify-between"><span class="text-xs"
+            style="color:rgba(196,181,253,.5)">Sessions</span><span class="dot dot-gray" id="sidebar-sess-dot"></span>
+        </div>
+      </div>
+    </div>
+  </aside>
 
-    <script>
-        // --- Navigation ---
-        const navItems = document.querySelectorAll('.nav-item, .mobile-nav-item');
-        const pages = document.querySelectorAll('.page');
-        const pageTitleNode = document.getElementById('page-title');
+  <!-- MAIN -->
+  <main style="margin-left:240px" id="main-content">
 
-        navItems.forEach(item => {
-            item.addEventListener('click', (e) => {
-                e.preventDefault();
-                navItems.forEach(n => n.classList.remove('active'));
-                pages.forEach(p => p.classList.remove('active'));
+    <!-- TOPBAR -->
+    <header class="topbar">
+      <div>
+        <h1 class="font-display font-semibold text-white text-base md:text-xl" id="page-title">Overview</h1>
+        <p class="text-xs font-mono hidden md:block mt-0.5" style="color:rgba(196,181,253,.4)" id="page-subtitle">System
+          intelligence at a glance</p>
+      </div>
+      <div class="flex items-center gap-2 md:gap-4">
+        <div class="glass-sm px-3 py-1.5 flex items-center gap-2">
+          <span class="dot dot-green blink"></span>
+          <span class="text-xs font-mono" style="color:#c4b5fd" id="topbar-mode">STANDARD</span>
+        </div>
+        <div class="glass-sm px-3 py-1.5 hidden xs:block">
+          <span class="text-xs font-mono" style="color:rgba(196,181,253,.6)" id="topbar-clock">--:--:--</span>
+        </div>
+        <button onclick="refreshCurrentPage()" class="btn-ghost py-2 px-3 text-xs"
+          style="min-height:36px">Refresh</button>
+      </div>
+    </header>
 
-                const targetId = item.getAttribute('data-target');
-                document.querySelectorAll(`[data-target="${targetId}"]`).forEach(n => n.classList.add('active'));
+    <!-- PAGES -->
+    <div class="p-4 md:p-8">
 
-                document.getElementById(targetId).classList.add('active');
+      <!-- PAGE: Overview -->
+      <div id="page-overview" class="page active">
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4 mb-6 md:mb-8">
+          <div class="glass stat-card p-4 md:p-5">
+            <div class="text-xs font-semibold uppercase tracking-widest mb-2 md:mb-3"
+              style="color:rgba(196,181,253,.4)">Total Users</div>
+            <div class="font-mono text-2xl md:text-3xl font-semibold text-white" id="ov-total-users">--</div>
+            <div class="text-xs mt-1" style="color:rgba(196,181,253,.4)" id="ov-auth-users">-- authorized</div>
+          </div>
+          <div class="glass stat-card p-4 md:p-5">
+            <div class="text-xs font-semibold uppercase tracking-widest mb-2 md:mb-3"
+              style="color:rgba(196,181,253,.4)">Active Users</div>
+            <div class="font-mono text-2xl md:text-3xl font-semibold text-white" id="ov-active-users">--</div>
+            <div class="text-xs mt-1" style="color:rgba(196,181,253,.4)">Paper + Live</div>
+          </div>
+          <div class="glass stat-card p-4 md:p-5">
+            <div class="text-xs font-semibold uppercase tracking-widest mb-2 md:mb-3"
+              style="color:rgba(196,181,253,.4)">Open Positions</div>
+            <div class="font-mono text-2xl md:text-3xl font-semibold text-white" id="ov-positions">--</div>
+            <div class="text-xs mt-1" style="color:rgba(196,181,253,.4)">All users</div>
+          </div>
+          <div class="glass stat-card p-4 md:p-5">
+            <div class="text-xs font-semibold uppercase tracking-widest mb-2 md:mb-3"
+              style="color:rgba(196,181,253,.4)">Global PnL Today</div>
+            <div class="font-mono text-2xl md:text-3xl font-semibold" id="ov-pnl">--</div>
+            <div class="text-xs mt-1" style="color:rgba(196,181,253,.4)">Combined</div>
+          </div>
+        </div>
 
-                let titleText = "Overview";
-                if (targetId === "performance") titleText = "Performance";
-                if (targetId === "risk") titleText = "Risk Status";
-                pageTitleNode.innerText = titleText;
+        <!-- OVERVIEW CHARTS -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6 md:mb-8">
+          <div class="glass p-4 md:p-5 flex flex-col" style="min-height:320px">
+            <h3 class="text-xs font-semibold uppercase tracking-widest mb-4" style="color:rgba(196,181,253,.4)">User
+              Growth (7d)</h3>
+            <div id="chart-user-growth" class="w-full overflow-hidden" style="height:300px; min-height:300px"></div>
+          </div>
+          <div class="glass p-4 md:p-5 flex flex-col" style="min-height:320px">
+            <h3 class="text-xs font-semibold uppercase tracking-widest mb-4" style="color:rgba(196,181,253,.4)">Total
+              PnL All Users (7d)</h3>
+            <div id="chart-pnl-combined" class="w-full overflow-hidden" style="height:300px; min-height:300px"></div>
+          </div>
+        </div>
 
-                const scrollId = item.getAttribute('data-scroll');
-                if (scrollId) {
-                    const sec = document.getElementById(scrollId);
-                    if (sec) setTimeout(() => sec.scrollIntoView({ behavior: "smooth" }), 50);
-                }
-            });
-        });
+        <div class="glass p-4 md:p-6">
+          <div class="flex items-center justify-between mb-4 md:mb-5">
+            <h2 class="font-display text-base font-semibold text-white">System Health</h2>
+            <span class="text-xs font-mono" style="color:rgba(196,181,253,.3)" id="ov-timestamp">--</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 md:gap-4">
+            <div class="glass-sm p-4">
+              <div class="flex items-center justify-between mb-2"><span
+                  class="text-xs uppercase tracking-widest font-semibold"
+                  style="color:rgba(196,181,253,.4)">WebSocket</span><span class="dot dot-gray" id="dot-ws"></span>
+              </div>
+              <div class="font-mono text-sm font-semibold" style="color:#c4b5fd" id="health-ws-label">--</div>
+              <div class="progress-bar mt-3">
+                <div class="progress-bar-fill" id="bar-ws" style="width:0%"></div>
+              </div>
+            </div>
+            <div class="glass-sm p-4">
+              <div class="flex items-center justify-between mb-2"><span
+                  class="text-xs uppercase tracking-widest font-semibold"
+                  style="color:rgba(196,181,253,.4)">Sessions</span><span class="dot dot-gray" id="dot-sess"></span>
+              </div>
+              <div class="font-mono text-sm font-semibold" style="color:#c4b5fd" id="health-sess-label">--</div>
+              <div class="progress-bar mt-3">
+                <div class="progress-bar-fill" id="bar-sess" style="width:0%"></div>
+              </div>
+            </div>
+            <div class="glass-sm p-4">
+              <div class="flex items-center justify-between mb-2"><span
+                  class="text-xs uppercase tracking-widest font-semibold"
+                  style="color:rgba(196,181,253,.4)">Telegram</span><span class="dot dot-gray" id="dot-tg"></span></div>
+              <div class="font-mono text-sm font-semibold" style="color:#c4b5fd" id="health-tg-label">--</div>
+              <div class="progress-bar mt-3">
+                <div class="progress-bar-fill" id="bar-tg" style="width:0%"></div>
+              </div>
+            </div>
+            <div class="glass-sm p-4">
+              <div class="flex items-center justify-between mb-2"><span
+                  class="text-xs uppercase tracking-widest font-semibold" style="color:rgba(196,181,253,.4)">Trading
+                  Mode</span><span class="dot dot-green"></span></div>
+              <div class="font-mono text-sm font-semibold" style="color:#c4b5fd" id="health-mode-label">--</div>
+              <div class="progress-bar mt-3">
+                <div class="progress-bar-fill" style="width:100%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
-        // --- Clock ---
-        setInterval(() => {
-            const now = new Date();
-            document.getElementById('utc-clock').innerText = now.toISOString().substring(11, 19) + ' UTC';
-        }, 1000);
+      <!-- PAGE: All Users -->
+      <div id="page-all-users" class="page">
+        <div class="glass overflow-hidden">
+          <div class="flex items-center justify-between px-4 md:px-6 py-3 md:py-4"
+            style="border-bottom:1px solid rgba(196,181,253,.05)">
+            <h2 class="font-display text-base font-semibold text-white">Registered Users</h2>
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-mono" style="color:rgba(196,181,253,.3)" id="users-count">--</span>
+              <button onclick="loadUsers()" class="btn-ghost py-1.5 px-3 text-xs"
+                style="min-height:36px">Refresh</button>
+            </div>
+          </div>
+          <!-- Desktop table -->
+          <div class="desktop-table overflow-x-auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Account</th>
+                  <th>Strategy</th>
+                  <th>Auth</th>
+                  <th>Positions</th>
+                  <th>Equity</th>
+                  <th>Daily PnL</th>
+                  <th>Trades</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="users-tbody">
+                <tr>
+                  <td colspan="8" class="text-center py-10 text-sm" style="color:rgba(196,181,253,.3)">Loading...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <!-- Mobile card list -->
+          <div id="users-cards"></div>
+        </div>
+      </div>
 
-        // --- BTC Chart Setup ---
-        const chartContainer = document.getElementById('chart-container');
-        const chart = LightweightCharts.createChart(chartContainer, {
-            layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#9d9ab0' },
-            grid: { vertLines: { color: 'rgba(196, 181, 253, 0.04)' }, horzLines: { color: 'rgba(196, 181, 253, 0.04)' } },
-            crosshair: { 
-                vertLine: { color: 'rgba(196, 181, 253, 0.4)', labelBackgroundColor: '#4c4273' }, 
-                horzLine: { color: 'rgba(196, 181, 253, 0.4)', labelBackgroundColor: '#4c4273' } 
-            },
-            rightPriceScale: { borderColor: 'rgba(196, 181, 253, 0.12)', autoScale: true },
-            timeScale: { borderColor: 'rgba(196, 181, 253, 0.12)', timeVisible: true, fixLeftEdge: true },
-            handleScroll: { kineticScroll: true, mouseWheel: true },
-            handleScale: { mouseWheel: true, pinch: true }
-        });
-        const candleSeries = chart.addCandlestickSeries({
-            upColor: '#86efac', downColor: '#fca5a5', borderVisible: false,
-            wickUpColor: '#86efac', wickDownColor: '#fca5a5',
-            priceLineVisible: true,
-            priceLineColor: 'rgba(196, 181, 253, 0.6)',
-            priceLineWidth: 1,
-            priceLineStyle: 2 // Dashed
-        });
-        
-        // Add a smooth line for the "floating" feel
-        const lineSeries = chart.addLineSeries({
-            color: 'rgba(196, 181, 253, 0.2)',
-            lineWidth: 1,
-            priceLineVisible: false,
-            crosshairMarkerVisible: false
-        });
-
-        fetch('/api/candles/BTC?interval=1m&limit=60')
-            .then(r => r.json())
-            .then(data => { if (data.length > 0) candleSeries.setData(data); })
-            .catch(e => console.error("Chart load error", e));
-
-        window.addEventListener('resize', () => {
-            if (chart && chartContainer) {
-                chart.applyOptions({
-                    width: chartContainer.clientWidth,
-                    height: chartContainer.clientHeight || 350
-                });
-            }
-        });
-
-        window.addEventListener('orientationchange', () => {
-            setTimeout(() => {
-                if (chart && chartContainer) {
-                    chart.applyOptions({
-                        width: chartContainer.clientWidth,
-                        height: chartContainer.clientHeight || 350
-                    });
-                }
-            }, 200);
-        });
-
-        let lastBtcPrice = 0;
-
-        // --- Utils ---
-        function fmtUsd(val) { 
-            const n = parseFloat(val);
-            if (isNaN(n)) return '$0.00';
-            return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); 
-        }
-        function debug(msg, obj) { console.log(`[KARA_DEBUG] ${msg}`, obj || ''); }
-
-        // --- Global State Render ---
-        function updateAccountUI(acc) {
-            debug("Updating Account UI with data:", acc);
-            if (!acc || acc.error) return;
-
-            // Mapping fallback/live fields
-            const equity = acc.total_equity || acc.equity || acc.totalEquity || acc.wallet_balance || 0;
-            const equityEl = document.getElementById('equity-val');
-            
-            const oldVal = equityEl.innerText;
-            equityEl.innerText = fmtUsd(equity);
-            
-            if (oldVal !== equityEl.innerText && lastBtcPrice > 0) {
-                const card = equityEl.closest('.glass-card');
-                card.classList.remove('glow-active');
-                void card.offsetWidth;
-                card.classList.add('glow-active');
-            }
-            
-            const pnlEl = document.getElementById('pnl-val');
-            const dailyPnl = acc.daily_pnl || 0;
-            pnlEl.innerText = (dailyPnl >= 0 ? '+' : '-') + fmtUsd(Math.abs(dailyPnl));
-            pnlEl.className = 'stat-value mono ' + (dailyPnl >= 0 ? 'text-green' : 'text-red');
-            
-            document.getElementById('dd-val').innerText = ((acc.current_drawdown_pct || 0) * 100).toFixed(2) + '%';
-            if (acc.mode) document.getElementById('mode-badge').innerText = acc.mode.toUpperCase();
-        }
-
-        async function fetchAccount() {
-            try {
-                const r = await fetch('/api/account');
-                const acc = await r.json();
-                console.log("📊 [DEBUG] Account Data Received:", acc);
-                if (acc && !acc.error) updateAccountUI(acc);
-            } catch (e) { 
-                console.error("❌ [DEBUG] Fetch Account Failed:", e);
-            }
-        }
-
-        function updatePositionsUI(posList) {
-            const tbody = document.querySelector('#positions-table tbody');
-            const mobContainer = document.getElementById('mobile-positions');
-            const empty = document.getElementById('pos-empty');
-
-            document.getElementById('pos-count-val').innerText = posList.length;
-            document.getElementById('pos-pills').innerText = posList.map(p => p.asset).join(', ') || '-';
-
-            if (!posList || posList.length === 0) {
-                tbody.innerHTML = '';
-                mobContainer.innerHTML = '';
-                empty.style.display = 'block';
-                return;
-            }
-            empty.style.display = 'none';
-
-            let tableHtml = '';
-            let mobileHtml = '';
-
-            posList.forEach(p => {
-                const isLong = p.side.toLowerCase() === 'long';
-                const cls = isLong ? 'dir-long' : 'dir-short';
-                
-                const pnl = p.pnl_unrealized || 0;
-                const entry = parseFloat(p.entry_price || 0);
-                const size = parseFloat(p.size_current || 0);
-                
-                let pnlPct = 0;
-                if (entry > 0 && size > 0) {
-                    pnlPct = (pnl / (entry * size)) * 100;
-                }
-                
-                const pColor = pnl >= 0 ? 'text-green' : 'text-red';
-                const markPrice = p.mark_price || entry;
-
-                const tp2 = p.tp2 || (entry * (isLong ? 1.02 : 0.98));
-                const range = Math.abs(tp2 - entry);
-                let prog = 0;
-                if (range > 0) {
-                    const diff = Math.abs(markPrice - entry);
-                    prog = Math.min(100, Math.max(0, (diff / range) * 100));
-                }
-                if (pnl < 0) prog = 0;
-
-                tableHtml += `
-                    <tr>
-                        <td class="mono">${p.asset}</td>
-                        <td><span class="dir-pill ${cls}">${p.side.toUpperCase()}</span></td>
-                        <td class="mono">$${entry.toFixed(4)}</td>
-                        <td class="mono">$${parseFloat(markPrice).toFixed(4)}</td>
-                        <td class="mono ${pColor}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} (${pnlPct.toFixed(2)}%)</td>
-                        <td>
-                            <div class="tp-progress">
-                                <div class="tp-fill" style="width:${prog}%"></div>
-                            </div>
-                        </td>
-                    </tr>`;
-
-                mobileHtml += `
-                    <div class="glass-card" style="margin-bottom:12px">
-                        <div style="display:flex; justify-content:space-between; margin-bottom:8px">
-                            <span class="mono">${p.asset} <span class="dir-pill ${cls}">${p.side.toUpperCase()}</span></span>
-                            <span class="mono ${pColor}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</span>
-                        </div>
-                        <div class="tp-progress" style="width:100%; height:4px; margin-top:8px">
-                            <div class="tp-fill" style="width:${prog}%"></div>
-                        </div>
-                    </div>`;
-            });
-
-            tbody.innerHTML = tableHtml;
-            mobContainer.innerHTML = mobileHtml;
-        }
-
-        async function fetchPositions() {
-            try {
-                const r = await fetch('/api/positions');
-                const data = await r.json();
-                console.log("📍 [DEBUG] Positions Received:", data);
-                if (data && data.positions) updatePositionsUI(data.positions);
-            } catch (e) {
-                console.error("❌ [DEBUG] Fetch Positions Failed:", e);
-            }
-        }
-
-        function configLeverageFallback(def) { return 20; }
-
-        async function fetchRisk() {
-            try {
-                const r = await fetch('/api/risk_status');
-                const data = await r.json();
-                if (data.kill_switch) {
-                    const kcard = document.getElementById('kill-switch-card');
-                    kcard.style.borderColor = 'rgba(252,165,165,0.4)';
-                    kcard.style.background = 'rgba(252,165,165,0.05)';
-                    kcard.innerHTML = `<h4 style="color: var(--accent-red); margin-bottom: 4px;">Kill Switch Active</h4>
-                        <p style="font-size: 13px; color: var(--text-secondary)">Trading suspended. Max drawdown hit.</p>`;
-                }
-
-                let html = '';
-                for (let [k, v] of Object.entries(data)) {
-                    html += `<tr><td>${k.replace(/_/g, ' ').toUpperCase()}</td><td class="mono" style="color:var(--text-primary); text-align:right;">${v}</td></tr>`;
-                }
-                document.getElementById('risk-table').innerHTML = html;
-            } catch (e) { }
-        }
-
-        function appendSignal(sig) {
-            const feed = document.getElementById('signal-feed');
-            const isLong = sig.side.toLowerCase() === 'long';
-            const cls = isLong ? 'dir-long' : 'dir-short';
-            const html = `
-                <div class="signal-item">
-                    <div class="signal-top">
-                        <span style="display:flex; align-items:center; gap:8px;">
-                            <span class="mono" style="color:white">${sig.asset}</span>
-                            <span class="dir-pill ${cls}">${sig.side.toUpperCase()}</span>
-                        </span>
-                        <span style="font-size:11px; color:var(--text-muted)">Just now</span>
-                    </div>
+      <!-- PAGE: User Settings -->
+      <div id="page-user-settings" class="page">
+        <div class="glass p-4 md:p-5 mb-4 md:mb-6">
+          <div class="flex flex-col sm:flex-row gap-3">
+            <div class="flex-1">
+              <label class="form-label block mb-1.5">Select User</label>
+              <div class="c-select-container" id="settings-user-select-container">
+                <select id="settings-user-select" class="hidden"></select>
+                <div class="form-input c-select-trigger" id="settings-user-select-trigger">
+                  <span id="settings-user-select-label">-- choose a user --</span>
+                  <svg class="w-4 h-4 chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
                 </div>
-            `;
-            feed.insertAdjacentHTML('afterbegin', html);
-            if (feed.children.length > 20) feed.removeChild(feed.lastChild);
+                <div class="c-select-options glass-strong" id="settings-user-select-options"></div>
+              </div>
+            </div>
+            <div class="sm:pt-6">
+              <button onclick="loadUserConfig(document.getElementById('settings-user-select').value)"
+                class="btn-primary w-full sm:w-auto">Load</button>
+            </div>
+          </div>
+        </div>
+        <div id="settings-form-wrapper" class="hidden">
+          <div class="glass p-4 md:p-6 mb-4">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+              <h2 class="font-display text-base font-semibold text-white" id="settings-username-title">--</h2>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="badge badge-gray" id="settings-mode-badge">--</span>
+                <span class="badge badge-gray" id="settings-auth-badge">--</span>
+                <button id="bot-status-toggle" onclick="toggleBotStatus()" 
+                  class="btn-primary py-1.5 px-6 text-xs ml-auto flex items-center gap-2 hidden" 
+                  style="min-height:36px; border-radius: 12px; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border: none;">
+                  <span id="bot-status-dot" class="dot dot-green"></span>
+                  <span id="bot-status-text">STOP BOT</span>
+                </button>
+              </div>
+            </div>
+            <div class="glow-line"></div>
+            <div class="flex gap-2 mt-4">
+              <button id="tab-standard" onclick="switchConfigTab('standard')" class="btn-primary py-2 px-4 text-xs"
+                style="min-height:40px">Standard</button>
+              <button id="tab-scalper" onclick="switchConfigTab('scalper')" class="btn-ghost py-2 px-4 text-xs"
+                style="min-height:40px">Scalper</button>
+            </div>
+          </div>
+          <div id="config-standard" class="glass p-4 md:p-6 mb-4">
+            <h3 class="text-xs font-semibold uppercase tracking-widest mb-4" style="color:rgba(196,181,253,.7)">Standard
+              Mode</h3>
+            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div><label class="form-label block mb-1.5">Min Score to Auto Trade</label><input type="number"
+                  id="cfg-std-auto" class="form-input" min="0" max="100" /></div>
+              <div><label class="form-label block mb-1.5">Max Leverage</label><input type="number" id="cfg-std-leverage"
+                  class="form-input" min="1" max="50" /></div>
+              <div><label class="form-label block mb-1.5">Max Concurrent Positions</label><input type="number"
+                  id="cfg-std-positions" class="form-input" min="1" max="30" /></div>
+              <div><label class="form-label block mb-1.5">Risk Per Trade (%)</label><input type="number"
+                  id="cfg-risk-pct" class="form-input" min="0.1" max="10" step="0.1" /></div>
+              <div>
+                <label class="form-label block mb-1.5">Trading Mode</label>
+                <div class="c-select-container" id="cfg-trading-mode-container">
+                  <select id="cfg-trading-mode" class="hidden"></select>
+                  <div class="form-input c-select-trigger" id="cfg-trading-mode-trigger">
+                    <span id="cfg-trading-mode-label">Standard</span>
+                    <svg class="w-4 h-4 chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      stroke-width="2">
+                      <path d="m6 9 6 6 6-6" />
+                    </svg>
+                  </div>
+                  <div class="c-select-options glass-strong" id="cfg-trading-mode-options">
+                    <div class="c-option" onclick="selectManager.update('cfg-trading-mode', 'standard', 'Standard')">
+                      Standard</div>
+                    <div class="c-option" onclick="selectManager.update('cfg-trading-mode', 'scalper', 'Scalper')">
+                      Scalper</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="config-scalper" class="glass p-4 md:p-6 mb-4 hidden">
+            <h3 class="text-xs font-semibold uppercase tracking-widest mb-4" style="color:rgba(196,181,253,.7)">Scalper
+              Mode</h3>
+            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div><label class="form-label block mb-1.5">Min Score to Auto Trade</label><input type="number"
+                  id="cfg-scl-auto" class="form-input" min="0" max="100" /></div>
+              <div><label class="form-label block mb-1.5">Max Leverage</label><input type="number" id="cfg-scl-leverage"
+                  class="form-input" min="1" max="100" /></div>
+              <div><label class="form-label block mb-1.5">Max Concurrent Positions</label><input type="number"
+                  id="cfg-scl-positions" class="form-input" min="1" max="20" /></div>
+            </div>
+          </div>
+          <div class="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+            <button onclick="saveUserConfig()" class="btn-primary w-full sm:w-auto">Save Changes</button>
+            <button onclick="resetUserConfig()" class="btn-ghost w-full sm:w-auto">Reset to Default</button>
+            <span id="settings-feedback" class="text-xs font-mono" style="color:rgba(196,181,253,.4)"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- PAGE: Recent Trades -->
+      <div id="page-recent-trades" class="page">
+        <div class="glass overflow-hidden">
+          <div class="flex items-center justify-between px-4 md:px-6 py-3 md:py-4"
+            style="border-bottom:1px solid rgba(196,181,253,.05)">
+            <h2 class="font-display text-base font-semibold text-white">Recent Trades</h2>
+            <div class="flex items-center gap-2">
+              <div class="c-select-container" id="trades-limit-container">
+                <select id="trades-limit" class="hidden"></select>
+                <div class="form-input c-select-trigger py-1.5 w-32 text-xs" id="trades-limit-trigger"
+                  style="min-height:36px;font-size:.8rem">
+                  <span id="trades-limit-label">20 Rows</span>
+                  <svg class="w-3 h-3 chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                </div>
+                <div class="c-select-options glass-strong w-32" id="trades-limit-options">
+                  <div class="c-option py-2 text-xs" onclick="selectManager.update('trades-limit', '20', '20 Rows')">20
+                    Rows</div>
+                  <div class="c-option py-2 text-xs" onclick="selectManager.update('trades-limit', '50', '50 Rows')">50
+                    Rows</div>
+                  <div class="c-option py-2 text-xs" onclick="selectManager.update('trades-limit', '100', '100 Rows')">
+                    100 Rows</div>
+                </div>
+              </div>
+              <button onclick="loadTrades()" class="btn-ghost py-1.5 px-3 text-xs"
+                style="min-height:36px">Refresh</button>
+            </div>
+          </div>
+          <!-- Desktop table -->
+          <div class="desktop-table overflow-x-auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Asset</th>
+                  <th>Side</th>
+                  <th>Score</th>
+                  <th>Entry</th>
+                  <th>SL</th>
+                  <th>TP1</th>
+                  <th>TP2</th>
+                  <th>Strength</th>
+                  <th>Exec</th>
+                  <th>Time</th>
+                </tr>
+              </thead>
+              <tbody id="trades-tbody">
+                <tr>
+                  <td colspan="11" class="text-center py-10 text-sm" style="color:rgba(196,181,253,.3)">Loading...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <!-- Mobile card list -->
+          <div id="trades-cards"></div>
+        </div>
+      </div>
+
+    </div><!-- /p-4 -->
+  </main>
+
+  <!-- BOTTOM NAV (mobile) -->
+  <nav id="bottom-nav">
+    <div class="bnav-item active" onclick="navigate('overview')" data-bpage="overview">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+        <rect x="3" y="3" width="7" height="7" rx="1" />
+        <rect x="14" y="3" width="7" height="7" rx="1" />
+        <rect x="3" y="14" width="7" height="7" rx="1" />
+        <rect x="14" y="14" width="7" height="7" rx="1" />
+      </svg>
+      Overview
+    </div>
+    <div class="bnav-item" onclick="navigate('all-users')" data-bpage="all-users">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+      </svg>
+      Users
+    </div>
+    <div class="bnav-item" onclick="navigate('user-settings')" data-bpage="user-settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+        <circle cx="12" cy="12" r="3" />
+        <path
+          d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+      </svg>
+      Settings
+    </div>
+    <div class="bnav-item" onclick="navigate('recent-trades')" data-bpage="recent-trades">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+      </svg>
+      Trades
+    </div>
+  </nav>
+
+  <!-- MODAL: User Detail -->
+  <div id="modal-overlay" onclick="closeModal()">
+    <div id="modal-box" class="glass-strong p-6 md:p-7 w-full" onclick="event.stopPropagation()">
+      <div class="flex items-start justify-between mb-4">
+        <div>
+          <h2 class="font-display text-lg md:text-xl font-semibold text-white" id="modal-username">--</h2>
+          <p class="text-xs font-mono mt-1" style="color:rgba(196,181,253,.4)" id="modal-chatid">--</p>
+        </div>
+        <button onclick="closeModal()" class="btn-ghost py-2 px-3 text-xs"
+          style="min-height:40px;flex-shrink:0">Close</button>
+      </div>
+      <div class="glow-line mb-4"></div>
+      <div class="grid grid-cols-3 gap-3 mb-5">
+        <div class="glass-sm p-3 md:p-4">
+          <div class="form-label mb-1">Equity</div>
+          <div class="font-mono text-base md:text-lg font-semibold text-white" id="modal-equity">--</div>
+        </div>
+        <div class="glass-sm p-3 md:p-4">
+          <div class="form-label mb-1">Daily PnL</div>
+          <div class="font-mono text-base md:text-lg font-semibold" id="modal-pnl">--</div>
+        </div>
+        <div class="glass-sm p-3 md:p-4">
+          <div class="form-label mb-1">Margin</div>
+          <div class="font-mono text-base md:text-lg font-semibold" style="color:#c4b5fd" id="modal-margin">--</div>
+        </div>
+      </div>
+      <div class="text-xs uppercase tracking-widest font-semibold mb-3" style="color:rgba(196,181,253,.4)">Open
+        Positions</div>
+      <div id="modal-positions">
+        <p class="text-xs" style="color:rgba(196,181,253,.3)">No open positions.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST -->
+  <div id="toast">
+    <div class="glass-sm px-4 py-3 flex items-center gap-3">
+      <span class="dot dot-green" id="toast-dot"></span>
+      <span class="text-sm font-medium text-white" id="toast-msg">--</span>
+    </div>
+  </div>
+
+  <script>
+    const S = { page: 'overview', userId: null, tab: 'standard' };
+    const META = { 'overview': { t: 'Overview', s: 'System intelligence at a glance' }, 'all-users': { t: 'All Users', s: 'Registered agents in the system' }, 'user-settings': { t: 'User Settings', s: 'Configure per-user trading parameters' }, 'recent-trades': { t: 'Recent Trades', s: 'Latest signal executions' } };
+
+    function navigate(page) {
+      S.page = page;
+      document.querySelectorAll('.nav-item').forEach(e => e.classList.toggle('active', e.dataset.page === page));
+      document.querySelectorAll('.bnav-item').forEach(e => e.classList.toggle('active', e.dataset.bpage === page));
+      document.querySelectorAll('.page').forEach(e => e.classList.remove('active'));
+      const t = document.getElementById('page-' + page);
+      if (t) t.classList.add('active');
+      const m = META[page] || {};
+      document.getElementById('page-title').textContent = m.t || page;
+      const sub = document.getElementById('page-subtitle');
+      if (sub) sub.textContent = m.s || '';
+      refreshCurrentPage();
+    }
+
+    function refreshCurrentPage() {
+      const p = S.page;
+      if (p === 'overview') { loadOverview(); setTimeout(initOverviewCharts, 100); }
+      else if (p === 'all-users') loadUsers();
+      else if (p === 'recent-trades') loadTrades();
+      else if (p === 'user-settings') populateUserSelect();
+    }
+
+    // --- Overview Charts Logic ---
+    let chartUserGrowth, chartPnL;
+    let totalSeries, activeSeries, pnlSeries;
+
+    async function initOverviewCharts() {
+      const growthBox = document.getElementById('chart-user-growth');
+      const pnlBox = document.getElementById('chart-pnl-combined');
+      
+      if (!growthBox || !pnlBox) return;
+      
+      // Check if library is loaded
+      if (typeof LightweightCharts === 'undefined') {
+        console.warn('KARA: LightweightCharts library not loaded yet, retrying...');
+        setTimeout(initOverviewCharts, 500);
+        return;
+      }
+
+      // If charts already exist, just resize and fit content (important for page switching)
+      if (chartUserGrowth && chartPnL) {
+        console.log('KARA: Charts already exist, resizing...');
+        chartUserGrowth.resize(growthBox.clientWidth, growthBox.clientHeight);
+        chartPnL.resize(pnlBox.clientWidth, pnlBox.clientHeight);
+        chartUserGrowth.timeScale().fitContent();
+        chartPnL.timeScale().fitContent();
+        return;
+      }
+
+      console.log('KARA: Initializing Overview charts...');
+      const baseOptions = {
+        layout: { background: { type: 'solid', color: 'transparent' }, textColor: 'rgba(196, 181, 253, 0.4)' },
+        grid: { vertLines: { color: 'rgba(196, 181, 253, 0.05)' }, horzLines: { color: 'rgba(196, 181, 253, 0.05)' } },
+        rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.2, bottom: 0.1 } },
+        timeScale: { borderVisible: false },
+        crosshair: { mode: 0, vertLine: { color: 'rgba(196, 181, 253, 0.2)' }, horzLine: { color: 'rgba(196, 181, 253, 0.2)' } },
+        handleScroll: false, handleScale: false
+      };
+
+      // Compatibility wrappers for LightweightCharts v4/v5 API differences
+      const addLineCompat = (chart, options) => {
+        if (chart && typeof chart.addLineSeries === 'function') {
+          return chart.addLineSeries(options);
         }
-
-        function initWs() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws`;
-            const socket = new WebSocket(wsUrl);
-            const dot = document.getElementById('ws-dot');
-            const msg = document.getElementById('ws-text');
-            
-            socket.onopen = () => {
-                dot.className = 'status-dot';
-                msg.innerText = 'Connected';
-            };
-            
-            socket.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'price_update' && data.asset === 'BTC') {
-                        const price = data.price || data.close;
-                        if (!price) return;
-                        const priceEl = document.getElementById('live-price-disp');
-                        priceEl.classList.remove('price-up', 'price-down');
-                        void priceEl.offsetWidth; 
-                        if (price > lastBtcPrice && lastBtcPrice > 0) priceEl.classList.add('price-up');
-                        else if (price < lastBtcPrice && lastBtcPrice > 0) priceEl.classList.add('price-down');
-                        priceEl.innerText = parseFloat(price).toFixed(2);
-                        lastBtcPrice = price;
-                        const t = (data.time || Date.now()) / 1000;
-                        candleSeries.update({
-                            time: Math.floor(t / 60) * 60,
-                            open: data.open || price, high: data.high || price, low: data.low || price, close: data.close || price
-                        });
-                        lineSeries.update({ time: t, value: price });
-                    }
-                    if (data.type === 'account_update') updateAccountUI(data.account);
-                    if (data.type === 'positions_update') updatePositionsUI(data.positions);
-                    if (data.type === 'signal') appendSignal(data);
-                } catch (err) { }
-            };
-            
-            socket.onclose = () => {
-                dot.className = 'status-dot disconnected';
-                msg.innerText = 'Retrying Connection...';
-                setTimeout(initWs, 3000);
-            };
+        if (chart && typeof chart.addSeries === 'function' && LightweightCharts && LightweightCharts.LineSeries) {
+          return chart.addSeries(LightweightCharts.LineSeries, options);
         }
-
-        // --- Start Dashboard ---
-        async function fetchInitialCandles() {
-            debug("Fetching initial candles...");
-            try {
-                const r = await fetch('/api/candles/BTC?interval=1m&limit=100');
-                const candles = await r.json();
-                if (Array.isArray(candles) && candles.length > 0) {
-                    candleSeries.setData(candles);
-                    const last = candles[candles.length - 1];
-                    lastBtcPrice = last.close;
-                    document.getElementById('live-price-disp').innerText = parseFloat(lastBtcPrice).toFixed(2);
-                    debug("Candles loaded successfully.");
-                }
-            } catch (e) {
-                console.error("Failed to load initial candles:", e);
-            }
+        throw new Error('Line series API not available on this LightweightCharts build');
+      };
+      const addAreaCompat = (chart, options) => {
+        if (chart && typeof chart.addAreaSeries === 'function') {
+          return chart.addAreaSeries(options);
         }
-
-        function startDashboard() {
-            // FIRE AND FORGET - Don't block the rest!
-            fetchInitialCandles();
-            
-            fetchAccount();
-            fetchPositions();
-            fetchRisk();
-            initWs();
-
-            // Polling Fallback (Every 10s for account, 5s for positions)
-            setInterval(fetchAccount, 10000);
-            setInterval(fetchPositions, 5000);
-            setInterval(fetchRisk, 20000);
+        if (chart && typeof chart.addSeries === 'function' && LightweightCharts && LightweightCharts.AreaSeries) {
+          return chart.addSeries(LightweightCharts.AreaSeries, options);
         }
+        throw new Error('Area series API not available on this LightweightCharts build');
+      };
 
-        startDashboard();
-    </script>
+      // 1. User Growth Chart
+      chartUserGrowth = LightweightCharts.createChart(growthBox, { ...baseOptions, width: growthBox.clientWidth, height: 300 });
+      totalSeries = addLineCompat(chartUserGrowth, { color: '#c4b5fd', lineWidth: 2, title: 'Total' });
+      activeSeries = addLineCompat(chartUserGrowth, { color: '#00f5ff', lineWidth: 2, title: 'Active' });
+
+      // 2. PnL Area Chart
+      chartPnL = LightweightCharts.createChart(pnlBox, { ...baseOptions, width: pnlBox.clientWidth, height: 300 });
+      pnlSeries = addAreaCompat(chartPnL, {
+        lineColor: '#34d399',
+        topColor: 'rgba(52, 211, 153, 0.3)',
+        bottomColor: 'rgba(52, 211, 153, 0.05)',
+        lineWidth: 2
+      });
+
+      // Load Real Data (Phase 3)
+      await updateChartData();
+
+      // Start real-time update interval (every 5 mins for history)
+      setInterval(updateChartData, 300000);
+
+      // Auto-resize via ResizeObserver
+      const handleResize = () => {
+        if (growthBox.clientWidth > 0 && growthBox.clientHeight > 0) {
+          chartUserGrowth.resize(growthBox.clientWidth, growthBox.clientHeight);
+          chartPnL.resize(pnlBox.clientWidth, pnlBox.clientHeight);
+        }
+      };
+      new ResizeObserver(handleResize).observe(growthBox);
+      new ResizeObserver(handleResize).observe(pnlBox);
+      
+      chartUserGrowth.timeScale().fitContent();
+      chartPnL.timeScale().fitContent();
+    }
+
+    async function updateChartData() {
+      try {
+        const d = await api('/api/history?days=7');
+        if (pnlSeries && d.pnl_history) pnlSeries.setData(d.pnl_history);
+        if (totalSeries && d.user_growth) {
+          totalSeries.setData(d.user_growth);
+          // For now, we mock active slightly lower than total if not provided separately
+          activeSeries.setData(d.user_growth.map(p => ({ ...p, value: Math.max(1, p.value - 1) })));
+        }
+        
+        // Force fit
+        if (chartUserGrowth) chartUserGrowth.timeScale().fitContent();
+        if (chartPnL) chartPnL.timeScale().fitContent();
+        
+        // Fix "Black Chart" issue by forcing a tiny resize
+        const growthBox = document.getElementById('chart-user-growth');
+        const pnlBox = document.getElementById('chart-pnl-combined');
+        if (growthBox && growthBox.clientWidth > 0) {
+           chartUserGrowth.resize(growthBox.clientWidth, growthBox.clientHeight);
+           chartPnL.resize(pnlBox.clientWidth, pnlBox.clientHeight);
+        }
+      } catch (e) { console.warn('Chart Update Error:', e); }
+    }
+
+
+
+    // --- Premium Custom Select Logic ---
+    class PremiumSelect {
+      constructor(id, onSelect) {
+        this.id = id;
+        this.onSelect = onSelect;
+        this.container = document.getElementById(id + '-container');
+        this.trigger = document.getElementById(id + '-trigger');
+        this.label = document.getElementById(id + '-label');
+        this.optionsBox = document.getElementById(id + '-options');
+        this.hiddenInput = document.getElementById(id);
+        this.open = false;
+
+        this.trigger.addEventListener('click', (e) => { e.stopPropagation(); this.toggle(); });
+        document.addEventListener('click', () => { if (this.open) this.toggle(false); });
+      }
+
+      toggle(force) {
+        this.open = force !== undefined ? force : !this.open;
+        this.trigger.classList.toggle('open', this.open);
+        this.optionsBox.classList.toggle('show', this.open);
+      }
+
+      setOptions(options) {
+        this.optionsBox.innerHTML = options.map(opt => `
+          <div class="c-option ${String(opt.value) === String(this.hiddenInput.value) ? 'selected' : ''}" 
+               onclick="selectManager.update('${this.id}', '${opt.value}', '${opt.text}')">
+            ${opt.text}
+          </div>
+        `).join('');
+      }
+
+      select(value, text) {
+        this.hiddenInput.value = value;
+        this.label.textContent = text;
+        this.toggle(false);
+        this.optionsBox.querySelectorAll('.c-option').forEach(el => {
+          el.classList.toggle('selected', el.innerText.trim() === text.trim());
+        });
+        if (this.onSelect) this.onSelect(value);
+      }
+    }
+
+    const selectManager = {
+      instances: {},
+      init(id, onSelect) { this.instances[id] = new PremiumSelect(id, onSelect); },
+      update(id, val, text) { this.instances[id].select(val, text); },
+      refresh(id, options) { this.instances[id].setOptions(options); }
+    };
+
+    // Initialize Selects on DOM Load
+    document.addEventListener('DOMContentLoaded', () => {
+      selectManager.init('settings-user-select', (val) => loadUserConfig(val));
+      selectManager.init('cfg-trading-mode');
+      selectManager.init('trades-limit', () => loadTrades());
+
+      // Ensure charts are created on first dashboard load.
+      setTimeout(initOverviewCharts, 150);
+    });
+    document.getElementById('topbar-clock').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+
+    function showToast(msg, type = 'ok') {
+      const el = document.getElementById('toast'), dot = document.getElementById('toast-dot'), txt = document.getElementById('toast-msg');
+      txt.textContent = msg;
+      dot.className = 'dot ' + (type === 'error' ? 'dot-red' : type === 'warn' ? 'dot-amber' : 'dot-green');
+      el.style.opacity = '1'; el.style.pointerEvents = 'auto';
+      setTimeout(() => { el.style.opacity = '0'; el.style.pointerEvents = 'none' }, 3000);
+    }
+
+    const fUsd = v => { if (v == null || isNaN(v)) return '--'; const a = Math.abs(v); const f = a >= 1000 ? a.toLocaleString('en-US', { maximumFractionDigits: 0 }) : a.toFixed(2); return (v < 0 ? '-' : '') + '$' + f };
+    const fPrice = v => { if (v == null || isNaN(v)) return '--'; return v < 0.01 ? v.toPrecision(4) : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) };
+    const fDate = iso => { if (!iso) return '--'; return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) };
+    const pnlCls = v => v > 0 ? 'color:#34d399' : v < 0 ? 'color:#f87171' : 'color:rgba(196,181,253,.6)';
+    const sdot = s => s === 'online' ? 'dot-green' : s === 'waiting' || s === 'initializing' ? 'dot-amber' : 'dot-gray';
+    const setDot = (id, cls) => { const e = document.getElementById(id); if (e) e.className = 'dot ' + cls };
+
+    async function api(p) { const r = await fetch(p); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() }
+
+    async function loadOverview() {
+      try {
+        const d = await api('/api/overview');
+        document.getElementById('ov-total-users').textContent = d.total_users ?? '--';
+        document.getElementById('ov-auth-users').textContent = (d.authorized_users ?? '--') + ' authorized';
+        document.getElementById('ov-active-users').textContent = d.active_users ?? '--';
+        document.getElementById('ov-positions').textContent = d.total_positions ?? '--';
+        const pe = document.getElementById('ov-pnl'); pe.textContent = fUsd(d.global_pnl_today); pe.setAttribute('style', pnlCls(d.global_pnl_today) + ';font-family:JetBrains Mono,monospace;font-size:1.5rem;font-weight:600');
+        document.getElementById('ov-timestamp').textContent = fDate(d.timestamp);
+        document.getElementById('topbar-mode').textContent = (d.system?.trading_mode || 'standard').toUpperCase();
+        const sys = d.system || {};
+        [['ws', sys.websocket], ['sess', sys.sessions], ['tg', sys.telegram]].forEach(([k, v]) => {
+          const l = document.getElementById('health-' + k + '-label');
+          if (l) l.textContent = (v || '--').toUpperCase();
+          setDot('dot-' + k, sdot(v));
+          const b = document.getElementById('bar-' + k);
+          if (b) b.style.width = v === 'online' ? '100%' : v === 'waiting' || v === 'initializing' ? '45%' : '0%';
+        });
+        document.getElementById('health-mode-label').textContent = (sys.trading_mode || '--').toUpperCase();
+        setDot('sidebar-ws-dot', sdot(sys.websocket));
+        setDot('sidebar-tg-dot', sdot(sys.telegram));
+        setDot('sidebar-sess-dot', sdot(sys.sessions));
+      } catch (e) { console.warn('Overview:', e) }
+    }
+
+    async function loadUsers() {
+      const tbody = document.getElementById('users-tbody'), cards = document.getElementById('users-cards');
+      tbody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-sm" style="color:rgba(196,181,253,.3)">Loading...</td></tr>`;
+      cards.innerHTML = '';
+      try {
+        const d = await api('/api/users'); const users = d.users || [];
+        document.getElementById('users-count').textContent = users.length + ' user' + (users.length !== 1 ? 's' : '');
+        if (!users.length) { tbody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-sm" style="color:rgba(196,181,253,.3)">No users.</td></tr>`; return }
+        tbody.innerHTML = users.map(u => {
+          const tMode = u.trading_mode || 'standard';
+          const tBadge = tMode === 'scalper' ? 'badge-amber' : 'badge-lavender';
+          return `
+          <tr onclick="openUserModal('${u.chat_id}')">
+            <td><div class="font-semibold text-white">@${u.username}</div><div class="text-xs font-mono" style="color:rgba(196,181,253,.3)">${u.chat_id}</div></td>
+            <td><span class="badge ${u.bot_mode === 'live' ? 'badge-amber' : 'badge-lavender'}">${u.bot_mode.toUpperCase()}</span></td>
+            <td><span class="badge ${tBadge}">${tMode.toUpperCase()}</span></td>
+            <td><span class="badge ${u.is_authorized ? 'badge-green' : 'badge-gray'}">${u.is_authorized ? 'Yes' : 'No'}</span></td>
+            <td class="font-mono" style="color:#c4b5fd">${u.open_positions}</td>
+            <td class="font-mono text-white">${fUsd(u.current_equity)}</td>
+            <td class="font-mono" style="${pnlCls(u.daily_pnl)}">${fUsd(u.daily_pnl)}</td>
+            <td class="font-mono" style="color:rgba(196,181,253,.6)">${u.total_trades}</td>
+            <td><button class="btn-ghost text-xs py-1 px-3" style="min-height:32px" onclick="event.stopPropagation();loadSettingsForUser('${u.chat_id}')">Config</button></td>
+          </tr>`;
+        }).join('');
+        // Mobile cards
+        cards.innerHTML = users.map(u => {
+          const tMode = u.trading_mode || 'standard';
+          const tBadge = tMode === 'scalper' ? 'badge-amber' : 'badge-lavender';
+          return `
+          <div class="row-card" onclick="openUserModal('${u.chat_id}')">
+            <div class="flex items-start justify-between gap-2 mb-2">
+              <div><div class="font-semibold text-white">@${u.username}</div><div class="text-xs font-mono mt-0.5" style="color:rgba(196,181,253,.3)">${u.chat_id}</div></div>
+              <div class="flex gap-1.5 flex-wrap justify-end">
+                <span class="badge ${tBadge}">${tMode.toUpperCase()}</span>
+                <span class="badge ${u.bot_mode === 'live' ? 'badge-amber' : 'badge-lavender'}">${u.bot_mode.toUpperCase()}</span>
+                <span class="badge ${u.is_authorized ? 'badge-green' : 'badge-gray'}">${u.is_authorized ? 'Auth' : 'No'}</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2 text-center">
+              <div><div class="text-xs mb-0.5" style="color:rgba(196,181,253,.4)">Equity</div><div class="font-mono text-sm text-white">${fUsd(u.current_equity)}</div></div>
+              <div><div class="text-xs mb-0.5" style="color:rgba(196,181,253,.4)">PnL</div><div class="font-mono text-sm" style="${pnlCls(u.daily_pnl)}">${fUsd(u.daily_pnl)}</div></div>
+              <div><div class="text-xs mb-0.5" style="color:rgba(196,181,253,.4)">Trades</div><div class="font-mono text-sm" style="color:#c4b5fd">${u.total_trades}</div></div>
+            </div>
+          </div>`;
+        }).join('');
+      } catch (e) { tbody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-sm" style="color:#f87171">Error: ${e.message}</td></tr>` }
+    }
+
+    function loadSettingsForUser(id) {
+      navigate('user-settings');
+      setTimeout(() => {
+        const d = selectManager.instances['settings-user-select'].optionsBox.querySelectorAll('.c-option');
+        let text = '-- choose a user --';
+        d.forEach(opt => { if (opt.getAttribute('onclick').includes(id)) text = opt.innerText; });
+        selectManager.update('settings-user-select', id, text);
+      }, 200);
+    }
+
+    async function openUserModal(id) {
+      document.getElementById('modal-overlay').classList.add('open');
+      document.getElementById('modal-username').textContent = 'Loading...';
+      document.getElementById('modal-chatid').textContent = id;
+      ['modal-equity', 'modal-pnl', 'modal-margin'].forEach(i => document.getElementById(i).textContent = '--');
+      document.getElementById('modal-positions').innerHTML = '<p class="text-xs" style="color:rgba(196,181,253,.3)">Loading...</p>';
+      try {
+        const d = await api('/api/users/' + id);
+        const cfg = d.config || {};
+        const tMode = cfg.trading_mode || 'standard';
+        const tBadge = tMode === 'scalper' ? 'badge-amber' : 'badge-lavender';
+
+        document.getElementById('modal-username').innerHTML = `@${d.username || id} <span class="badge ${tBadge} ml-2" style="font-size:0.6rem">${tMode.toUpperCase()}</span>`;
+        const acc = d.account || {};
+        document.getElementById('modal-equity').textContent = fUsd(acc.total_equity);
+        const pe = document.getElementById('modal-pnl'); pe.textContent = fUsd(acc.daily_pnl); pe.setAttribute('style', pnlCls(acc.daily_pnl) + ';font-family:JetBrains Mono,monospace;font-size:1.1rem;font-weight:600');
+        document.getElementById('modal-margin').textContent = fUsd(acc.used_margin);
+        const pos = d.open_positions || [];
+        document.getElementById('modal-positions').innerHTML = pos.length ? pos.map(p => `
+      <div class="glass-sm p-3 mb-2 flex items-center justify-between">
+        <div class="flex items-center gap-2"><span class="font-mono font-semibold text-white text-sm">${p.asset}</span><span class="badge ${p.side === 'long' ? 'badge-green' : 'badge-red'}">${p.side.toUpperCase()}</span><span class="text-xs" style="color:rgba(196,181,253,.4)">x${p.leverage}</span></div>
+        <div class="text-right"><div class="font-mono text-xs" style="color:rgba(196,181,253,.6)">Entry: ${fPrice(p.entry_price)}</div><div class="font-mono text-xs" style="${pnlCls(p.pnl_unrealized)}">PnL: ${fUsd(p.pnl_unrealized)}</div></div>
+      </div>`).join('') : '<p class="text-xs" style="color:rgba(196,181,253,.3)">No open positions.</p>';
+      } catch (e) { document.getElementById('modal-username').textContent = 'Error loading user' }
+    }
+    function closeModal() { document.getElementById('modal-overlay').classList.remove('open') }
+
+    async function populateUserSelect() {
+      try {
+        const d = await api('/api/users');
+        const options = (d.users || []).map(u => ({ value: u.chat_id, text: `@${u.username} (${u.chat_id})` }));
+        selectManager.refresh('settings-user-select', options);
+      } catch (e) { }
+    }
+
+    async function loadUserConfig(id) {
+      if (!id) return; S.userId = id;
+      try {
+        const d = await api('/api/users/' + id); const cfg = d.config || {};
+        document.getElementById('settings-username-title').textContent = '@' + (d.username || id);
+        document.getElementById('settings-mode-badge').textContent = (cfg.bot_mode || 'paper').toUpperCase();
+        const ab = document.getElementById('settings-auth-badge'); ab.textContent = d.is_authorized ? 'Authorized' : 'Unauthorized'; ab.className = 'badge ' + (d.is_authorized ? 'badge-green' : 'badge-gray');
+        document.getElementById('cfg-std-auto').value = cfg.std_min_score_to_auto_trade ?? 65;
+        document.getElementById('cfg-std-leverage').value = cfg.std_max_leverage ?? 10;
+        document.getElementById('cfg-std-positions').value = cfg.std_max_concurrent_positions ?? 10;
+        document.getElementById('cfg-risk-pct').value = ((cfg.risk_pct ?? 0.02) * 100).toFixed(1);
+        document.getElementById('cfg-trading-mode').value = cfg.trading_mode ?? 'standard';
+        document.getElementById('cfg-scl-auto').value = cfg.scl_min_score_to_auto_trade ?? 57;
+        document.getElementById('cfg-scl-leverage').value = cfg.scl_max_leverage ?? 20;
+        document.getElementById('cfg-scl-positions').value = cfg.scl_max_concurrent_positions ?? 5;
+        document.getElementById('settings-form-wrapper').classList.remove('hidden');
+        document.getElementById('settings-feedback').textContent = '';
+
+        // Update Bot Control Button (Premium Style)
+        const isPaused = d.account?.is_paused ?? false;
+        const btn = document.getElementById('bot-status-toggle');
+        const dot = document.getElementById('bot-status-dot');
+        const txt = document.getElementById('bot-status-text');
+
+        btn.classList.remove('hidden');
+        if (isPaused) {
+          txt.textContent = 'START BOT';
+          btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+          btn.style.boxShadow = '0 0 15px rgba(16, 185, 129, 0.3)';
+          dot.className = 'dot dot-gray';
+        } else {
+          txt.textContent = 'STOP BOT';
+          btn.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+          btn.style.boxShadow = '0 0 15px rgba(239, 68, 68, 0.3)';
+          dot.className = 'dot dot-green blink';
+        }
+      } catch (e) { showToast('Failed to load config', 'error') }
+    }
+
+    async function toggleBotStatus() {
+      if (!S.userId) return;
+      const btn = document.getElementById('bot-status-toggle');
+      const txt = document.getElementById('bot-status-text');
+      const isCurrentlyPaused = txt.textContent.includes('START');
+      const action = isCurrentlyPaused ? 'resume' : 'pause';
+      
+      btn.style.opacity = '0.5';
+      btn.style.pointerEvents = 'none';
+      txt.textContent = '...';
+
+      try {
+        const r = await fetch(`/api/${action}?chat_id=${S.userId}`, { method: 'POST' });
+        if (!r.ok) throw new Error('Action failed');
+        showToast(action === 'resume' ? 'Bot started' : 'Bot stopped');
+        await loadUserConfig(S.userId);
+      } catch (e) {
+        showToast('Operation failed', 'error');
+        await loadUserConfig(S.userId);
+      } finally {
+        btn.style.opacity = '1';
+        btn.style.pointerEvents = 'auto';
+      }
+    }
+
+    function switchConfigTab(tab) {
+      S.tab = tab;
+      document.getElementById('config-standard').classList.toggle('hidden', tab !== 'standard');
+      document.getElementById('config-scalper').classList.toggle('hidden', tab !== 'scalper');
+      document.getElementById('tab-standard').className = tab === 'standard' ? 'btn-primary py-2 px-4 text-xs' : 'btn-ghost py-2 px-4 text-xs';
+      document.getElementById('tab-scalper').className = tab === 'scalper' ? 'btn-primary py-2 px-4 text-xs' : 'btn-ghost py-2 px-4 text-xs';
+      document.getElementById('tab-standard').style.minHeight = '40px';
+      document.getElementById('tab-scalper').style.minHeight = '40px';
+    }
+
+    async function saveUserConfig() {
+      if (!S.userId) return;
+      const rp = parseFloat(document.getElementById('cfg-risk-pct').value) / 100;
+      const payload = { trading_mode: document.getElementById('cfg-trading-mode').value, risk_pct: isNaN(rp) ? 0.02 : rp, std_min_score_to_auto_trade: +document.getElementById('cfg-std-auto').value, std_max_leverage: +document.getElementById('cfg-std-leverage').value, std_max_concurrent_positions: +document.getElementById('cfg-std-positions').value, scl_min_score_to_auto_trade: +document.getElementById('cfg-scl-auto').value, scl_max_leverage: +document.getElementById('cfg-scl-leverage').value, scl_max_concurrent_positions: +document.getElementById('cfg-scl-positions').value };
+      try {
+        const r = await fetch('/api/users/' + S.userId + '/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        document.getElementById('settings-feedback').textContent = 'Saved ' + new Date().toLocaleTimeString();
+        showToast('Config saved');
+      } catch (e) { document.getElementById('settings-feedback').textContent = 'Error: ' + e.message; showToast('Save failed', 'error') }
+    }
+
+    async function resetUserConfig() {
+      if (!S.userId || !confirm('Reset config to defaults?')) return;
+      try {
+        const r = await fetch('/api/users/' + S.userId + '/config/reset', { method: 'POST' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        await loadUserConfig(S.userId); showToast('Config reset');
+      } catch (e) { showToast('Reset failed', 'error') }
+    }
+
+    async function loadTrades() {
+      const tbody = document.getElementById('trades-tbody'), cards = document.getElementById('trades-cards');
+      tbody.innerHTML = `<tr><td colspan="11" class="text-center py-10 text-sm" style="color:rgba(196,181,253,.3)">Loading...</td></tr>`;
+      cards.innerHTML = '';
+      const limit = document.getElementById('trades-limit').value || 20;
+      try {
+        const d = await api('/api/trades?limit=' + limit); const trades = d.trades || [];
+        if (!trades.length) { tbody.innerHTML = `<tr><td colspan="11" class="text-center py-10 text-sm" style="color:rgba(196,181,253,.3)">No trades yet.</td></tr>`; return }
+        const sideBadge = s => s === 'long' ? 'badge-green' : 'badge-red';
+        const strBadge = s => s === 'strong' ? 'badge-green' : s === 'moderate' ? 'badge-amber' : 'badge-gray';
+        // Desktop
+        tbody.innerHTML = trades.map((t, i) => `
+      <tr>
+        <td class="font-mono text-xs" style="color:rgba(196,181,253,.3)">${i + 1}</td>
+        <td class="font-mono font-semibold text-white">${t.asset}</td>
+        <td><span class="badge ${sideBadge(t.side)}">${t.side.toUpperCase()}</span></td>
+        <td class="font-mono" style="color:#c4b5fd">${t.score}</td>
+        <td class="font-mono text-white">${fPrice(t.entry_price)}</td>
+        <td class="font-mono" style="color:#f87171">${fPrice(t.stop_loss)}</td>
+        <td class="font-mono" style="color:#34d399">${fPrice(t.tp1)}</td>
+        <td class="font-mono" style="color:#34d399">${fPrice(t.tp2)}</td>
+        <td><span class="badge ${strBadge(t.strength)}">${t.strength}</span></td>
+        <td><span class="badge ${t.auto_executed ? 'badge-lavender' : 'badge-gray'}">${t.auto_executed ? 'Auto' : 'Manual'}</span></td>
+        <td class="text-xs" style="color:rgba(196,181,253,.4)">${fDate(t.timestamp)}</td>
+      </tr>`).join('');
+        // Mobile cards
+        cards.innerHTML = trades.map((t, i) => `
+      <div class="row-card">
+        <div class="flex items-center justify-between mb-2">
+          <div class="flex items-center gap-2">
+            <span class="font-mono font-semibold text-white">${t.asset}</span>
+            <span class="badge ${sideBadge(t.side)}">${t.side.toUpperCase()}</span>
+            <span class="badge ${strBadge(t.strength)}">${t.strength}</span>
+          </div>
+          <span class="text-xs font-mono" style="color:rgba(196,181,253,.4)">${fDate(t.timestamp)}</span>
+        </div>
+        <div class="grid grid-cols-4 gap-2 text-center">
+          <div><div class="text-xs mb-0.5" style="color:rgba(196,181,253,.4)">Score</div><div class="font-mono text-sm" style="color:#c4b5fd">${t.score}</div></div>
+          <div><div class="text-xs mb-0.5" style="color:rgba(196,181,253,.4)">Entry</div><div class="font-mono text-sm text-white">${fPrice(t.entry_price)}</div></div>
+          <div><div class="text-xs mb-0.5" style="color:rgba(196,181,253,.4)">SL</div><div class="font-mono text-sm" style="color:#f87171">${fPrice(t.stop_loss)}</div></div>
+          <div><div class="text-xs mb-0.5" style="color:rgba(196,181,253,.4)">TP1</div><div class="font-mono text-sm" style="color:#34d399">${fPrice(t.tp1)}</div></div>
+        </div>
+      </div>`).join('');
+      } catch (e) { tbody.innerHTML = `<tr><td colspan="11" class="text-center py-10 text-sm" style="color:#f87171">Error: ${e.message}</td></tr>` }
+    }
+
+    setInterval(() => { if (S.page === 'overview') loadOverview() }, 10000);
+    loadOverview();
+  </script>
 </body>
 
 </html>

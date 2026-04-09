@@ -70,7 +70,15 @@ class ScoringEngine:
         self._price_history: Dict[str, list] = {}
 
         # OI history for change calculation: asset -> [(ts, oi_usd)]
-        self._oi_snapshots: Dict[str, list] = {}
+        from core.db import user_db
+        self._oi_snapshots: Dict[str, list] = user_db.load_all_oi_snapshots()
+        if self._oi_snapshots:
+            log.info(f"💾 Loaded {len(self._oi_snapshots)} cached OI snapshot histories from DB.")
+
+    def dump_oi_state(self):
+        """Persist OI snapshots to database to prevent amnesia on restart."""
+        from core.db import user_db
+        user_db.save_oi_snapshots_batch(self._oi_snapshots)
 
         # Volatility cache: asset -> (ts, regime, realized_vol, trend)
         self._vol_cache: Dict[str, tuple] = {}
@@ -78,6 +86,9 @@ class ScoringEngine:
         # Spot-Perp basis cache (global)
         self._spot_prices: Dict[str, float] = {}
         self._spot_cache_time: float = 0.0
+
+        # MTF Trend Cache: asset -> (timestamp, trend_string)
+        self._mtf_cache: Dict[str, Tuple[float, str]] = {}
 
     # ──────────────────────────────────────────
     # PUBLIC
@@ -177,55 +188,63 @@ class ScoringEngine:
             "session_bonus": session_bonus,
         }
 
-    async def run_asset(self, asset: str, active_modes: List[str] = None, meta_data=None) -> Dict[str, TradeSignal]:
+    async def run_asset(self, asset: str, active_modes: List[str] = None, meta_data=None) -> Tuple[Dict[str, TradeSignal], int]:
         """
         Run full scoring pipeline for one asset.
-        Computes standard and/or scalper score independently based on active_modes.
-        Returns dictionary of signals by mode.
         """
         import config
         if active_modes is None:
             active_modes = ["standard"]
             
         signals = {}
+        max_score_found = 0
         now_ts = time.monotonic()
 
         # 1. SCALPER MODE
+        score_scl = 0
         if "scalper" in active_modes:
-            cooldown_secs = 5 * 60
-            if hasattr(config, 'SCALPER') and hasattr(config.SCALPER, 'signal_cooldown_minutes'):
-                cooldown_secs = config.SCALPER.signal_cooldown_minutes * 60
-            
-            last_ts = self._last_signal_ts.get(f"{asset}_scalper", 0)
-            if now_ts - last_ts >= cooldown_secs:
-                sig = await self._run_scalper(asset, meta_data)
-                if sig:
+            try:
+                cooldown_secs = 1 * 60 # Default
+                if hasattr(config, 'SCALPER'):
+                    cooldown_secs = config.SCALPER.signal_cooldown_minutes * 60
+                
+                last_ts = self._last_signal_ts.get(f"{asset}_scalper", 0)
+                sig, score_scl = await self._run_scalper(asset, meta_data)
+                
+                if score_scl > max_score_found: max_score_found = score_scl
+
+                if sig and (now_ts - last_ts >= cooldown_secs):
                     signals["scalper"] = sig
                     self._last_signal_ts[f"{asset}_scalper"] = now_ts
-            else:
-                remaining = int(cooldown_secs - (now_ts - last_ts))
-                log.debug(f"{asset} [SCALPER]: cooldown active ({remaining}s remaining)")
+                elif sig:
+                    log.debug(f"{asset} [SCALPER]: cooldown active")
+            except Exception as e:
+                log.error(f"Error in scalper: {e}")
 
         # 2. STANDARD MODE
+        score_std = 0
         if "standard" in active_modes:
-            cooldown_secs = config.SIGNAL.signal_cooldown_minutes * 60
-            last_ts = self._last_signal_ts.get(f"{asset}_standard", 0)
-            if now_ts - last_ts >= cooldown_secs:
-                sig = await self._run_standard(asset, meta_data)
-                if sig:
+            try:
+                cooldown_secs = config.SIGNAL.signal_cooldown_minutes * 60
+                last_ts = self._last_signal_ts.get(f"{asset}_standard", 0)
+                
+                sig, score_std = await self._run_standard(asset, meta_data)
+                
+                if score_std > max_score_found: max_score_found = score_std
+
+                if sig and (now_ts - last_ts >= cooldown_secs):
                     signals["standard"] = sig
                     self._last_signal_ts[f"{asset}_standard"] = now_ts
-            else:
-                remaining = int(cooldown_secs - (now_ts - last_ts))
-                log.debug(f"{asset} [STANDARD]: cooldown active ({remaining}s remaining)")
+            except Exception as e:
+                log.error(f"Error in standard: {e}")
 
-        return signals
+        return signals, max_score_found
 
     # ──────────────────────────────────────────
     # SCALPER SCORING
     # ──────────────────────────────────────────
 
-    async def _run_scalper(self, asset: str, meta_data=None) -> Optional[TradeSignal]:
+    async def _run_scalper(self, asset: str, meta_data=None) -> Tuple[Optional[TradeSignal], int]:
         """
         Ultra-fast scoring for Scalper Mode.
         Uses: Orderbook Imbalance, CVD, EMA8/21, RSI(14), Volume Surge.
@@ -236,7 +255,7 @@ class ScoringEngine:
         # 1. Get mark price
         mark_price = await self.client.get_mark_price(asset, meta=meta_data)
         if mark_price <= 0:
-            return None
+            return None, 0
 
         # 2. Fetch 1-minute candles (last 30 for EMA/RSI)
         candles = []
@@ -255,19 +274,116 @@ class ScoringEngine:
         except Exception as e:
             log.debug(f"[SCALPER] {asset} candle fetch failed: {e}")
 
-        # 3. Compute scalper indicators
-        score, side, reasons = self._calculate_scalper_score(asset, mark_price, candles)
+        # 3. Fetch 15m MTF trend
+        mtf_trend = await self._fetch_15m_mtf_data(asset)
+
+        # 4. Compute scalper indicators
+        score, side, reasons = self._calculate_scalper_score(asset, mark_price, candles, mtf_trend)
+
+        # 3c. Apply session bonus/penalty so adaptive threshold can use it.
+        session_bonus, session_reasons = self._get_session_bonus()
+        score = max(0, min(score + session_bonus, 100))
+        reasons.extend(session_reasons)
 
         if score < config.SCALPER.min_score_to_enter:
             log.debug(f"[SCALPER] {asset}: score {score} < {config.SCALPER.min_score_to_enter}")
-            return None
+            return None, score
+
+        # 3d. Apply Meta-Learning adjustment
+        meta_delta, meta_reason, pattern_key = self._apply_meta_learning(asset, "scalper", side, score)
+        if meta_delta != 0:
+            score += meta_delta
+            reasons.append(meta_reason)
+        score = max(0, min(score, 100))
 
         # 4. Build signal with scalper TP/SL
-        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons)
-        log.info(f"⚡ SCALPER SIGNAL: {asset} {side.value.upper()} score={score}")
-        return signal
+        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, mtf_regime, session_bonus)
+        signal.meta_pattern_key = pattern_key
+        signal.meta_score_delta = meta_delta
+        
+        log.info(f"⚡ SCALPER SIGNAL: {asset} {side.value.upper()} score={score} (Meta: {meta_delta:+d})")
+        return signal, score
 
-    def _calculate_scalper_score(self, asset: str, mark_price: float, candles: list) -> Tuple[int, Side, List[str]]:
+    async def _fetch_scalper_mtf_candles(self, asset: str) -> list:
+        """Fetch higher-timeframe candles for scalper confirmation."""
+        import config
+        candles_15m = []
+        try:
+            async with self.candle_sem:
+                now_ms = int(time.time() * 1000)
+                lookback = max(16, int(getattr(config.SCALPER, "mtf_confirm_lookback", 32)))
+                interval = getattr(config.SCALPER, "mtf_confirm_interval", "15m")
+                start_ms = now_ms - lookback * 15 * 60 * 1000
+                resp, succ = await self.client._call_info_endpoint(
+                    "candleSnapshot",
+                    {"req": {"coin": asset, "interval": interval, "startTime": start_ms, "endTime": now_ms}}
+                )
+                if succ and isinstance(resp, list):
+                    candles_15m = resp
+        except Exception as e:
+            log.debug(f"[SCALPER] {asset} 15m fetch failed: {e}")
+        return candles_15m
+
+    def _scalper_mtf_confirm(self, side: Side, candles_15m: list) -> Tuple[bool, str, MarketRegime]:
+        """
+        Confirm 1m scalper signal with higher timeframe trend (15m).
+        Returns (is_confirmed, reason, derived_regime).
+        """
+        import config
+        if not getattr(config.SCALPER, "mtf_confirm_enabled", True):
+            return True, "🧭 MTF confirm disabled", MarketRegime.UNKNOWN
+
+        closes = []
+        for c in candles_15m:
+            if isinstance(c, dict):
+                try:
+                    closes.append(float(c.get("c", 0)))
+                except (TypeError, ValueError):
+                    pass
+
+        if len(closes) < 21:
+            return False, "🧭 MTF blocked: 15m data not enough", MarketRegime.UNKNOWN
+
+        def ema(data: list, period: int) -> float:
+            k = 2 / (period + 1)
+            e = data[0]
+            for v in data[1:]:
+                e = v * k + e * (1 - k)
+            return e
+
+        window = closes[-32:] if len(closes) >= 32 else closes
+        ema9 = ema(window, 9)
+        ema21 = ema(window, 21)
+        trend = (window[-1] - window[0]) / max(window[0], 1e-9)
+
+        # Realized volatility proxy on 15m closes
+        rets = []
+        for i in range(1, len(window)):
+            prev = window[i - 1]
+            if prev > 0:
+                rets.append((window[i] - prev) / prev)
+        vol = 0.0
+        if rets:
+            mean_r = sum(rets) / len(rets)
+            var = sum((r - mean_r) ** 2 for r in rets) / len(rets)
+            vol = var ** 0.5
+
+        if vol > 0.010:
+            regime = MarketRegime.VOLATILE
+        elif abs(trend) >= 0.006:
+            regime = MarketRegime.TRENDING
+        else:
+            regime = MarketRegime.RANGING
+
+        long_ok = ema9 > ema21 and trend > -0.002
+        short_ok = ema9 < ema21 and trend < 0.002
+        confirmed = long_ok if side == Side.LONG else short_ok
+
+        if confirmed:
+            return True, f"🧭 15m confirm OK (EMA9/21, trend {trend*100:.2f}%)", regime
+        return False, f"🧭 MTF blocked: 15m trend not aligned ({trend*100:.2f}%)", regime
+
+    def _calculate_scalper_score(self, asset: str, mark_price: float, candles: list, mtf_trend: str = "neutral") -> Tuple[int, Side, List[str]]:
         """
         Fast scalper scoring using technical indicators on 1m candles.
         Returns (score: int, side: Side, reasons: List[str])
@@ -278,9 +394,39 @@ class ScoringEngine:
         reasons = []
 
         # ── Orderbook Imbalance (from cache) ─────────────────────────
-        ob = self.cache.orderbooks.get(asset) if hasattr(self.cache, 'orderbooks') else None
-        if ob and hasattr(ob, 'bid_ask_imbalance'):
-            imb = ob.bid_ask_imbalance
+        ob = self.cache.orderbook.get(asset) if hasattr(self.cache, 'orderbook') else None
+        if ob:
+            imb = 0.0
+            try:
+                # WS cache stores raw levels; compute imbalance like standard pipeline.
+                levels = ob.get("levels", [[], []]) if isinstance(ob, dict) else [[], []]
+                bids_raw = levels[0] if len(levels) > 0 else []
+                asks_raw = levels[1] if len(levels) > 1 else []
+
+                def parse_lvl(x):
+                    if isinstance(x, dict):
+                        return float(x.get("px", 0)), float(x.get("sz", 0))
+                    try:
+                        return float(x[0]), float(x[1])
+                    except Exception:
+                        return 0.0, 0.0
+
+                bids = [parse_lvl(b) for b in bids_raw[:20]]
+                asks = [parse_lvl(a) for a in asks_raw[:20]]
+                bid_liq = sum(px * sz for px, sz in bids if px > 0 and sz > 0)
+                ask_liq = sum(px * sz for px, sz in asks if px > 0 and sz > 0)
+                if (bid_liq + ask_liq) > 0:
+                    imb = (bid_liq - ask_liq) / (bid_liq + ask_liq)
+                
+                # Spread Filter (Institutional Filter)
+                if bids and asks and bids[0][0] > 0:
+                    spread_pct = (asks[0][0] - bids[0][0]) / asks[0][0]
+                    if spread_pct > 0.0008:
+                        log.info(f"[{asset}] SCALPER REJECT: Spread too wide ({spread_pct*100:.2f}%)")
+                        return 0, Side.LONG, ["REJECT: Spread too wide"]
+            except Exception:
+                imb = 0.0
+
             if imb > 0.60:
                 bull_pts += 20
                 reasons.append(f"📗 Strong bid wall (imbalance {imb:.2f}) → LONG")
@@ -300,13 +446,15 @@ class ScoringEngine:
             side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
             return min(total, 100), side, reasons
 
-        # Extract close prices
+        # Extract OHLCV
         closes = []
+        opens = []
         volumes = []
         for c in candles:
             if isinstance(c, dict):
                 try:
                     closes.append(float(c.get("c", 0)))
+                    opens.append(float(c.get("o", 0)))
                     volumes.append(float(c.get("v", 0)))
                 except (ValueError, TypeError):
                     pass
@@ -314,6 +462,22 @@ class ScoringEngine:
         if len(closes) < 10:
             side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
             return min(bull_pts + bear_pts, 100), side, reasons
+
+        # ── Momentum Confirmation (Institutional Filter) ─────────────────
+        if len(closes) >= 3:
+            bull_candles = sum(1 for c, o in zip(closes[-3:], opens[-3:]) if c > o)
+            bear_candles = sum(1 for c, o in zip(closes[-3:], opens[-3:]) if c < o)
+            
+            # For scalper, we only add points or penalize, or hard reject.
+            # 3-of-4 logic implies if it goes against momentum it shouldn't trade.
+            if bull_candles >= 2:
+                bull_pts += 10
+                reasons.append(f"🔥 Momentum 1m Bullish ({bull_candles}/3 Green)")
+            elif bear_candles >= 2:
+                bear_pts += 10
+                reasons.append(f"🩸 Momentum 1m Bearish ({bear_candles}/3 Red)")
+            else:
+                reasons.append("⚖️ Momentum 1m Neutral")
 
         # ── EMA 8 vs EMA 21 ──────────────────────────────────────────
         def ema(data: list, period: int) -> float:
@@ -358,8 +522,8 @@ class ScoringEngine:
         recent_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
         if len(recent_trades) >= 20:
             sample = recent_trades[-80:]
-            buy_vol = sum(t.get('sz', 0) for t in sample if t.get('side', '') in ('B', 'buy', 'Ask'))
-            sell_vol = sum(t.get('sz', 0) for t in sample if t.get('side', '') in ('S', 'sell', 'Bid'))
+            buy_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('B', 'buy', 'Ask'))
+            sell_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('S', 'sell', 'Bid'))
             total_vol = buy_vol + sell_vol
             if total_vol > 0:
                 cvd_ratio = (buy_vol - sell_vol) / total_vol
@@ -385,13 +549,79 @@ class ScoringEngine:
                     else:
                         bear_pts += extra
 
-        # ── Final tally ───────────────────────────────────────────────
+        # ── Market Structure HH/HL (cache-first: reuse existing 1m candles) ──
+        trend_state = self._infer_hh_hl_structure(closes)
+        import config
+        if trend_state == "bull":
+            bull_pts += config.SIGNAL.structure_scalper_bonus
+            reasons.append(f"🧩 1m structure HH/HL (+{config.SIGNAL.structure_scalper_bonus})")
+        elif trend_state == "bear":
+            bear_pts += config.SIGNAL.structure_scalper_bonus
+            reasons.append(f"🧩 1m structure LH/LL (+{config.SIGNAL.structure_scalper_bonus})")
+        else:
+            reasons.append("🧩 1m structure neutral")
+
+        # ── Final tally & Consensus Filter ────────────────────────────
         side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
         raw = (bull_pts if side == Side.LONG else bear_pts)
+        
+        # ── MTF Confirmation (15m Trend Alignment) ──────────────────
+        import config
+        scfg = config.SCALPER
+        if mtf_trend != "neutral":
+            if (side == Side.LONG and mtf_trend == "bull") or (side == Side.SHORT and mtf_trend == "bear"):
+                raw += scfg.mtf_score_bonus
+                reasons.append(f"📡 15m MTF Align ({mtf_trend}) → +{scfg.mtf_score_bonus}")
+            else:
+                raw += scfg.mtf_score_penalty
+                reasons.append(f"📡 15m MTF Discord ({mtf_trend}) → {scfg.mtf_score_penalty}")
+                # Hard reject for scalper if 15m trend is strongly against us
+                if abs(scfg.mtf_score_penalty) > 10 and raw < 60:
+                    log.debug(f"[{asset}] SCALPER REJECT: Against 15m MTF trend")
+                    return 0, side, reasons + ["REJECT: Counter-trend MTF"]
+
+        # Enforce Scalper Consensus: Must have momentum alignment
+        if side == Side.LONG and (locals().get('bear_candles', 0) >= 2):
+            log.debug(f"[{asset}] SCALPER REJECT: LONG signal blocked by 1m Bearish Momentum")
+            return 0, side, reasons + ["REJECT: Momentum against trade"]
+        if side == Side.SHORT and (locals().get('bull_candles', 0) >= 2):
+            log.debug(f"[{asset}] SCALPER REJECT: SHORT signal blocked by 1m Bullish Momentum")
+            return 0, side, reasons + ["REJECT: Momentum against trade"]
+            
         score = min(raw, 100)
         return score, side, reasons
 
-    def _build_scalper_signal(self, asset: str, side: Side, score: int, mark_price: float, reasons: list) -> TradeSignal:
+    def _infer_hh_hl_structure(self, closes: list) -> str:
+        """
+        Lightweight structure inference from close sequence.
+        Returns: bull | bear | neutral
+        """
+        if len(closes) < 12:
+            return "neutral"
+        w = closes[-12:]
+        hh = 0
+        ll = 0
+        for i in range(1, len(w)):
+            if w[i] > w[i - 1]:
+                hh += 1
+            elif w[i] < w[i - 1]:
+                ll += 1
+        if hh >= 8:
+            return "bull"
+        if ll >= 8:
+            return "bear"
+        return "neutral"
+
+    def _build_scalper_signal(
+        self,
+        asset: str,
+        side: Side,
+        score: int,
+        mark_price: float,
+        reasons: list,
+        regime: MarketRegime = MarketRegime.UNKNOWN,
+        session_bonus: int = 0,
+    ) -> TradeSignal:
         """Build a TradeSignal with scalper-specific TP/SL levels."""
         import config
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
@@ -412,7 +642,12 @@ class ScoringEngine:
             tp2       = round(mark_price * (1 - tp2_pct), 8)
 
         strength = SignalStrength.STRONG if score >= 70 else SignalStrength.MODERATE
-        breakdown = ScoreBreakdown(raw_score=score, final_score=score, reasons=reasons)
+        breakdown = ScoreBreakdown(
+            raw_score=score,
+            final_score=score,
+            session_bonus=session_bonus,
+            reasons=reasons
+        )
 
         return TradeSignal(
             signal_id=str(uuid.uuid4())[:8].upper(),
@@ -420,20 +655,22 @@ class ScoringEngine:
             side=side,
             score=score,
             strength=strength,
-            regime=MarketRegime.UNKNOWN,
+            regime=regime,
             breakdown=breakdown,
             entry_price=mark_price,
             stop_loss=stop_loss,
             tp1=tp1,
             tp2=tp2,
             suggested_leverage=leverage,
+            meta_pattern_key=getattr(breakdown, 'meta_pattern_key', None),
+            meta_score_delta=getattr(breakdown, 'meta_score_delta', 0)
         )
 
     # ──────────────────────────────────────────
     # STANDARD SCORING (existing pipeline)
     # ──────────────────────────────────────────
 
-    async def _run_standard(self, asset: str, meta_data=None) -> Optional[TradeSignal]:
+    async def _run_standard(self, asset: str, meta_data=None) -> Tuple[Optional[TradeSignal], int]:
         """Standard scoring pipeline (OI, Funding, Liquidation, Orderbook)."""
         
         # 1. Fetch allMids ONCE per cycle for Spot-Perp basis (cached 10s by client)
@@ -445,7 +682,7 @@ class ScoringEngine:
         mark_price = await self.client.get_mark_price(asset, meta=meta_data)
         if mark_price <= 0:
             log.warning(f"{asset}: invalid mark price, skipping")
-            return None
+            return None, 0
 
         # Funding data — REQUIRED
         try:
@@ -453,7 +690,7 @@ class ScoringEngine:
             log.debug(f"[{asset}] funding_rate={funding.funding_rate:.6f}")
         except Exception as e:
             log.error(f"[{asset}] Cannot fetch funding: {e}")
-            return None  # skip this asset entirely
+            return None, 0  # skip this asset entirely
 
         # OI data — REQUIRED
         try:
@@ -464,7 +701,7 @@ class ScoringEngine:
             )
         except Exception as e:
             log.error(f"[{asset}] Cannot fetch OI: {e}")
-            return None
+            return None, 0
 
         # Orderbook — OPTIONAL (PROACTIVELY USE WS CACHE FIRST TO SAVE REST CALLS)
         ob_snap = None
@@ -475,17 +712,24 @@ class ScoringEngine:
                 # Convert raw WS book to OrderbookSnapshot
                 from models.schemas import OrderbookSnapshot
                 levels = ws_book.get("levels", [[], []])
-                bids = [[float(b[0]), float(b[1])] for b in levels[0][:20]]
-                asks = [[float(a[0]), float(a[1])] for a in levels[1][:20]]
+                def parse_lvl(x):
+                    if isinstance(x, dict): return float(x.get("px", 0)), float(x.get("sz", 0))
+                    try: return float(x[0]), float(x[1])
+                    except: return 0, 0
+                
+                bids = [[px, sz] for px, sz in (parse_lvl(b) for b in levels[0][:20]) if px > 0]
+                asks = [[px, sz] for px, sz in (parse_lvl(a) for a in levels[1][:20]) if px > 0]
+                
                 if bids and asks:
                     mid = (bids[0][0] + asks[0][0]) / 2
                     bid_liq = sum(b[0] * b[1] for b in bids)
                     ask_liq = sum(a[0] * a[1] for a in asks)
                     imbalance = (bid_liq - ask_liq) / (bid_liq + ask_liq) if (bid_liq + ask_liq) else 0
+                    vwap_val = mid # standard fallback
                     ob_snap = OrderbookSnapshot(
                         asset=asset, bids=bids, asks=asks, mid_price=mid,
                         spread_pct=(asks[0][0] - bids[0][0])/mid,
-                        bid_ask_imbalance=imbalance, vwap=mid, vwap_deviation_pct=0
+                        bid_ask_imbalance=imbalance, vwap=vwap_val, vwap_deviation_pct=0
                     )
                     log.debug(f"[{asset}] Using WS Orderbook Cache")
             
@@ -504,8 +748,13 @@ class ScoringEngine:
             log.debug(f"[{asset}] Orderbook logic error: {repr(e)}")
             ob_snap = None
 
+        # ── Spread Filter (Institutional Filter) ──────────────────────
+        if ob_snap is not None and ob_snap.spread_pct > 0.0008:
+            log.info(f"[{asset}] REJECT: Bid-Ask Spread too wide ({ob_snap.spread_pct*100:.2f}% > 0.08%)")
+            return None, 0
+
         # Store OI snapshot for change calculation
-        now_ts = time.monotonic()
+        now_ts = time.time()
         if asset not in self._oi_snapshots:
             self._oi_snapshots[asset] = []
         self._oi_snapshots[asset].append((now_ts, oi.open_interest))
@@ -531,7 +780,7 @@ class ScoringEngine:
 
         if vol_regime == MarketRegime.EXTREME:
             log.debug(f"[VOL] {asset}: realized_vol={realized_vol*100:.2f}%/day regime=EXTREME multiplier=0.70x (SKIPPING SIGNAL)")
-            return None
+            return None, 0
 
         # ── Run analyzers — NO side_bias input ─────────────────────────
         funding_history = self.cache.funding_history.get(asset, [])
@@ -582,24 +831,92 @@ class ScoringEngine:
         total_bull = oi_bull + liq_bull + ob_bull
         total_bear = oi_bear + liq_bear + ob_bear
 
+        # ── Institutional Filter: 3-of-4 Consensus & Momentum ─────────
+        oi_dir = Side.LONG if oi_bull > oi_bear else Side.SHORT if oi_bear > oi_bull else None
+        liq_dir = Side.LONG if liq_bull > liq_bear else Side.SHORT if liq_bear > liq_bull else None
+        ob_dir = Side.LONG if ob_bull > ob_bear else Side.SHORT if ob_bear > ob_bull else None
+        
+        dirs = [oi_dir, liq_dir, ob_dir]
+        long_count = dirs.count(Side.LONG)
+        short_count = dirs.count(Side.SHORT)
+        
+        # Fast fail if even with Momentum, we can't reach 3 of 4 consensus
+        if max(long_count, short_count) < 2:
+            log.debug(f"[{asset}] REJECT: No basic consensus (Longs:{long_count}, Shorts:{short_count})")
+            return None, 0
+            
+        # Fetch 3 latest 1m candles for Momentum Confirmation
+        mom_dir = None
+        mom_reason = "Momentum: None"
+        try:
+            async with self.candle_sem:
+                now_ms = int(time.time() * 1000)
+                start_ms = now_ms - 5 * 60 * 1000
+                resp, succ = await self.client._call_info_endpoint(
+                    "candleSnapshot",
+                    {"req": {"coin": asset, "interval": "1m", "startTime": start_ms, "endTime": now_ms}}
+                )
+                if succ and isinstance(resp, list) and len(resp) >= 3:
+                    closes = [float(c["c"]) for c in resp[-3:]]
+                    opens = [float(c["o"]) for c in resp[-3:]]
+                    
+                    bull_candles = sum(1 for o, c in zip(opens, closes) if c > o)
+                    bear_candles = sum(1 for o, c in zip(opens, closes) if c < o)
+                    
+                    if bull_candles >= 2:
+                        mom_dir = Side.LONG
+                        mom_reason = f"Momentum: 1m Bullish ({bull_candles}/3 Green)"
+                    elif bear_candles >= 2:
+                        mom_dir = Side.SHORT
+                        mom_reason = f"Momentum: 1m Bearish ({bear_candles}/3 Red)"
+                    else:
+                        mom_reason = "Momentum: Neutral"
+        except Exception as e:
+            log.debug(f"[{asset}] Momentum fetch failed: {e}")
+            
+        dirs.append(mom_dir)
+        long_count = dirs.count(Side.LONG)
+        short_count = dirs.count(Side.SHORT)
+        
+        if max(long_count, short_count) < 3:
+            log.debug(f"[{asset}] REJECT: Dropped due to lack of 3-of-4 Consensus. L:{long_count} S:{short_count}")
+            return None, 0
+
         # ── Direction decided HERE after all evidence is in ────────────
         # raw_score = winning side score + confidence margin
         # The margin between bull and bear represents conviction strength
         margin = abs(total_bull - total_bear)
         confidence_bonus = min(margin * 2, 15)  # up to 15pts for strong conviction
 
-        if total_bull > total_bear:
+        if long_count >= 3:
             side = Side.LONG
             raw_score = total_bull + confidence_bonus
-        elif total_bear > total_bull:
+        elif short_count >= 3:
             side = Side.SHORT
             raw_score = total_bear + confidence_bonus
         else:
-            # True tie — skip, wait for clearer signal
-            log.debug(
-                f"{asset}: tied bull={total_bull} bear={total_bear}, skipping"
-            )
-            return None
+            return None, 0
+
+        # ── Market Structure bonus/penalty (cache-first: trend_pct from vol cache)
+        structure_delta = 0
+        if trend_pct > 0.010:
+            if side == Side.LONG:
+                structure_delta = SIGNAL.structure_standard_bonus
+                all_structure_reason = f"🧩 Structure align uptrend (+{structure_delta})"
+            else:
+                structure_delta = SIGNAL.structure_mismatch_penalty
+                all_structure_reason = f"🧩 Structure mismatch uptrend ({structure_delta})"
+        elif trend_pct < -0.010:
+            if side == Side.SHORT:
+                structure_delta = SIGNAL.structure_standard_bonus
+                all_structure_reason = f"🧩 Structure align downtrend (+{structure_delta})"
+            else:
+                structure_delta = SIGNAL.structure_mismatch_penalty
+                all_structure_reason = f"🧩 Structure mismatch downtrend ({structure_delta})"
+        else:
+            all_structure_reason = "🧩 Structure neutral"
+
+        raw_score += structure_delta
 
         # Add session bonus
         raw_score += session_bonus
@@ -623,7 +940,7 @@ class ScoringEngine:
         log.debug(f"[VOL] {asset}: realized_vol={realized_vol*100:.2f}%/day regime={vol_regime.value.upper()} multiplier={vol_multiplier}x")
 
         # ── Build breakdown ────────────────────────────────────────────
-        all_reasons  = oi_reasons + liq_reasons + ob_reasons + session_reasons
+        all_reasons  = oi_reasons + liq_reasons + ob_reasons + [all_structure_reason, mom_reason] + session_reasons
         all_warnings = oi_warns + liq_warns + ob_warns
 
         # Determine actual 'regime' for TradeSignal logging backwards compatibility
@@ -664,29 +981,31 @@ class ScoringEngine:
             f"OB:{ob_bull+ob_bear:+} Ses:{session_bonus:+})"
         )
         
-        log_msg = (
-            f"{asset:5} | {side.value.upper():5} | "
-            f"Score: {final_score:2d}/{SIGNAL.min_score_to_signal} | "
-            f"{breakdown_str} | Regime: {log_regime.value}"
-        )
-        
-        # ── Output Logic ───────────────────────────────────────────────
-        threshold = 30 # Internal capture threshold (per-user filtering happens in main.py)
-        
-        if final_score >= threshold:
-            log.info(f"🎯 [SIGNAL] {log_msg}")
-        elif final_score >= 25:
-            # Report scan results for active coins to keep the terminal "alive"
-            log.info(f"🔍 [SCAN]   {log_msg}")
-        else:
-            log.debug(log_msg)
+        # ── UNIFORM SCORING LOG (User Request: "Satu jenis format log") ──
+        if final_score >= 20:
+            bias_emoji = "🟢 LONG " if total_bull > total_bear else "🔴 SHORT"
+            log.info(
+                f"🎯 [SCORE] {asset:6} | {bias_emoji} | {final_score:2d}/100 | "
+                f"Pts: {total_bull:.1f} vs {total_bear:.1f} | "
+                f"OI:{oi_bull:.1f}/{oi_bear:.1f} Liq:{liq_bull:.1f}/{liq_bear:.1f} OB:{ob_bull:.1f}/{ob_bear:.1f} | "
+                f"Sess:{int(session_bonus):+d} Mult:{final_multiplier:.2f}x ({vol_regime.value})"
+            )
+
+        # ── Apply Meta-Learning adjustment ─────────────────────────────
+        meta_delta, meta_reason, pattern_key = self._apply_meta_learning(asset, "standard", side, final_score)
+        if meta_delta != 0:
+            final_score += meta_delta
+            all_reasons.append(meta_reason)
+        final_score = max(0, min(final_score, 100))
+
+        breakdown.meta_pattern_key = pattern_key
+        breakdown.meta_score_delta = meta_delta
+        breakdown.final_score = final_score
 
         # ── Check threshold ────────────────────────────────────────────
+        threshold = 30 # Internal capture threshold
         if final_score < threshold:
-            log.debug(
-                f"{asset}: score {final_score} below internal capture threshold {threshold}"
-            )
-            return None
+            return None, final_score
 
         # ── Build signal ───────────────────────────────────────────────
         signal = self._build_signal(
@@ -695,11 +1014,7 @@ class ScoringEngine:
             vol_regime=vol_regime.value if hasattr(vol_regime, "value") else vol_regime
         )
 
-        log.info(
-            f"🎯 SIGNAL: {asset} {side.value.upper()} "
-            f"score={final_score} strength={signal.strength.value}"
-        )
-        return signal
+        return signal, final_score
 
     # ──────────────────────────────────────────
     # REGIME DETECTION
@@ -914,4 +1229,94 @@ class ScoringEngine:
             tp1=tp1,
             tp2=tp2,
             suggested_leverage=leverage,
+            meta_pattern_key=getattr(breakdown, 'meta_pattern_key', None),
+            meta_score_delta=getattr(breakdown, 'meta_score_delta', 0)
         )
+
+    # ──────────────────────────────────────────
+    # MTF & META HELPERS
+    # ──────────────────────────────────────────
+
+    async def _fetch_15m_mtf_data(self, asset: str) -> str:
+        """
+        Fetch 15m candles to detect medium-term trend with 5-min caching.
+        Returns 'bull', 'bear', or 'neutral'.
+        """
+        now = time.time()
+        if asset in self._mtf_cache:
+            ts, cached_trend = self._mtf_cache[asset]
+            if now - ts < 300:  # 5 minutes TTL
+                return cached_trend
+
+        try:
+            async with self.candle_sem:
+                now_ms = int(time.time() * 1000)
+                # Fetch ~8 hours of 15m candles (32 candles)
+                start_ms = now_ms - (32 * 15 * 60 * 1000)
+                payload = {
+                    "coin": asset,
+                    "interval": "15m",
+                    "startTime": start_ms,
+                    "endTime": now_ms
+                }
+                resp, succ = await self.client._call_info_endpoint("candleSnapshot", {"req": payload})
+            
+            if not succ or not isinstance(resp, list) or len(resp) < 10:
+                return "neutral"
+            
+            closes = []
+            for c in resp:
+                try: closes.append(float(c["c"]))
+                except: continue
+                
+            if len(closes) < 10: return "neutral"
+            
+            # Simple trend: EMA10 > EMA20
+            def quick_ema(data, p):
+                k = 2/(p+1)
+                res = data[0]
+                for v in data[1:]: res = v*k + res*(1-k)
+                return res
+            
+            ema10 = quick_ema(closes[-20:], 10)
+            ema20 = quick_ema(closes[-20:], 20)
+            
+            trend = "neutral"
+            if ema10 > ema20 * 1.001: trend = "bull"
+            elif ema10 < ema20 * 0.999: trend = "bear"
+            
+            self._mtf_cache[asset] = (now, trend)
+            return trend
+        except Exception as e:
+            log.debug(f"[{asset}] MTF fetch error: {e}")
+            return "neutral"
+
+    def _apply_meta_learning(self, asset: str, mode: str, side: Side, raw_score: int) -> Tuple[int, str, Optional[str]]:
+        """
+        Adjust score based on historical pattern winrate.
+        Pattern key: {mode}_{asset}_{side}
+        """
+        if not config.SIGNAL.meta_learning_enabled:
+            return 0, "", None
+            
+        from core.db import user_db
+        pattern_key = f"{mode.lower()}_{asset}_{side.value}"
+        stats = user_db.get_meta_pattern_stats(pattern_key)
+        
+        if not stats or stats["samples"] < config.SIGNAL.meta_min_samples:
+            return 0, "", pattern_key
+            
+        wr = stats["winrate_ema"]
+        delta = 0
+        reason = ""
+        
+        if wr >= config.SIGNAL.meta_boost_threshold:
+            delta = 8
+            reason = f"🧠 Meta-learning: HI-WR pattern ({wr*100:.0f}%) → +8"
+        elif wr <= config.SIGNAL.meta_penalty_threshold:
+            delta = -12
+            reason = f"🧠 Meta-learning: LO-WR pattern ({wr*100:.0f}%) → -12"
+            
+        # Clamp delta
+        delta = max(-config.SIGNAL.meta_max_delta, min(config.SIGNAL.meta_max_delta, delta))
+        return delta, reason, pattern_key

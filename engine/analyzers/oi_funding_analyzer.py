@@ -47,6 +47,7 @@ class OIFundingAnalyzer:
         warnings = []
 
         fr = funding.funding_rate
+        log.debug(f"[FUNDING] {asset}: rate={fr:.6f} (is this 0.0? then API fetch failed)")
 
         # ── 1. Funding Rate Analysis ──────────────────────────────────
         # Real HL funding rates are typically +-0.00002 range
@@ -159,12 +160,12 @@ class OIFundingAnalyzer:
         # ── 4. OI Change Analysis ─────────────────────────────────────
         oi_chg = oi.oi_change_pct
         if price_change_1h > 0.002 and oi_chg > SIGNAL.oi_change_threshold_pct:
-            bull += 18  # significantly increased from 10
+            bull += 22  # increased from 18
             reasons.append(
                 f"OI +{oi_chg*100:.1f}% with price up -> STRONG LONG confirmed"
             )
         elif price_change_1h < -0.002 and oi_chg > SIGNAL.oi_change_threshold_pct:
-            bear += 18  # significantly increased from 10
+            bear += 22  # increased from 18
             reasons.append(
                 f"OI +{oi_chg*100:.1f}% with price down -> STRONG SHORT confirmed"
             )
@@ -235,20 +236,20 @@ class OIFundingAnalyzer:
             signal_str = "neutral"
             
             if basis > 0.0015:
-                bear += 8
-                signal_str = "bear (+8)"
+                bear += 12  # increased from 8
+                signal_str = "bear (+12)"
                 reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> longs paying heavy premium (SHORT)")
             elif basis > 0.0008:
-                bear += 4
-                signal_str = "bear (+4)"
+                bear += 6   # increased from 4
+                signal_str = "bear (+6)"
                 reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> mild long crowding")
             elif basis < -0.0015:
-                bull += 8
-                signal_str = "bull (+8)"
+                bull += 12  # increased from 8
+                signal_str = "bull (+12)"
                 reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> extreme fear/panic (LONG)")
             elif basis < -0.0008:
-                bull += 4
-                signal_str = "bull (+4)"
+                bull += 6   # increased from 4
+                signal_str = "bull (+6)"
                 reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> mild fear (LONG)")
                 
             log.debug(f"[BASIS] {asset}: spot={spot_price:.2f} perp={mark_price:.2f} basis={basis*100:.3f}% signal={signal_str}")
@@ -256,7 +257,7 @@ class OIFundingAnalyzer:
             log.warning(f"[{asset}] Spot/Oracle price unavailable, skipping Basis score")
 
         # CAP max score to prevent inflation (increased for Conviction)
-        bull = min(bull, 40)
-        bear = min(bear, 40)
+        bull = min(bull, 45)  # increased from 40
+        bear = min(bear, 45)
 
         return bull, bear, reasons, warnings

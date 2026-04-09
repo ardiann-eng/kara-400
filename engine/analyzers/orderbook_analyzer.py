@@ -50,14 +50,14 @@ class OrderbookAnalyzer:
 
         if imb > 0.50:
             # Strong bid imbalance
-            pts = 10 + int((imb - 0.50) * 20)  # 10-14pts
-            pts = min(pts, 14)
+            pts = 14 + int((imb - 0.50) * 20)  # 14-18pts
+            pts = min(pts, 18)
             bull += pts
             reasons.append(
                 f"Strong bid imbalance {imb*100:.0f}% -> LONG pressure"
             )
         elif imb > 0.25:
-            pts = 6 + int((imb - 0.25) * 16)   # 6-9pts
+            pts = 8 + int((imb - 0.25) * 16)   # 8-12pts
             bull += pts
             reasons.append(
                 f"Moderate bid imbalance {imb*100:.0f}% -> LONG tilt"
@@ -69,14 +69,14 @@ class OrderbookAnalyzer:
                 f"Slight bid imbalance {imb*100:.0f}% -> minor LONG lean"
             )
         elif imb < -0.50:
-            pts = 10 + int((abs(imb) - 0.50) * 20)
-            pts = min(pts, 14)
+            pts = 14 + int((abs(imb) - 0.50) * 20)  # 14-18pts
+            pts = min(pts, 18)
             bear += pts
             reasons.append(
                 f"Strong ask imbalance {abs(imb)*100:.0f}% -> SHORT pressure"
             )
         elif imb < -0.25:
-            pts = 6 + int((abs(imb) - 0.25) * 16)
+            pts = 8 + int((abs(imb) - 0.25) * 16) # 8-12pts
             bear += pts
             reasons.append(
                 f"Moderate ask imbalance {abs(imb)*100:.0f}% -> SHORT tilt"
@@ -104,7 +104,7 @@ class OrderbookAnalyzer:
             )
         elif dev > 0.002:
             # Price slightly above VWAP -> bullish momentum
-            bull += 7
+            bull += 10 # increased from 7
             reasons.append(
                 f"Price {dev*100:.3f}% above VWAP -> bullish momentum"
             )
@@ -121,7 +121,7 @@ class OrderbookAnalyzer:
                 f"Price {dev*100:.3f}% below VWAP -> oversold, LONG setup"
             )
         elif dev < -0.002:
-            bear += 7
+            bear += 10 # increased from 7
             reasons.append(
                 f"Price {dev*100:.3f}% below VWAP -> bearish momentum"
             )
@@ -240,7 +240,7 @@ class OrderbookAnalyzer:
                 reasons.append(f"• CVD: ⚪ Neutral Flow (${cvd/1000:,.1f}k)")
 
         # CAP max score to prevent inflation
-        bull = min(bull, 25)
-        bear = min(bear, 25)
+        bull = min(bull, 30) # increased from 25
+        bear = min(bear, 30)
 
         return bull, bear, reasons, warnings

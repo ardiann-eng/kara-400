@@ -83,6 +83,10 @@ class HyperliquidClient:
         self._max_retries = 3
         self._retry_delay = 0.5  # seconds, exponential backoff
 
+        # Candle caching (asset -> (timestamp, data))
+        self._candle_cache: Dict[str, Tuple[float, List]] = {}
+        self._candle_ttl = 30  # seconds
+
     # ──────────────────────────────────────────
     # INIT
     # ──────────────────────────────────────────
@@ -165,11 +169,8 @@ class HyperliquidClient:
             payload.update(params)
 
         try:
-            # Use debug for high-frequency calls to keep terminal clean
-            if request_type in ["l2Book", "allMids", "metaAndAssetCtxs"]:
-                log.debug(f"[API] POST /info - type={request_type}")
-            else:
-                log.info(f"[API] POST /info - type={request_type}")
+            # Use debug for all high-frequency or batch-startup calls to keep terminal clean
+            log.debug(f"[API] POST /info - type={request_type}")
             response = await self._http_data.post("/info", json=payload)
 
             # Handle 422 Unprocessable Entity specifically
@@ -196,6 +197,16 @@ class HyperliquidClient:
                     return await self._call_info_endpoint(request_type, params, retry + 1)
 
                 return {"error": "422", "details": error_detail, "type": request_type}, False
+
+            # Handle Rate Limiting (429 or 430)
+            if response.status_code in [429, 430]:
+                wait_time = float(response.headers.get("Retry-After", 2.0))
+                # Reduced to debug to avoid drowning out scoring results during priming bursts
+                log.debug(f"⚠️ [API 429/430] Rate limited on {request_type}. Waiting {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                if retry < self._max_retries:
+                    return await self._call_info_endpoint(request_type, params, retry + 1)
+                return {}, False
 
             # Check other HTTP errors
             if response.status_code >= 400:
@@ -256,6 +267,19 @@ class HyperliquidClient:
         await self.refresh_market_cache()
         return self._market_cache if self._market_cache else None
 
+    async def get_asset_max_leverage(self, asset: str) -> int:
+        """Fetch the maximum allowed leverage for a specific asset from exchange metadata."""
+        await self.refresh_market_cache()
+        if not self._market_cache:
+            return 50  # Conservative global fallback
+
+        universe, _ = self._market_cache
+        for u in universe:
+            if isinstance(u, dict) and u.get("name") == asset:
+                return int(u.get("maxLeverage", 50))
+        
+        return 50  # Fallback if asset not found
+
     async def get_all_mids(self) -> Dict[str, float]:
         """Fetch all mid prices from cache or API."""
         await self.refresh_market_cache()
@@ -314,39 +338,54 @@ class HyperliquidClient:
 
     async def get_candles(self, asset: str, interval: str = "1h", limit: int = 100) -> List[List[Any]]:
         """
-        Fetch historical OHLCV data for an asset.
+        Fetch historical OHLCV data for an asset with caching.
         Returns: [[timestamp, open, high, low, close, volume], ... ]
         """
+        # 1. Check Cache
+        now = time.time()
+        if asset in self._candle_cache:
+            ts, data = self._candle_cache[asset]
+            if now - ts < self._candle_ttl:
+                log.debug(f"[{asset}] Using cached candles ({int(now-ts)}s old)")
+                return data[:limit]
+
         try:
+            log.info(f"[{asset}] Fetching fresh candles from API...")
             await self._ensure_info()
             
-            # 1. Try SDK
+            # 2. Try SDK
+            candles = []
             if self._info:
                 try:
                     candles = await self._run(self._info.candles_snapshot, asset, interval, limit)
-                    if candles:
-                        return candles
                 except Exception as e:
                     log.debug(f"SDK candles_snapshot failed for {asset}: {e}")
 
-            # 2. Direct HTTP Fallback
-            result, success = await self._call_info_endpoint("candleSnapshot", {
-                "req": {
-                    "coin": asset,
-                    "interval": interval,
-                    "startTime": 0, # last N candles
-                    "endTime": 0    # last N candles
-                }
-            })
-            
-            if success and isinstance(result, list):
-                # Note: candleSnapshot returns most recent candles
-                return result[:limit]
+            # 3. Direct HTTP Fallback if SDK failed
+            if not candles:
+                result, success = await self._call_info_endpoint("candleSnapshot", {
+                    "req": {
+                        "coin": asset,
+                        "interval": interval,
+                        "startTime": 0,
+                        "endTime": 0
+                    }
+                })
+                if success and isinstance(result, list):
+                    candles = result
+
+            if candles:
+                self._candle_cache[asset] = (now, candles)
+                return candles[:limit]
                 
             return []
         except Exception as e:
             log.error(f"get_candles failed for {asset}: {e}")
             return []
+
+    async def get_cached_candles(self, asset: str) -> List[List[Any]]:
+        """Helper as requested: returns cached candles or fetches new ones."""
+        return await self.get_candles(asset)
 
     async def get_btc_real_time_data(self) -> Dict[str, Any]:
         """
@@ -490,7 +529,13 @@ class HyperliquidClient:
         )
 
     async def get_oi_data(self, asset: str, meta: Optional[Any] = None) -> OIData:
-        """Fetch OI data with robust parsing (cached)."""
+        """Fetch OI data with robust parsing (cached).
+        
+        Fields from metaAndAssetCtxs context:
+          openInterest  : OI in contracts (multiply by markPx for USD)
+          dayNtlVlm     : 24h notional volume — used as crude OI-change proxy
+          oraclePx      : oracle/spot reference price
+        """
         ctx = None
         if meta:
             ctx = self._extract_ctx(meta, asset)
@@ -503,14 +548,26 @@ class HyperliquidClient:
         if not ctx or not isinstance(ctx, dict):
             return OIData(asset=asset, open_interest=0, oi_change_pct=0.0, oi_change_24h=0.0, oracle_price=0)
 
-        mark = float(ctx.get("markPx", 0))
-        oi_contracts = float(ctx.get("openInterest", 0))
-        
+        mark          = float(ctx.get("markPx", 0))
+        oi_contracts  = float(ctx.get("openInterest", 0))
+        oi_usd        = oi_contracts * mark
+
+        # Approximate 24h OI change ratio: dayNtlVlm / oi_usd
+        # High volume relative to OI = active positioning = OI likely changing
+        # This is a proxy, NOT the real oi_change_24h (HL API doesn't provide it directly)
+        day_vol = float(ctx.get("dayNtlVlm", 0))
+        if oi_usd > 0 and day_vol > 0:
+            # Rough approximation: vol-to-OI ratio indicates activity level
+            # Clamp to ±50% to avoid extreme outliers from thinly-traded assets
+            oi_change_24h_proxy = min(day_vol / oi_usd - 1.0, 0.50)
+        else:
+            oi_change_24h_proxy = 0.0
+
         return OIData(
             asset=asset,
-            open_interest=oi_contracts * mark,
-            oi_change_pct=0.0,
-            oi_change_24h=0.0,
+            open_interest=oi_usd,
+            oi_change_pct=0.0,          # computed by scoring engine from live snapshots
+            oi_change_24h=oi_change_24h_proxy,
             oracle_price=float(ctx.get("oraclePx", mark))
         )
 

@@ -14,6 +14,7 @@ load_dotenv()
 # ──────────────────────────────────────────────
 # ENVIRONMENT
 # ──────────────────────────────────────────────
+KARA_VERSION = "6.1.1"  # Current Release Version
 DATA_SOURCE = os.getenv("KARA_DATA_SOURCE", "mainnet").lower() # "mainnet" | "testnet"
 TRADE_MODE  = os.getenv("KARA_TRADE_MODE", "paper").lower()    # "paper" | "live"
 FULL_AUTO   = True  # Force auto execution mode as requested
@@ -120,13 +121,13 @@ class RiskConfig:
 
     # Paper trade mode (tight, for fast data collection)
     paper_sl_pct:            float = 0.020    # 2.0% stop loss
-    paper_tp1_pct:           float = 0.025    # 2.5% TP1 (pushed slightly wider)
-    paper_tp2_pct:           float = 0.040    # 4.0% TP2
+    paper_tp1_pct:           float = 0.015    # 1.5% TP1 (More realistic)
+    paper_tp2_pct:           float = 0.030    # 3.0% TP2
 
     # Stop-loss / Take-profit defaults
     default_sl_pct:          float = 0.025    # 2.5% from entry
-    tp1_pct:                 float = 0.04     # +4% -> close 40%
-    tp2_pct:                 float = 0.08     # +8% -> close 35%
+    tp1_pct:                 float = 0.025    # +2.5% -> close 40% (Securing profit earlier)
+    tp2_pct:                 float = 0.050    # +5.0% -> close 35%
     trailing_pct:            float = 0.03     # 3% trailing on remainder
 
     # Daily / drawdown guards
@@ -178,7 +179,7 @@ class ScalperConfig:
     max_leverage:            int   = 35       # hard cap for scalper
 
     # Position sizing (% of equity)
-    risk_per_trade_pct:      float = 0.13     # 13% per trade — VERY aggressive
+    risk_per_trade_pct:      float = 0.04     # 4% per trade — Reduced from 13% for better safety
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # Scalper SL/TP (Calibrated for 25x leverage)
@@ -189,11 +190,16 @@ class ScalperConfig:
 
     # Timing
     max_hold_minutes:        float = 12.0     # force close after 12min if no TP hit
+    max_hold_grace_minutes:  float = 6.0      # extra grace if still in deeper loss
+    max_hold_soft_floor_pct: float = -0.0015  # allow delay if loss worse than -0.15%
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold (more signals, lower bar)
-    min_score_to_enter:      int   = 45       # entry threshold (vs 56 for standard)
-    signal_cooldown_minutes: int   = 1        # 1 min cooldown (vs 15 min standard)
+    min_score_to_enter:      int   = 50       # entry threshold (scalper signal gate)
+    signal_cooldown_minutes: int   = 15       # 15 min cooldown (prevent spam)
+    mtf_confirm_enabled:     bool  = True     # require 15m trend confirmation
+    mtf_confirm_interval:    str   = "15m"
+    mtf_confirm_lookback:    int   = 32       # ~8h on 15m candles
 
     # Concurrent positions (tight — capital concentration)
     max_concurrent_positions: int  = 3        # max 3 scalper positions
@@ -210,6 +216,10 @@ class ScalperConfig:
     daily_loss_hard_pct:     float = 0.15    # 15% daily loss → stop
     max_drawdown_pct:        float = 0.25    # 25% total drawdown kill-switch
 
+    # MTF Score weights
+    mtf_score_bonus:         int = 12        # bonus if 1m aligns with 15m trend
+    mtf_score_penalty:       int = -15       # penalty if counter-trend
+
 SCALPER = ScalperConfig()
 
 # ──────────────────────────────────────────────
@@ -217,8 +227,8 @@ SCALPER = ScalperConfig()
 # ──────────────────────────────────────────────
 @dataclass
 class SignalConfig:
-    min_score_to_signal:     int   = 56       # minimum score to emit signal
-    min_score_to_auto_trade: int   = 56       # minimum score for full-auto execution
+    min_score_to_signal:     int   = 58       # STANDARD: minimum score to emit signal
+    min_score_to_auto_trade: int   = 65       # STANDARD: minimum score for full-auto execution
     signal_cooldown_minutes: int   = 15       # cooldown per asset between signals
 
     # Session windows (UTC)
@@ -228,7 +238,7 @@ class SignalConfig:
     london_end_utc:          int   = 17
 
     # Session score bonuses / penalties
-    ny_session_bonus:        int   = 8
+    ny_session_bonus:        int   = 12       # NY dominates ~40% daily volume
     london_session_bonus:    int   = 4
     asia_session_penalty:    int   = -5       # 22:00-07:00 UTC
 
@@ -244,6 +254,19 @@ class SignalConfig:
     # Orderbook
     ob_imbalance_threshold:  float = 0.45     # 45% one-sided = imbalanced
     vwap_deviation_pct:      float = 0.002    # 0.2% from VWAP = notable
+
+    # Market Structure (HH/HL) scoring weights
+    structure_scalper_bonus: int = 8          # 1m HH/HL alignment bonus
+    structure_standard_bonus:int = 6          # trend alignment bonus (cached regime trend)
+    structure_mismatch_penalty: int = -4      # against structure direction
+
+    # Meta-Scoring (Outcome-based learning)
+    meta_learning_enabled:   bool = True
+    meta_min_samples:        int = 5          # need at least 5 trades to trust winrate
+    meta_boost_threshold:    float = 0.62     # winrate > 62% = +8 pts
+    meta_penalty_threshold:  float = 0.40     # winrate < 40% = -12 pts
+    meta_max_delta:          int = 15         # absolute max cap for adj
+
 
 SIGNAL = SignalConfig()
 

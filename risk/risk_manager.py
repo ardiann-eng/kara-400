@@ -50,9 +50,10 @@ class RiskManager:
         self._peak_balance:   float = 0.0
         self._session_start_balance: float = 0.0
         self._last_reset_day: Optional[str] = None   # YYYY-MM-DD
-        self._cooldown_until: Optional[float] = None  # monotonic timestamp
+        self._cooldown_until: Optional[float] = None  # monotonic timestamp (now reset on start to prevent lockout)
         self._kill_switch:    bool = False
         self._paused:         bool = False
+        self._latest_score:   Dict[str, int] = {}     # asset -> latest score from scanner
 
         # --- Hydrate from persisted state if exists
         self._load_risk_state()
@@ -62,6 +63,7 @@ class RiskManager:
         user_db.save_risk_state(self._chat_id, {
             "daily_pnl":      self._daily_pnl,
             "peak_balance":   self._peak_balance,
+            "session_start_balance": self._session_start_balance,
             "kill_switch":    self._kill_switch,
             "last_reset_day": self._last_reset_day
         })
@@ -72,8 +74,14 @@ class RiskManager:
         if state:
             self._daily_pnl      = state.get("daily_pnl", 0.0)
             self._peak_balance   = state.get("peak_balance", 0.0)
+            self._session_start_balance = state.get("session_start_balance", 0.0)
             self._kill_switch    = state.get("kill_switch", False)
             self._last_reset_day = state.get("last_reset_day")
+            
+            # Validation: if session_start_balance is 0 but we have a peak, use that as fallback
+            # to prevent 'amnesia' during mid-day restarts
+            if self._session_start_balance <= 0 and self._peak_balance > 0:
+                self._session_start_balance = self._peak_balance
 
     def _cfg(self):
         """Return active mode config (SCALPER or RISK) based on current mode."""
@@ -121,6 +129,10 @@ class RiskManager:
         self._kill_switch = False
         self._persist_risk_state()
         log.warning(f"Kill-switch explicitly reset by Admin {admin_id}")
+
+    def update_score(self, asset: str, score: int):
+        """Called by scanner to update the latest score for an asset."""
+        self._latest_score[asset] = score
 
     # ──────────────────────────────────────────
     # PRE-TRADE CHECK
@@ -222,7 +234,7 @@ class RiskManager:
         self,
         signal: TradeSignal,
         account_balance: float,
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, int]:
         """
         Returns (size_usd, size_contracts)
         Formula: (balance * risk_pct) / (entry * sl_pct * leverage)
@@ -236,30 +248,64 @@ class RiskManager:
         if sl_pct <= 0:
             sl_pct = RISK.default_sl_pct
 
-        # ── Leverage: Cap by user setting ─────────────────────────────
+        # ── Leverage: Triple-Cap (Signal vs User vs Exchange) ──────────
         cfg = self._cfg()
         user_max_lev = self._get_user_value("max_leverage", cfg.max_leverage)
-        lev = min(signal.suggested_leverage, user_max_lev)
+        
+        # Get exchange-allowed max for this specific asset (Market-Aware)
+        from data.hyperliquid_client import get_client
+        client = get_client()
+        exchange_max = 50 # Default
+        if client._market_cache:
+            universe, _ = client._market_cache
+            for u in universe:
+                if isinstance(u, dict) and u.get("name") == signal.asset:
+                    exchange_max = int(u.get("maxLeverage", 50))
+                    break
+        
+        # Apply the triple cap
+        lev = min(signal.suggested_leverage, user_max_lev, exchange_max)
+        
+        if lev != signal.suggested_leverage:
+             log.info(
+                 f"🛡️ [RISK] {signal.asset} Leverage capped: "
+                 f"signal={signal.suggested_leverage}x, user={user_max_lev}x, exchange={exchange_max}x -> using {lev}x"
+             )
 
         # ── 1. Determine size_usd (margin) — mode-aware ───────────────
         cfg = self._cfg()
-        fixed_margin = getattr(cfg, 'fixed_margin_per_position', 0.0)
-
-        if fixed_margin > 0:
-            # Fixed $ margin per trade (standard mode default)
-            size_usd = fixed_margin
-            log.debug(f"[RISK] Using fixed margin: {format_usd(size_usd)}")
+        
+        # --- CONVICTION-WEIGHTED POSITION SIZING ---
+        # Map score to risk percentage
+        score = getattr(signal, 'score', 0)
+        if score >= 90:
+            risk_pct = 0.80  # Maximum conviction: 80% risk
+        elif score >= 80:
+            risk_pct = 0.50  # Very high conviction: 50% risk
+        elif score >= 71:
+            risk_pct = 0.30  # High conviction: 30% risk
+        elif score >= 63:
+            risk_pct = 0.20  # Moderate conviction: 20% risk
         else:
-            # Percentage-based risk (scalper uses 13%, standard uses 1%)
-            risk_pct = cfg.risk_per_trade_pct
-            size_usd = (account_balance * risk_pct) / max(sl_pct * lev, 0.0001)
+            risk_pct = 0.15  # Low conviction (55-62): 15% risk
 
-            # Hard cap — for scalper mode no secondary cap (risk_pct IS the cap)
-            if not self._is_scalper():
-                max_size = (account_balance * RISK.max_risk_per_trade_pct) / max(sl_pct * lev, 0.0001)
-                size_usd = min(size_usd, max_size)
+        # Compound sizing
+        size_usd = (account_balance * risk_pct) / max(sl_pct * lev, 0.0001)
 
-        # ── 2. Calculate Contracts ────────────────────────────────────
+        # Drawdown guard: if we are >15% below peak, cut risk in half!
+        # Find drawdown:
+        drawdown = (self._peak_balance - account_balance) / max(self._peak_balance, 1)
+        if drawdown >= 0.15:
+            size_usd *= 0.5
+            log.warning(f"[RISK] Drawdown guard active (DD: {drawdown*100:.1f}% >= 15%). Risk halved to {risk_pct/2*100:.1f}%.")
+
+        # ── 3. Hard Margin Cap (Safety First - 80% Max Equity) ────────
+        max_allowed_margin = account_balance * 0.80
+        if size_usd > max_allowed_margin:
+            log.warning(f"[RISK] Margin cap hit: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} (80% limit)")
+            size_usd = max_allowed_margin
+
+        # ── 4. Calculate Contracts ────────────────────────────────────
         # isolated margin = notional / leverage -> notional = margin * leverage
         notional = size_usd * lev
         contracts = notional / entry
@@ -268,15 +314,19 @@ class RiskManager:
             f"[RISK] {signal.asset}: balance={format_usd(account_balance)} "
             f"margin={format_usd(size_usd)} lev={lev}x -> {contracts:.4f} contracts"
         )
-        return round(size_usd, 2), round(contracts, 4)
+        return round(size_usd, 2), round(contracts, 4), int(lev)
 
     def calculate_margin_required(
-        self, signal: TradeSignal, account_balance: float
+        self, signal: TradeSignal, account: AccountState
     ) -> float:
         """Margin = notional / leverage"""
-        _, contracts = self.calculate_position_size(signal, account_balance)
+        # Daily loss/drawdown check
+        approved, _ = self.pre_trade_check(signal, account, [])
+        if not approved: return 0.0
+        
+        _, contracts, lev = self.calculate_position_size(signal, account.total_equity)
         notional = contracts * signal.entry_price
-        return notional / signal.suggested_leverage
+        return notional / lev
 
     def _calculate_trade_risk(
         self, signal: TradeSignal, balance: float
@@ -298,19 +348,24 @@ class RiskManager:
     ) -> Tuple[float, float]:
         """
         Calculate dynamic TP1/TP2 based on OI and Volatility.
+        Mode-aware: respects Scalper vs Standard base targets.
         """
-        # 1. Base levels based on OI
+        cfg = self._cfg()
+        
+        # 1. Base levels based on OI (Small Cap logic)
         if oi_usd < RISK.dynamic_tp_oi_threshold:
             tp1 = RISK.small_cap_tp1_pct
             tp2 = RISK.small_cap_tp2_pct
             log.debug(f"[RISK] {coin} identified as Small Cap (OI: {format_usd(oi_usd)})")
         else:
+            # Mode-aware base TP
             if MODE == "paper":
-                tp1 = RISK.paper_tp1_pct
-                tp2 = RISK.paper_tp2_pct
+                # For standard mode, use paper-specific constants if available
+                tp1 = getattr(cfg, 'paper_tp1_pct', cfg.tp1_pct)
+                tp2 = getattr(cfg, 'paper_tp2_pct', cfg.tp2_pct)
             else:
-                tp1 = RISK.tp1_pct
-                tp2 = RISK.tp2_pct
+                tp1 = cfg.tp1_pct
+                tp2 = cfg.tp2_pct
 
         # 2. Volatility multiplier
         if volatility_regime in ("high_vol", "extreme", "volatile"):
@@ -354,107 +409,118 @@ class RiskManager:
         current_price: float,
     ) -> Optional[Dict]:
         """
-        Check for TP1, TP2, Trailing Stop, or Time-based Exit.
-        Mode-aware: scalper uses 12-min max hold and 0.20% trailing.
+        Check for 5-Level Professional Exit Hierarchy.
         Returns action dict or None.
         """
         now_utc = datetime.now(timezone.utc)
         duration_hrs = (now_utc - position.opened_at).total_seconds() / 3600
         floating = position.floating_pct(current_price)
+        current_score = self._latest_score.get(position.asset, position.entry_score if hasattr(position, 'entry_score') else 50)
+        entry_score = getattr(position, "entry_score", 50)
 
-        # ── 1a. SCALPER: Force exit after 12 minutes ───────────────────
-        if self._is_scalper():
-            max_hold_hrs = SCALPER.max_hold_minutes / 60
-            if duration_hrs >= max_hold_hrs:
-                return {
-                    "action":       "time_exit",
-                    "close_ratio":  1.0,
-                    "price":        current_price,
-                    "message":      (
-                        f"⚡ Scalper max hold ({SCALPER.max_hold_minutes:.0f}min) reached. "
-                        f"Force exit at {floating*100:.2f}% profit/loss."
-                    )
-                }
+        # ── Level 1: Fast Exit (first 30 minutes) ───────────────────────────
+        if duration_hrs <= 0.5 and current_score < 35:
+            return {
+                "action":       "time_exit",
+                "close_ratio":  1.0,
+                "price":        current_price,
+                "message":      (
+                    f"🏃 Level 1 Fast Exit: Score dropped to {current_score} within 30m. "
+                    f"Thesis broken. Exiting at {floating*100:.2f}%."
+                )
+            }
 
-        # ── 1b. STANDARD: Time-based exit (8h, 1-3% profit) ───────────
-        elif duration_hrs >= RISK.time_based_exit_hours:
-            if RISK.time_based_min_profit <= floating <= RISK.time_based_max_profit:
-                return {
-                    "action":       "time_exit",
-                    "close_ratio":  1.0,
-                    "price":        current_price,
-                    "message":      (
-                        f"⏳ Time-based exit triggered: profit locked after "
-                        f"{int(duration_hrs)} hours ({floating*100:.1f}%)"
-                    )
-                }
+        # ── Level 5: Re-evaluation on Score Drop ───────────────────────────
+        # Check if score dropped by > 20 points
+        score_drop = entry_score - current_score
+        
+        # Set a flag to tighten trailing stop if thesis is invalidated
+        tighten_trail = score_drop >= 20
+
+        # ── Level 4: Stale Position Exit ────────────────────────────────────
+        if duration_hrs >= 4.0 and abs(floating) <= 0.003:
+            return {
+                "action":       "time_exit",
+                "close_ratio":  1.0,
+                "price":        current_price,
+                "message":      (
+                    f"🕰️ Level 4 Stale Exit: >4h hold with <0.3% move ({floating*100:.2f}%). "
+                    f"Redeploying capital."
+                )
+            }
 
         # ── 2. PARTIAL TAKE PROFIT (mode-aware ratios) ────────────────
         cfg = self._cfg()
-        tp1_ratio = cfg.tp1_close_ratio
-        tp2_ratio = cfg.tp2_close_ratio
+        tp1_ratio = getattr(cfg, 'tp1_close_ratio', 0.40)
+        tp2_ratio = getattr(cfg, 'tp2_close_ratio', 0.35)
 
-        # TP1: Use dynamic level stored in position
-        if not position.tp1_hit and floating >= position.tp1:
+        # TP1: compare against actual TP1 PRICE
+        tp1_hit_now = (
+            (position.side == Side.LONG and current_price >= position.tp1) or
+            (position.side == Side.SHORT and current_price <= position.tp1)
+        )
+        if not position.tp1_hit and tp1_hit_now:
             return {
                 "action":       "tp1",
                 "close_ratio":  tp1_ratio,
                 "price":        current_price,
                 "message":      (
-                    f"🎯 TP1 hit! +{floating*100:.2f}% floating. "
-                    f"Closing {tp1_ratio*100:.0f}% of position. "
-                    f"Trailing stop now active."
+                    f"🎯 TP1 hit! +{floating*100:.2f}%. Level 2 Breakeven Protection active."
                 )
             }
 
-        # TP2: Use dynamic level stored in position
-        if position.tp1_hit and not position.tp2_hit and floating >= position.tp2:
+        tp2_hit_now = (
+            (position.side == Side.LONG and current_price >= position.tp2) or
+            (position.side == Side.SHORT and current_price <= position.tp2)
+        )
+        if position.tp1_hit and not position.tp2_hit and tp2_hit_now:
             return {
                 "action":       "tp2",
                 "close_ratio":  tp2_ratio,
                 "price":        current_price,
                 "message":      (
-                    f"🎯 TP2 hit! +{floating*100:.2f}% floating. "
-                    f"Closing {tp2_ratio*100:.0f}% more. "
-                    f"Aggressive trailing active."
+                    f"🎯 TP2 hit! +{floating*100:.2f}%. Activating aggressive trailer."
                 )
             }
 
-        # ── 3. TRAILING STOP (mode-aware) ─────────────────────────────
-        # Scalper: 0.20% tight trail, activates at TP1
-        # Standard: 3% trail (2% if profit > 8% — aggressive protect)
-        if position.tp1_hit or floating >= 0.08:
-            if self._is_scalper():
-                trail_pct = SCALPER.trailing_pct          # 0.20%
+        # ── Level 3: Trailing Stop (Primary Exit) ─────────────────────────
+        # Standard: 3% trail (2% if profit > 8%), but if tighten_trail (Level 5) = 0.3%
+        if position.tp1_hit or floating >= 0.08 or tighten_trail:
+            if tighten_trail:
+                trail_pct = 0.003  # 0.3% tight trail to close naturally
+            elif self._is_scalper():
+                trail_pct = getattr(SCALPER, 'trailing_pct', 0.004) # 0.40%
             else:
-                trail_pct = 0.02 if floating >= 0.08 else RISK.trailing_pct  # 2% or 3%
+                trail_pct = 0.02 if floating >= 0.08 else getattr(RISK, 'trailing_pct', 0.03)
             
             if position.side == Side.LONG:
                 new_high = max(position.trailing_high, current_price)
                 trail_sl = new_high * (1 - trail_pct)
                 if current_price <= trail_sl:
+                    msg = "🛡️ Trailing Stop" if not tighten_trail else "⚠️ Level 5 Re-eval Exit (Tight Trail)"
                     return {
                         "action":       "trailing_stop",
                         "close_ratio":  1.0,
                         "price":        current_price,
                         "trail_price":  trail_sl,
                         "message":      (
-                            f"🛡️ Aggressive trailing stop ({trail_pct*100:.0f}%) hit at {trail_sl:.4f} "
-                            f"(peak profit was +{max(0, (new_high-position.entry_price)/position.entry_price)*100:.1f}%)."
+                            f"{msg} ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
+                            f"(peak profit +{max(0, (new_high-position.entry_price)/position.entry_price)*100:.1f}%)."
                         )
                     }
             else:   # SHORT
                 new_low = min(position.trailing_high, current_price)
                 trail_sl = new_low * (1 + trail_pct)
                 if current_price >= trail_sl:
+                    msg = "🛡️ Trailing Stop" if not tighten_trail else "⚠️ Level 5 Re-eval Exit (Tight Trail)"
                     return {
                         "action":       "trailing_stop",
                         "close_ratio":  1.0,
                         "price":        current_price,
                         "trail_price":  trail_sl,
                         "message": (
-                            f"🛡️ Aggressive trailing stop ({trail_pct*100:.0f}%) hit at {trail_sl:.4f} "
-                            f"(peak profit was +{max(0, (position.entry_price-new_low)/position.entry_price)*100:.1f}%)."
+                            f"{msg} ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
+                            f"(peak profit +{max(0, (position.entry_price-new_low)/position.entry_price)*100:.1f}%)."
                         )
                     }
 
@@ -494,8 +560,17 @@ class RiskManager:
         if account_balance > self._peak_balance:
             self._peak_balance = account_balance
 
+        # Ensure we have a valid baseline for percentage calculation
+        if self._session_start_balance <= 0:
+            self._session_start_balance = account_balance
+            log.debug(f"[RISK] Initialized mid-session start balance: ${self._session_start_balance:,.2f}")
+
         # Check if cooldown should be triggered (> 6% daily loss)
         daily_pnl_pct = self._daily_pnl / max(self._session_start_balance, 1)
+        
+        # PERSIST STATE IMMEDIATELY after update
+        self._persist_risk_state()
+
         if daily_pnl_pct < -0.06 and not self._cooldown_until:
             cooldown_hrs = RISK.post_loss_cooldown_hrs
             self._cooldown_until = time.monotonic() + cooldown_hrs * 3600
@@ -525,6 +600,7 @@ class RiskManager:
             "kill_switch":   self._kill_switch,
             "daily_pnl":     self._daily_pnl,
             "peak_balance":  self._peak_balance,
+            "session_start_balance": self._session_start_balance,
             "cooldown_until": self._cooldown_until,
             "in_cooldown":   bool(
                 self._cooldown_until and

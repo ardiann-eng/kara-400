@@ -138,22 +138,25 @@ class LiveExecutor:
             log.warning(f" LIVE trade blocked: {reason}")
             return None
 
+        # Calculate size & leverage
+        size_usd, contracts, actual_lev = self.risk.calculate_position_size(
+            signal, account.total_equity
+        )
+        if size_usd <= 0:
+            log.warning(" Calculated size is 0, skipping trade.")
+            return None
+
         # Set leverage first
         try:
             await self.client.set_leverage(
                 signal.asset,
-                signal.suggested_leverage,
+                actual_lev,
                 is_cross=False   # isolated
             )
-            log.info(f"⚙️  Leverage set: {signal.asset} {signal.suggested_leverage}x isolated")
+            log.info(f"⚙️  Leverage set: {signal.asset} {actual_lev}x isolated (Capped)")
         except Exception as e:
             log.error(f"Failed to set leverage: {e}")
-            return None
-
-        # Calculate size
-        size_usd, contracts = self.risk.calculate_position_size(
-            signal, account.wallet_balance
-        )
+            # Keep going, might already be set or fail gracefully later
 
         # Place Post-Only limit order (slightly inside spread for fill probability)
         # We use the entry_price from signal; if market has moved, order stays open
@@ -190,6 +193,7 @@ class LiveExecutor:
             trailing_high=signal.entry_price,
             signal_id=signal.signal_id,
             is_paper=False,
+            entry_score=signal.score,
         )
         self._positions[pos.position_id] = pos
 
@@ -330,8 +334,11 @@ class LiveExecutor:
                 "side":      pos.side.value,
                 "price":     current_price,
                 "reason":    reason,
+                "size":      close_size,
+                "notional":  close_size * pos.entry_price,
                 "pnl":       pnl,
                 "pnl_pct":   pos.floating_pct(current_price),
+                "score":     getattr(pos, 'entry_score', 0),
                 "timestamp": utcnow(),
             }
             get_excel_logger().log_trade(log_data)

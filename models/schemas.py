@@ -142,6 +142,10 @@ class ScoreBreakdown(BaseModel):
     raw_score:             int = 0
     final_score:           int = 0
 
+    # Meta Learning data
+    meta_pattern_key:      Optional[str] = None
+    meta_score_delta:      int = 0
+
     # Explanation strings for Telegram / Dashboard
     reasons:               List[str] = Field(default_factory=list)
     warnings:              List[str] = Field(default_factory=list)
@@ -157,6 +161,8 @@ class TradeSignal(BaseModel):
     breakdown:        ScoreBreakdown
     is_pyramid:       bool = False           # True if scaling into existing position
     auto_executed:    bool = False           # True if bot took the trade automatically
+    meta_pattern_key: Optional[str] = None   # outcome-learning pattern bucket
+    meta_score_delta: int = 0                # score adj from meta winrate
 
     # Levels
     entry_price:      float
@@ -282,6 +288,7 @@ class Position(BaseModel):
     opened_at:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at:        Optional[datetime] = None
     is_paper:         bool = True
+    entry_score:      int = 50
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:
@@ -340,14 +347,14 @@ class UserConfig(BaseModel):
     risk_pct:      float = 0.02            # 2% of equity
     
     # ── Standard Mode Settings ────────────────
-    std_min_score_to_signal:     int = 56
-    std_min_score_to_auto_trade: int = 78
+    std_min_score_to_signal:     int = 58
+    std_min_score_to_auto_trade: int = 65
     std_max_leverage:            int = 10
     std_max_concurrent_positions: int = 10
 
     # ── Scalper Mode Settings ─────────────────
-    scl_min_score_to_signal:     int = 45
-    scl_min_score_to_auto_trade: int = 65
+    scl_min_score_to_signal:     int = 50
+    scl_min_score_to_auto_trade: int = 57
     scl_max_leverage:            int = 20
     scl_max_concurrent_positions: int = 5
 
@@ -370,3 +377,6 @@ class User(BaseModel):
     authorized_at:     Optional[datetime] = None   # Timestamp persetujuan
     access_attempts:   int = 0                     # Jumlah percobaan kode salah
     access_blocked_until: Optional[datetime] = None  # Blokir sementara jika melebihi limit
+    
+    # Version Tracking
+    last_seen_version: str = "0.0.0"               # Untuk notifikasi "What's New"

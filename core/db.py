@@ -32,8 +32,12 @@ class UserDB:
         self.users: Dict[str, User] = {}
         
         # Ensure data dir exists
-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        file_dir = os.path.dirname(os.path.abspath(self.file_path))
+        if file_dir:
+            os.makedirs(file_dir, exist_ok=True)
+        db_dir = os.path.dirname(os.path.abspath(self.db_path))
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         
         self.load()
         self._init_sqlite()
@@ -103,12 +107,81 @@ class UserDB:
                         updated_at REAL
                     )
                 """)
+
+                # 6. History Snapshots (For Charts)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS history_snapshots (
+                        timestamp    REAL PRIMARY KEY,
+                        total_users  INTEGER,
+                        active_users INTEGER,
+                        global_pnl   REAL,
+                        global_equity REAL
+                    )
+                """)
+
+                # 7. Meta pattern stats (Outcome-based score learning)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS meta_pattern_stats (
+                        pattern_key TEXT PRIMARY KEY,
+                        winrate_ema REAL,
+                        pnl_ema     REAL,
+                        samples     INTEGER,
+                        updated_at  REAL
+                    )
+                """)
+                
+                # 8. OI Snapshots Cache (Priority 2 Fix - Amnesia)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS oi_snapshots (
+                        asset TEXT PRIMARY KEY,
+                        snapshots_json TEXT,
+                        updated_at REAL
+                    )
+                """)
                 
                 conn.commit()
                 # conn.close() # Connection pooling applied
                 log.info(f"✓ SQLite database initialized at {self.db_path}")
             except Exception as e:
                 log.error(f"Failed to init SQLite: {e}")
+
+    # ── OI SNAPSHOTS ──────────────────────────────────────────────────
+
+    def save_oi_snapshots_batch(self, snapshots_dict: Dict[str, list]):
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                now_ts = datetime.now(timezone.utc).timestamp()
+                rows = []
+                for asset, snaps in snapshots_dict.items():
+                    rows.append((asset, json.dumps(snaps), now_ts))
+                cursor.executemany(
+                    "INSERT OR REPLACE INTO oi_snapshots VALUES (?, ?, ?)",
+                    rows
+                )
+                conn.commit()
+            except Exception as e:
+                log.error(f"Error saving oi_snapshots batch: {e}")
+
+    def load_all_oi_snapshots(self) -> Dict[str, list]:
+        snapshots_dict = {}
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("SELECT asset, snapshots_json FROM oi_snapshots")
+                rows = cursor.fetchall()
+                for row in rows:
+                    try:
+                        asset = row[0]
+                        snapshots = json.loads(row[1])
+                        snapshots_dict[asset] = snapshots
+                    except Exception as parse_e:
+                        log.debug(f"Failed to parse oi snapshot for {row[0]}: {parse_e}")
+            except Exception as e:
+                log.error(f"Error loading all oi_snapshots: {e}")
+        return snapshots_dict
 
     # ── RISK STATE ────────────────────────────────────────────────────
 
@@ -220,6 +293,78 @@ class UserDB:
                 log.error(f"Error loading signals: {e}")
         return signals
 
+    def get_signal_by_id(self, signal_id: str) -> Optional[TradeSignal]:
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("SELECT data FROM signals_history WHERE sig_id = ?", (signal_id,))
+                row = cursor.fetchone()
+                if row:
+                    from models.schemas import TradeSignal
+                    return TradeSignal(**json.loads(row[0]))
+            except Exception as e:
+                log.error(f"Error loading signal by id {signal_id}: {e}")
+        return None
+
+    def update_meta_pattern_outcome(self, pattern_key: str, pnl_usd: float, alpha: float = 0.20):
+        """
+        Rolling pattern outcome stats:
+        - winrate_ema in [0,1]
+        - pnl_ema (USD, smoothed)
+        """
+        if not pattern_key:
+            return
+        win = 1.0 if pnl_usd > 0 else 0.0
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT winrate_ema, pnl_ema, samples FROM meta_pattern_stats WHERE pattern_key = ?",
+                    (pattern_key,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    old_wr, old_pnl, old_n = float(row[0]), float(row[1]), int(row[2])
+                    wr = (1 - alpha) * old_wr + alpha * win
+                    pnl = (1 - alpha) * old_pnl + alpha * float(pnl_usd)
+                    n = old_n + 1
+                else:
+                    wr = win
+                    pnl = float(pnl_usd)
+                    n = 1
+                cursor.execute(
+                    "INSERT OR REPLACE INTO meta_pattern_stats (pattern_key, winrate_ema, pnl_ema, samples, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (pattern_key, wr, pnl, n, datetime.now(timezone.utc).timestamp())
+                )
+                conn.commit()
+            except Exception as e:
+                log.error(f"Error updating meta pattern stats for {pattern_key}: {e}")
+
+    def get_meta_pattern_stats(self, pattern_key: str) -> Optional[Dict[str, Any]]:
+        if not pattern_key:
+            return None
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT winrate_ema, pnl_ema, samples, updated_at FROM meta_pattern_stats WHERE pattern_key = ?",
+                    (pattern_key,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "winrate_ema": float(row[0]),
+                        "pnl_ema": float(row[1]),
+                        "samples": int(row[2]),
+                        "updated_at": float(row[3]),
+                    }
+            except Exception as e:
+                log.error(f"Error loading meta pattern stats for {pattern_key}: {e}")
+        return None
+
     # ── PAPER POSITIONS & STATE ───────────────────────────────────────
 
     def save_paper_position(self, chat_id: str, pos: Position):
@@ -248,6 +393,16 @@ class UserDB:
                 # conn.close() # Connection pooling applied
             except Exception as e:
                 log.error(f"Error removing position {pos_id}: {e}")
+
+    def clear_paper_positions(self, chat_id: str):
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM paper_positions WHERE chat_id = ?", (str(chat_id),))
+                conn.commit()
+            except Exception as e:
+                log.error(f"Error clearing paper positions for {chat_id}: {e}")
 
     def load_paper_positions(self, chat_id: str) -> List[Position]:
         positions = []
@@ -291,6 +446,65 @@ class UserDB:
             except Exception as e:
                 log.error(f"Error loading paper state for {chat_id}: {e}")
         return None
+
+    def clear_paper_state(self, chat_id: str):
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM paper_state WHERE chat_id = ?", (str(chat_id),))
+                conn.commit()
+            except Exception as e:
+                log.error(f"Error clearing paper state for {chat_id}: {e}")
+
+    def clear_risk_state(self, chat_id: str):
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM risk_state WHERE chat_id = ?", (str(chat_id),))
+                conn.commit()
+            except Exception as e:
+                log.error(f"Error clearing risk state for {chat_id}: {e}")
+
+    # ── HISTORY SNAPSHOTS (For Charts) ────────────────────────────────
+
+    def save_snapshot(self, total_users: int, active_users: int, pnl: float, equity: float):
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO history_snapshots VALUES (?, ?, ?, ?, ?)",
+                    (datetime.now(timezone.utc).timestamp(), total_users, active_users, pnl, equity)
+                )
+                conn.commit()
+            except Exception as e:
+                log.error(f"Error saving snapshot: {e}")
+
+    def load_history(self, days: int = 7) -> List[Dict[str, Any]]:
+        history = []
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
+                cursor.execute(
+                    "SELECT * FROM history_snapshots WHERE timestamp > ? ORDER BY timestamp ASC",
+                    (cutoff,)
+                )
+                rows = cursor.fetchall()
+                for r in rows:
+                    history.append({
+                        "time": float(r[0]),
+                        "total_users": int(r[1]),
+                        "active_users": int(r[2]),
+                        "global_pnl": float(r[3]),
+                        "global_equity": float(r[4])
+                    })
+            except Exception as e:
+                log.error(f"Error loading history: {e}")
+        return history
 
     # ── USER DB (JSON fallback) ───────────────────────────────────────
 

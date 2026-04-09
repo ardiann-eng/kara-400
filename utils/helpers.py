@@ -4,6 +4,7 @@ KARA Bot - Helper Utilities
 
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 
 def gen_id(prefix: str = "ID") -> str:
@@ -24,13 +25,24 @@ def format_idr(value: float) -> str:
 
 
 def format_price(value: float) -> str:
-    """Format price with more decimals for low-priced assets."""
+    """Smart price formatting for human readability.
+    >= 1000: 0 decimals
+    100-999: 2 decimals
+    10-99: 3 decimals
+    1-10: 4 decimals
+    < 1: 5-6 decimals (stripped)
+    """
     if value >= 1000:
+        return f"{value:,.0f}"
+    elif value >= 100:
         return f"{value:,.2f}"
+    elif value >= 10:
+        return f"{value:,.3f}"
     elif value >= 1:
         return f"{value:,.4f}"
     else:
-        return f"{value:,.6f}"
+        # Show 6 decimals but strip trailing zeros
+        return f"{value:,.6f}".rstrip('0').rstrip('.')
 
 
 def format_pct(value: float, show_sign: bool = True) -> str:
@@ -40,3 +52,13 @@ def format_pct(value: float, show_sign: bool = True) -> str:
 
 def clamp(value: float, min_val: float, max_val: float) -> float:
     return max(min_val, min(max_val, value))
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """Safely convert any value to float, handling strings, None, and garbage."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
