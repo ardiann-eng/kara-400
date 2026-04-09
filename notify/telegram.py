@@ -7,6 +7,7 @@ Commands: /start /status /pos /pnl /pause /resume /stop /auto /manual
 
 from __future__ import annotations
 import asyncio
+import html
 import os
 import logging
 import re
@@ -1935,7 +1936,8 @@ class KaraTelegram:
             # Grouping logic
             marketists, fundingists, liqists, others = [], [], [], []
             for r in signal.breakdown.reasons:
-                row = f"• {r.strip('• ')}"
+                safe_r = html.escape(r.strip('• '))
+                row = f"• {safe_r}"
                 low = r.lower()
                 if any(x in low for x in ["regime", "vwap", "session", "price", "trend"]):
                     marketists.append(row)
@@ -1964,7 +1966,7 @@ class KaraTelegram:
                 uniq_warns.append(w)
             warnings_text = (
                 "\n\n⚠️ <b>Perhatian:</b>\n" +
-                "\n".join(f"• {w}" for w in uniq_warns)
+                "\n".join(f"• {html.escape(w)}" for w in uniq_warns)
                 if uniq_warns else ""
             )
 
