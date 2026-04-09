@@ -149,6 +149,14 @@ class RiskManager:
         Returns (approved: bool, reason: str)
         """
         # ── Kill switch ───────────────────────────────────────────────
+        cfg = self._cfg()
+        max_dd = cfg.max_drawdown_pct if hasattr(cfg, 'max_drawdown_pct') else RISK.max_drawdown_pct
+        
+        # Auto-reset if limit was increased or drawdown improved
+        if self._kill_switch and account.current_drawdown_pct < max_dd:
+            log.info(f"🔄 [RISK] Max drawdown recovered ({account.current_drawdown_pct*100:.1f}% < {max_dd*100:.0f}%). Resetting kill switch.")
+            self._kill_switch = False
+
         if self._kill_switch or account.kill_switch_active:
             return False, "🚨 KILL SWITCH ACTIVE - trading stopped (max drawdown hit)"
 
