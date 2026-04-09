@@ -295,8 +295,9 @@ class MarketScanConfig:
 
     # Fallback (if API fails, use these safe defaults)
     fallback_markets: list = field(default_factory=lambda: [
-        "BTC", "ETH", "SOL", "ARB", "AVAX", "MATIC", "OP", "BASE",
-        "BLAST", "DOGE", "XRP", "ADA", "LINK", "UNI"
+        "BTC", "ETH", "SOL", "HYPE", "FARTCOIN", "JUP", "SOL", "ARB", "DOGE", "XRP", 
+        "ADA", "LINK", "UNI", "NEAR", "AVAX", "MATIC", "PEPE", "WIF", "BONK", "TIA", 
+        "OP", "SUI", "APT", "VINE", "FET", "RENDER", "INJ"
     ])
 
 MARKET_SCAN = MarketScanConfig()

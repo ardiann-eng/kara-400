@@ -309,8 +309,8 @@ class HyperliquidClient:
             resp = await self._http_data.post("/info", json=payload)
             data = resp.json()
             if not isinstance(data, list) or len(data) < 2:
-                log.error(f"get_top_volume_markets: Invalid response structure: {data}")
-                return []
+                log.error(f"get_top_volume_markets: Invalid response structure (likely 429 rate limit). Using {len(config.MARKET_SCAN.fallback_markets)} fallback markets.")
+                return config.MARKET_SCAN.fallback_markets
             
             universe = data[0].get("universe", []) if isinstance(data[0], dict) else []
             contexts = data[1] if isinstance(data[1], list) else []
