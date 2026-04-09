@@ -283,19 +283,19 @@ class RiskManager:
         # ── 1. Determine size_usd (margin) — mode-aware ───────────────
         cfg = self._cfg()
         
-        # --- CONVICTION-WEIGHTED POSITION SIZING ---
-        # Map score to risk percentage
+        # --- CONVICTION-WEIGHTED POSITION SIZING (AGGRESSIVE) ---
+        # Map score to risk percentage (Professional/Aggressive standards)
         score = getattr(signal, 'score', 0)
         if score >= 90:
-            risk_pct = 0.80  # Maximum conviction: 80% risk
+            risk_pct = 0.06  # 6.0% risk per trade
         elif score >= 80:
-            risk_pct = 0.50  # Very high conviction: 50% risk
+            risk_pct = 0.04  # 4.0% risk per trade
         elif score >= 71:
-            risk_pct = 0.30  # High conviction: 30% risk
+            risk_pct = 0.03  # 3.0% risk per trade
         elif score >= 63:
-            risk_pct = 0.20  # Moderate conviction: 20% risk
+            risk_pct = 0.02  # 2.0% risk per trade
         else:
-            risk_pct = 0.15  # Low conviction (55-62): 15% risk
+            risk_pct = 0.01  # 1.0% risk per trade
 
         # Compound sizing
         size_usd = (account_balance * risk_pct) / max(sl_pct * lev, 0.0001)
@@ -307,10 +307,10 @@ class RiskManager:
             size_usd *= 0.5
             log.warning(f"[RISK] Drawdown guard active (DD: {drawdown*100:.1f}% >= 15%). Risk halved to {risk_pct/2*100:.1f}%.")
 
-        # ── 3. Hard Margin Cap (Safety First - 80% Max Equity) ────────
-        max_allowed_margin = account_balance * 0.80
+        # ── 3. Hard Margin Cap (Safety First - 35% Max Equity) ────────
+        max_allowed_margin = account_balance * 0.35
         if size_usd > max_allowed_margin:
-            log.warning(f"[RISK] Margin cap hit: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} (80% limit)")
+            log.warning(f"[RISK] Margin cap hit: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} (35% limit)")
             size_usd = max_allowed_margin
 
         # ── 4. Calculate Contracts ────────────────────────────────────
