@@ -33,13 +33,19 @@ class UserSession:
                 log.error(f"User {self.user.chat_id} is in LIVE mode but missing Agent Secret/Address. Falling back to PAPER.")
                 self.executor = PaperExecutor(self.risk_mgr, initial_balance=self.user.paper_balance_usd, chat_id=self.user.chat_id)
             else:
-                user_client = HyperliquidClient(
+                self.user_client = HyperliquidClient(
                     wallet_address=self.user.hl_agent_address,
                     private_key=self.user.hl_agent_secret
                 )
-                self.executor = LiveExecutor(user_client, self.risk_mgr)
+                self.executor = LiveExecutor(self.user_client, self.risk_mgr)
         else:
             self.executor = PaperExecutor(self.risk_mgr, initial_balance=self.user.paper_balance_usd, chat_id=self.user.chat_id)
             
+    async def initialize(self):
+        """Perform async tasks like connecting the HL client."""
+        if hasattr(self, 'user_client') and self.user_client:
+            await self.user_client.connect()
+            log.info(f"✓ UserSession {self.user.chat_id}: Live client connected.")
+
     def get_account_state(self):
         return self.executor.get_account_state()

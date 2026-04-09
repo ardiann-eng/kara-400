@@ -17,11 +17,11 @@ except ImportError:
 log = logging.getLogger("kara.db")
 
 _fernet = None
-if Fernet and hasattr(config, "FERNET_KEY") and config.FERNET_KEY:
+if Fernet and getattr(config, "FERNET_KEY", None):
     try:
         _fernet = Fernet(config.FERNET_KEY.encode())
     except Exception as e:
-        log.error(f"Invalid FERNET_KEY: {e}")
+        log.error(f"❌ Invalid FERNET_KEY: {e}. Secure storage will be disabled.")
 
 
 class UserDB:
@@ -521,9 +521,13 @@ class UserDB:
                         user_obj = User(**u_data)
                         if user_obj.hl_agent_secret and _fernet:
                             try:
-                                user_obj.hl_agent_secret = _fernet.decrypt(user_obj.hl_agent_secret.encode()).decode()
-                            except Exception:
-                                pass # Perhaps it was plaintext, keep it
+                                # First we check if it is already encrypted (starts with gAAAA...)
+                                secret = user_obj.hl_agent_secret
+                                if secret.startswith("gAAAA"):
+                                    user_obj.hl_agent_secret = _fernet.decrypt(secret.encode()).decode()
+                            except Exception as e:
+                                log.debug(f"Failed to decrypt secret for {chat_id}: {e}")
+                                # keep as is if decryption fails (might be plaintext or wrong key)
                         self.users[chat_id] = user_obj
                 log.info(f"Loaded {len(self.users)} users from JSON database.")
             except Exception as e:
@@ -540,9 +544,12 @@ class UserDB:
                         # Encrypt secret before saving
                         if udict.get("hl_agent_secret") and _fernet:
                             try:
-                                udict["hl_agent_secret"] = _fernet.encrypt(udict["hl_agent_secret"].encode()).decode()
-                            except Exception:
-                                pass
+                                # Only encrypt if not already encrypted
+                                secret = udict["hl_agent_secret"]
+                                if not secret.startswith("gAAAA"):
+                                    udict["hl_agent_secret"] = _fernet.encrypt(secret.encode()).decode()
+                            except Exception as e:
+                                log.error(f"Failed to encrypt secret for {k}: {e}")
                         data[k] = udict
                     # handle datetime parsing issues in basic json
                     json.dump(data, f, default=str, indent=2)

@@ -37,7 +37,8 @@ PAPER_BALANCE_USD = PAPER_BALANCE_IDR / USD_TO_IDR
 # HYPERLIQUID CREDENTIALS
 # ──────────────────────────────────────────────
 WALLET_ADDRESS   = os.getenv("HL_WALLET_ADDRESS", "").strip()
-PRIVATE_KEY      = os.getenv("HL_PRIVATE_KEY", "").strip()    # NEVER commit this
+PRIVATE_KEY      = os.getenv("HL_PRIVATE_KEY", "").strip()    # Master / Fallback Key
+FERNET_KEY       = os.getenv("HL_FERNET_KEY", os.getenv("FERNET_KEY", "")).strip()  # For Multi-User Encryption
 
 # Handle placeholder values (0x..., 0x, etc.)
 def _is_placeholder(val: str) -> bool:

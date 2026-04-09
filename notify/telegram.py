@@ -21,7 +21,7 @@ from telegram.ext import (
     ConversationHandler, MessageHandler, filters, ContextTypes
 )
 from telegram.constants import ParseMode
-
+import eth_account
 import config
 from core.db import user_db
 from models.schemas import (
@@ -99,8 +99,41 @@ Score Baru: <b>{score}/100</b>
 📍 Entry Tambahan: <code>${entry}</code>
 ⚡ Leverage: <b>{lev}x</b>
 --------------------
-<i>Konfirmasi diperlukan untuk pyramid scaling.</i>
 <i>ID: {sig_id}</i>
+"""
+
+LIVE_SETUP_RISK_WARNING = """
+⚠️ <b>RISK WARNING: LIVE MODE</b> ⚠️
+──────────────────────────
+Halo bosku! KARA di sini untuk memperingatkan bahwa kamu akan memasuki <b>Live Mode (Real Money)</b>.
+
+<b>Hal yang perlu kamu tahu:</b>
+1. Bot akan mengeksekusi trade nyata di akun Hyperliquid kamu.
+2. KARA menggunakan <b>Agent Wallet</b> untuk keamanan (kamu tidak perlu memberikan private key utama).
+3. Trading crypto futures memiliki risiko tinggi. Gunakan dana yang siap untuk rugi.
+
+<i>Apakah kamu ingin melanjutkan untuk men-generate Agent Wallet khusus?</i>
+"""
+
+AGENT_WALLET_CREATED_TEMPLATE = """
+✅ <b>Agent Wallet berhasil dibuat!</b>
+──────────────────────────
+Simpan data ini dengan aman. Kamu hanya akan melihatnya <b>satu kali</b>.
+
+🔑 <b>Agent Wallet Address:</b>
+<code>{address}</code>
+
+🔑 <b>Agent Private Key:</b>
+<code>{private_key}</code>
+
+<b>Langkah Selanjutnya (PENTING!):</b>
+1. Buka link ini: <a href="https://app.hyperliquid.xyz/API">Hyperliquid API Dashboard</a>
+2. Connect dengan <b>Main Wallet</b> kamu (wallet yang punya dana).
+3. Klik "Authorize API Wallet" dan masukkan <b>Agent Wallet Address</b> di atas.
+4. Paste <b>Agent Private Key</b> jika diminta, atau cukup Approve transaksi di wallet utama kamu.
+5. Klik tombol <b>"✅ Saya Sudah Authorize"</b> di bawah ini jika sudah selesai.
+
+<i>Catatan: Agent ini hanya bisa melakukan trade (Open/Close). Penarikan dana tetap harus lewat Wallet Utama kamu. 🌸</i>
 """
 
 TOS_TEXT = """
@@ -347,7 +380,7 @@ class KaraTelegram:
                 self._authorized_chat_ids.add(chat_id)
                 self._save_state()
             if self.bot_app:
-                self.bot_app.get_session(chat_id)
+                await self.bot_app.get_session(chat_id)
 
             # TOS check (authorized tapi belum agree)
             if not getattr(user, 'tos_agreed', False):
@@ -420,7 +453,7 @@ class KaraTelegram:
                 self._authorized_chat_ids.add(chat_id)
                 self._save_state()
             if self.bot_app:
-                self.bot_app.get_session(chat_id)
+                await self.bot_app.get_session(chat_id)
 
             log.info(f"✅ New user authorized: {username} ({chat_id})")
             await update.effective_message.reply_html(
@@ -644,7 +677,7 @@ class KaraTelegram:
         if self.bot_app:
             # Drop current session and reload fresh
             self.bot_app.sessions.pop(chat_id, None)
-            self.bot_app.get_session(chat_id)
+            await self.bot_app.get_session(chat_id)
             
         await update.effective_message.reply_html(
             "🌸 <b>Kembali ke Paper Mode!</b>\n\n"
@@ -672,7 +705,7 @@ class KaraTelegram:
         if not self._is_authorized(update): return
         if self._is_throttled(str(update.effective_chat.id), threshold=2, action_key="status"): return
         chat_id = str(update.effective_chat.id)
-        session = self.bot_app.get_session(chat_id) if self.bot_app else None
+        session = await self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return await self.cmd_start(update, ctx)
         
         try:
@@ -747,7 +780,7 @@ class KaraTelegram:
                 await update.callback_query.answer("⚠️ Terlalu cepat! Tunggu 1 detik.", show_alert=False)
             return
         chat_id = str(update.effective_chat.id)
-        session = self.bot_app.get_session(chat_id) if self.bot_app else None
+        session = await self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return await self.cmd_start(update, ctx)
         
         positions = session.executor.open_positions
@@ -889,7 +922,7 @@ class KaraTelegram:
                 await update.callback_query.answer("⚠️ Terlalu cepat! Tunggu 1 detik.", show_alert=False)
             return
         chat_id = str(update.effective_chat.id)
-        session = self.bot_app.get_session(chat_id) if self.bot_app else None
+        session = await self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return await self.cmd_start(update, ctx)
         
         try:
@@ -921,7 +954,7 @@ class KaraTelegram:
         if not self._is_authorized(update): return
         if self._is_throttled(str(update.effective_chat.id), threshold=2, action_key="daily"): return
         chat_id = str(update.effective_chat.id)
-        session = self.bot_app.get_session(chat_id) if self.bot_app else None
+        session = await self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return
         
         acc = session.get_account_state()
@@ -1131,6 +1164,50 @@ class KaraTelegram:
         else:
             log.warning("cmd_mode called but effective_message is None")
 
+    async def cmd_paper(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Switch user back to paper mode and clear state."""
+        if not self._is_authorized(update): return
+        chat_id = str(update.effective_chat.id)
+        user = user_db.get_user(chat_id)
+        if not user: return
+
+        from core.db import user_db
+        user.config.bot_mode = BotMode.PAPER
+        user.wallet_authorized = False
+        user_db.update_user(user)
+
+        # Clear paper state to fresh start
+        user_db.clear_paper_positions(chat_id)
+        user_db.clear_paper_state(chat_id)
+        user_db.clear_risk_state(chat_id)
+        
+        # Invalidate session to force re-init with PaperExecutor
+        if self.bot_app and chat_id in self.bot_app.sessions:
+            del self.bot_app.sessions[chat_id]
+
+        await update.effective_message.reply_html(
+            "🧪 <b>Mode Switched to PAPER</b>\n\n"
+            "Saldo virtual telah di-reset. Semua posisi live dihentikan (di bot). "
+            "KARA sekarang berjalan aman dengan dana simulasi. 🌸"
+        )
+
+    async def cmd_live(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Start the Live Mode setup with risk warning."""
+        if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id), threshold=5, action_key="live"): return
+        
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🚀 Lanjut Setup", callback_data="confirm_live"),
+                InlineKeyboardButton("❌ Batal", callback_data="close_settings")
+            ]
+        ])
+        
+        await update.effective_message.reply_html(
+            LIVE_SETUP_RISK_WARNING,
+            reply_markup=keyboard
+        )
+
     async def cmd_scalper(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
         if self._is_throttled(str(update.effective_chat.id), threshold=2, action_key="scalper"): return
@@ -1150,7 +1227,7 @@ class KaraTelegram:
         if not self._is_authorized(update): return
         if self._is_throttled(str(update.effective_chat.id), threshold=2, action_key="standard"): return
         chat_id = str(update.effective_chat.id)
-        session = self.bot_app.get_session(chat_id) if self.bot_app else None
+        session = await self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return
         
         session.user.config.trading_mode = "standard"
@@ -1282,7 +1359,7 @@ class KaraTelegram:
         pnl         = action.get("pnl", 0.0)
 
         # Retrieve position from user session for rich context
-        session = self.bot_app.get_session(target_chat_id) if (self.bot_app and target_chat_id) else None
+        session = await self.bot_app.get_session(target_chat_id) if (self.bot_app and target_chat_id) else None
         pos = None
         if session and hasattr(session.executor, '_positions'):
             pos = session.executor._positions.get(pos_id)
@@ -1436,7 +1513,7 @@ class KaraTelegram:
         chat_id = str(update.effective_chat.id)
         
         # Get user session
-        session = self.bot_app.get_session(chat_id) if self.bot_app else None
+        session = await self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session:
             await query.answer("Sesi tidak ditemukan. Ketik /start", show_alert=True)
             return
@@ -1537,6 +1614,84 @@ class KaraTelegram:
                 "• Risk: 13% | Leverage: up to 35x"
             )
             return
+
+        # ── LIVE SETUP FLOW ──
+        if query.data == "confirm_live":
+            await query.answer()
+            chat_id = str(query.message.chat_id)
+            user = user_db.get_user(chat_id)
+            
+            # Generate Agent Wallet
+            acc = eth_account.Account.create()
+            address = acc.address
+            private_key = acc.key.hex()
+            
+            # Save to user (DB will encrypt automatically on save)
+            user.hl_agent_address = address
+            user.hl_agent_secret = private_key
+            user.wallet_authorized = False
+            user_db.update_user(user)
+            
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Saya Sudah Authorize", callback_data="authorize_final")]
+            ])
+            
+            await query.edit_message_text(
+                AGENT_WALLET_CREATED_TEMPLATE.format(
+                    address=address,
+                    private_key=private_key
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True
+            )
+
+        elif query.data == "authorize_final":
+            await query.answer("Sedang memverifikasi...", show_alert=False)
+            chat_id = str(query.message.chat_id)
+            user = user_db.get_user(chat_id)
+            
+            if not user or not user.hl_agent_secret:
+                await query.edit_message_text("❌ Terjadi kesalahan. Silakan ketik /live lagi.")
+                return
+
+            # Test connection
+            try:
+                from data.hyperliquid_client import HyperliquidClient
+                test_client = HyperliquidClient(
+                    wallet_address=user.hl_agent_address,
+                    private_key=user.hl_agent_secret
+                )
+                await test_client.connect()
+                
+                # Try to fetch user state
+                state = await test_client.get_user_state()
+                if not state:
+                    raise Exception("Gagal mengambil data akun. Pastikan sudah Authorize di HL.")
+                
+                # Connection Success!
+                user.wallet_authorized = True
+                user.config.bot_mode = BotMode.LIVE
+                user_db.update_user(user)
+                
+                # Re-initialize user session in main app
+                if self.bot_app:
+                    # Invalidate existing session to force re-creation with LiveExecutor
+                    if chat_id in self.bot_app.sessions:
+                        del self.bot_app.sessions[chat_id]
+                    # Create and init new session
+                    await self.bot_app.get_session(chat_id)
+
+                await query.edit_message_text(
+                    "✨ <b>Koneksi Berhasil!</b> 🎉\n\n"
+                    "Agent Wallet kamu sudah aktif dan terhubung ke Hyperliquid.\n"
+                    "KARA sekarang berjalan dalam <b>LIVE MODE</b>.\n\n"
+                    "🎯 <i>Gunakan /status untuk melihat saldo live kamu. Happy trading!</i>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                log.error(f"Authorization verify failed for {chat_id}: {e}")
+                await query.answer(f"❌ Verifikasi Gagal: {str(e)}", show_alert=True)
 
         if action == "close_req":
             asset, side_val = sig_id.split(":", 1)

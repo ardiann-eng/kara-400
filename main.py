@@ -507,11 +507,13 @@ class KaraBot:
 
             await asyncio.sleep(1)
 
-    def get_session(self, chat_id: str) -> Optional[UserSession]:
+    async def get_session(self, chat_id: str) -> Optional[UserSession]:
         if str(chat_id) not in self.sessions:
             user = user_db.get_user(str(chat_id))
             if user:
-                self.sessions[str(chat_id)] = UserSession(user, mode_manager=self.mode_mgr, hl_client=self.hl_client)
+                session = UserSession(user, mode_manager=self.mode_mgr, hl_client=self.hl_client)
+                await session.initialize()
+                self.sessions[str(chat_id)] = session
         return self.sessions.get(str(chat_id))
 
     async def _broadcast_heartbeat(self):
@@ -558,7 +560,7 @@ class KaraBot:
             target_ids = list(self.telegram._authorized_chat_ids)
             active_modes = set()
             for cid in target_ids:
-                session = self.get_session(cid)
+                session = await self.get_session(cid)
                 if session and session.user and hasattr(session.user.config, 'trading_mode'):
                     active_modes.add(session.user.config.trading_mode)
             
@@ -593,7 +595,7 @@ class KaraBot:
                             
                             # Update RiskManagers
                             for cid in target_ids:
-                                session = self.get_session(cid)
+                                session = await self.get_session(cid)
                                 if session:
                                     session.risk_mgr.update_score(asset, asset_max_score)
                             
@@ -664,10 +666,10 @@ class KaraBot:
 
         for chat_id in target_ids:
             # Get or create session
-            session = self.get_session(chat_id)
+            session = await self.get_session(chat_id)
             if not session:
                 user = user_db.create_user(chat_id, "Master", init_usd=config.PAPER_BALANCE_USD)
-                session = self.get_session(chat_id)
+                session = await self.get_session(chat_id)
                 
             user_mode = getattr(session.user.config, 'trading_mode', 'standard')
             base_signal = signals_dict.get(user_mode)

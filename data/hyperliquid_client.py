@@ -51,9 +51,10 @@ class HyperliquidClient:
     All heavy calls are run in a thread executor to avoid blocking the event loop.
     """
 
-    def __init__(self):
+    def __init__(self, private_key: str = None, wallet_address: str = None):
         self.testnet = config.HL_TESTNET
-        self.wallet  = config.WALLET_ADDRESS
+        self.wallet  = wallet_address or config.WALLET_ADDRESS
+        self.private_key = private_key or config.PRIVATE_KEY
         self._info: Optional[Info] = None
         self._exchange: Optional[Exchange] = None
         self._account: Optional[Any] = None  # eth_account
@@ -114,9 +115,9 @@ class HyperliquidClient:
             log.warning(f"Info client init failed (will use HTTP only): {e}")
             self._info = None
 
-        if config.PRIVATE_KEY:
+        if self.private_key:
             try:
-                self._account = eth_account.Account.from_key(config.PRIVATE_KEY)
+                self._account = eth_account.Account.from_key(self.private_key)
                 self._exchange = Exchange(
                     account=self._account,
                     base_url=self._trade_url
