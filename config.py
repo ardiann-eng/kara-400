@@ -135,7 +135,7 @@ class RiskConfig:
     daily_loss_limit_pct:    float = 0.80     # [RELAXED] 80% daily loss -> pause
     daily_loss_hard_pct:     float = 0.90     # [RELAXED] 90% -> full stop today
     max_drawdown_pct:        float = 0.95     # [RELAXED] 95% total drawdown kill-switch
-    post_loss_cooldown_hrs:  float = 5.0      # hours cooldown after daily loss > 6%
+    post_loss_cooldown_hrs:  float = 5.0      # [RELAXED] cooldown triggered after 50% daily loss
 
     # Concurrent positions
     max_concurrent_positions: int  = 10       # max 10 positions

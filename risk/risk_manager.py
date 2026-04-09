@@ -575,7 +575,7 @@ class RiskManager:
         # PERSIST STATE IMMEDIATELY after update
         self._persist_risk_state()
 
-        if daily_pnl_pct < -0.06 and not self._cooldown_until:
+        if daily_pnl_pct < -0.50 and not self._cooldown_until:
             cooldown_hrs = RISK.post_loss_cooldown_hrs
             self._cooldown_until = time.monotonic() + cooldown_hrs * 3600
             log.warning(
