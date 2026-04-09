@@ -71,6 +71,7 @@ docker-compose.override.yml
 # Project Persistence (KARA)
 # Allow the folder and its code, but ignore specific database files
 data/*.json
+!data/changelog.json
 data/*.db
 data/*.sqlite
 storage/
