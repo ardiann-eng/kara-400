@@ -936,12 +936,17 @@ class KaraTelegram:
             liq_part = f" | 💥 Liq: <code>${format_price(pos.liquidation_price)}</code>" if pos.liquidation_price else ""
 
             # ── Concise Card ───────────────────────────────────────────────
+            # Clean ticker for Hyperliquid URL (strip 'k' for 1000x assets)
+            url_ticker = pos.asset[1:] if pos.asset.startswith('k') and len(pos.asset) > 1 else pos.asset
+            hl_link    = f"https://app.hyperliquid.xyz/trade/{url_ticker}"
+            asset_html = f"<a href='{hl_link}'>{pos.asset}</a>"
+
             text += (
                 f"\n"
-                f"<b>{pos.asset} {side_str} {pos.leverage}x</b>   {pnl_emoji} {pnl_sign}{float_pct:.2f}%\n"
+                f"<b>{asset_html} {side_str} {pos.leverage}x</b>   {pnl_emoji} {pnl_sign}{float_pct:.2f}%\n"
                 f"Entry: ${format_price(pos.entry_price)} → ${format_price(current)}\n"
-                f"SL: ${format_price(pos.stop_loss)} | Liq: ${format_price(pos.liquidation_price) if pos.liquidation_price else '?'}\n"
-                f"TP1: ${format_price(pos.tp1)}   TP2: ${format_price(pos.tp2)}   | {duration} lalu\n"
+                f"🛡️ SL: ${format_price(pos.stop_loss)} | 💥 Liq: ${format_price(pos.liquidation_price) if pos.liquidation_price else '?'}\n"
+                f"🎯 TP1: ${format_price(pos.tp1)}   🎯 TP2: ${format_price(pos.tp2)}   | {duration} lalu\n"
             )
 
             # Close button per position (2-column grid)
