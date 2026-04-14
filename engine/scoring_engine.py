@@ -26,6 +26,11 @@ from models.schemas import (
 from engine.analyzers.oi_funding_analyzer  import OIFundingAnalyzer
 from engine.analyzers.liquidation_analyzer import LiquidationAnalyzer
 from engine.analyzers.orderbook_analyzer   import OrderbookAnalyzer
+from config import SIGNAL, SCALPER
+
+# -- Intelligence Layer --
+from intelligence.feature_engine import extract_live_features
+from intelligence.intelligence_model import intelligence_model
 from risk.risk_manager import RiskManager
 from data.hyperliquid_client     import HyperliquidClient
 from data.ws_client              import MarketDataCache
@@ -297,9 +302,9 @@ class ScoringEngine:
             reasons.append(meta_reason)
         score = max(0, min(score, 100))
 
-        # 4. Build signal with scalper TP/SL
-        from models.schemas import MarketRegime
-        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, MarketRegime.NORMAL, session_bonus)
+        # 4. Build signal with scalper TP/SL (now dynamic based on Volatility)
+        vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
+        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol)
         signal.meta_pattern_key = pattern_key
         signal.meta_score_delta = meta_delta
         
@@ -442,10 +447,14 @@ class ScoringEngine:
                 reasons.append(f"🔴 Mild ask pressure ({imb:.2f})")
 
         if len(candles) < 10:
-            # Cannot compute EMA/RSI without data → neutral score
+            # Cannot compute EMA/RSI without data — use only OB score
             total = bull_pts + bear_pts
             side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
-            return min(total, 100), side, reasons
+            # Skip setting bull_candles/bear_candles — default 0
+            bull_candles = 0
+            bear_candles = 0
+            score = min(total, 100)
+            return score, side, reasons
 
         # Extract OHLCV
         closes = []
@@ -465,12 +474,12 @@ class ScoringEngine:
             return min(bull_pts + bear_pts, 100), side, reasons
 
         # ── Momentum Confirmation (Institutional Filter) ─────────────────
+        bull_candles = 0
+        bear_candles = 0
         if len(closes) >= 3:
             bull_candles = sum(1 for c, o in zip(closes[-3:], opens[-3:]) if c > o)
             bear_candles = sum(1 for c, o in zip(closes[-3:], opens[-3:]) if c < o)
             
-            # For scalper, we only add points or penalize, or hard reject.
-            # 3-of-4 logic implies if it goes against momentum it shouldn't trade.
             if bull_candles >= 2:
                 bull_pts += 10
                 reasons.append(f"🔥 Momentum 1m Bullish ({bull_candles}/3 Green)")
@@ -582,10 +591,11 @@ class ScoringEngine:
                     return 0, side, reasons + ["REJECT: Counter-trend MTF"]
 
         # Enforce Scalper Consensus: Must have momentum alignment
-        if side == Side.LONG and (locals().get('bear_candles', 0) >= 2):
+        # (Now uses function-level vars set above, not locals())
+        if side == Side.LONG and bear_candles >= 2:
             log.debug(f"[{asset}] SCALPER REJECT: LONG signal blocked by 1m Bearish Momentum")
             return 0, side, reasons + ["REJECT: Momentum against trade"]
-        if side == Side.SHORT and (locals().get('bull_candles', 0) >= 2):
+        if side == Side.SHORT and bull_candles >= 2:
             log.debug(f"[{asset}] SCALPER REJECT: SHORT signal blocked by 1m Bullish Momentum")
             return 0, side, reasons + ["REJECT: Momentum against trade"]
             
@@ -620,17 +630,20 @@ class ScoringEngine:
         score: int,
         mark_price: float,
         reasons: list,
-        regime: MarketRegime = MarketRegime.UNKNOWN,
-        session_bonus: int = 0,
+        regime: MarketRegime,
+        session_bonus: int,
+        realized_vol: float,
     ) -> TradeSignal:
-        """Build a TradeSignal with scalper-specific TP/SL levels."""
-        import config
+        """Build a TradeSignal with scalper-specific dynamic TP/SL levels."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
+        
+        # Determine dynamic TP levels using ATR based Volatility (Fix #10)
+        sl_pct, tp1_pct, tp2_pct = self.risk_mgr.calculate_tp_levels(asset, mark_price, side, realized_vol)
+        
+        # Adjust SL specifically for scalper if we want it tighter, or use the dynamic SL
+        # Here we just use what calculate_tp_levels returned.
+        import config
         scfg = config.SCALPER
-
-        sl_pct  = scfg.sl_pct
-        tp1_pct = scfg.tp1_pct
-        tp2_pct = scfg.tp2_pct
         leverage = min(scfg.default_leverage, scfg.max_leverage)
 
         if side == Side.LONG:
@@ -650,6 +663,17 @@ class ScoringEngine:
             reasons=reasons
         )
 
+        # Compute Expected Edge using ML
+        features = extract_live_features(
+            score=score,
+            meta_delta=getattr(breakdown, 'meta_score_delta', 0),
+            bd=breakdown,
+            funding_rate=0.0, # Handled dynamically inside extract
+            realized_vol=realized_vol,
+            trend_pct=0.0
+        )
+        edge = intelligence_model.predict_edge(features)
+
         return TradeSignal(
             signal_id=str(uuid.uuid4())[:8].upper(),
             asset=asset,
@@ -664,7 +688,8 @@ class ScoringEngine:
             tp2=tp2,
             suggested_leverage=leverage,
             meta_pattern_key=getattr(breakdown, 'meta_pattern_key', None),
-            meta_score_delta=getattr(breakdown, 'meta_score_delta', 0)
+            meta_score_delta=getattr(breakdown, 'meta_score_delta', 0),
+            expected_edge=edge
         )
 
     # ──────────────────────────────────────────
@@ -887,7 +912,7 @@ class ScoringEngine:
         # raw_score = winning side score + confidence margin
         # The margin between bull and bear represents conviction strength
         margin = abs(total_bull - total_bear)
-        confidence_bonus = min(margin * 2, 15)  # up to 15pts for strong conviction
+        confidence_bonus = min(margin * 1.5, 12)  # calibrated V2: up to 12pts
 
         if long_count >= 3:
             side = Side.LONG
@@ -921,7 +946,7 @@ class ScoringEngine:
 
         # Add session bonus
         raw_score += session_bonus
-        raw_score = max(0, min(raw_score, 85))  # cap before multiplier
+        raw_score = max(0, min(raw_score, 92))  # raised cap V2 to allow 100 final scores
 
         # ── Apply regime multiplier ────────────────────────────────────
         vol_multiplier = {
@@ -1011,8 +1036,8 @@ class ScoringEngine:
         # ── Build signal ───────────────────────────────────────────────
         signal = self._build_signal(
             asset, side, final_score, log_regime, breakdown, mark_price,
-            oi_usd=oi.open_interest,
-            vol_regime=vol_regime.value if hasattr(vol_regime, "value") else vol_regime
+            realized_vol=realized_vol,
+            oi_usd=oi.open_interest
         )
 
         return signal, final_score
@@ -1184,8 +1209,8 @@ class ScoringEngine:
         regime: MarketRegime,
         breakdown: ScoreBreakdown,
         mark_price: float,
+        realized_vol: float,
         oi_usd: float = 0.0,
-        vol_regime: str = "normal",
     ) -> TradeSignal:
         # Determine strength
         if score >= 75:
@@ -1195,13 +1220,9 @@ class ScoringEngine:
         else:
             strength = SignalStrength.WEAK
 
-        # Calculate SL
-        import config
-        sl_pct = config.RISK.paper_sl_pct if config.TRADE_MODE == "paper" else config.RISK.default_sl_pct
-        
-        # ── DYNAMIC TP (Solution 2) ───────────────────────────────────
-        # Get dynamic levels from RiskManager
-        tp1_pct, tp2_pct = self.risk_mgr.get_dynamic_tp_levels(asset, oi_usd, vol_regime)
+        # ── DYNAMIC TP/SL (Fix 10) ────────────────────────────────────
+        # Get dynamic levels from RiskManager based on Volatility
+        sl_pct, tp1_pct, tp2_pct = self.risk_mgr.calculate_tp_levels(asset, mark_price, side, realized_vol)
 
         if side == Side.LONG:
             stop_loss = round(mark_price * (1 - sl_pct), 8)

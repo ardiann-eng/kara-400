@@ -14,7 +14,7 @@ load_dotenv()
 # ──────────────────────────────────────────────
 # ENVIRONMENT
 # ──────────────────────────────────────────────
-KARA_VERSION = "6.2.0"  # Current Release Version
+KARA_VERSION = "7.0.0"  # Intelligence Layer Update
 DATA_SOURCE = os.getenv("KARA_DATA_SOURCE", "mainnet").lower() # "mainnet" | "testnet"
 TRADE_MODE  = os.getenv("KARA_TRADE_MODE", "paper").lower()    # "paper" | "live"
 FULL_AUTO   = True  # Force auto execution mode as requested
@@ -105,6 +105,11 @@ REDIS_URL        = os.getenv("REDIS_URL", "")           # optional
 # ──────────────────────────────────────────────
 WATCHED_ASSETS = ["BTC", "ETH", "SOL", "ARB", "DOGE"]
 
+# SCALPER_ASSETS: berdasarkan hasil paper trading aktual (win-rate terbaik)
+# ZEC: 74.5% WR | kBONK: 60% WR | SPX: 100% WR | COMP: 91.7% WR
+# REZ: 77.8% WR | PYTH: high WR | MON, VVV: emerging high-signal assets
+SCALPER_ASSETS = ["ZEC", "kBONK", "SPX", "COMP", "REZ", "PYTH", "MON", "VVV"]
+
 # ──────────────────────────────────────────────
 # RISK MANAGEMENT  (safe defaults for students)
 # ──────────────────────────────────────────────
@@ -181,6 +186,7 @@ class ScalperConfig:
 
     # Position sizing (% of equity)
     risk_per_trade_pct:      float = 0.04     # 4% per trade (Aggressive baseline)
+    max_risk_per_trade_pct:  float = 0.10     # 10% absolute cap (AI Boost)
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # Scalper SL/TP (Calibrated for 25x leverage)
@@ -195,9 +201,9 @@ class ScalperConfig:
     max_hold_soft_floor_pct: float = -0.0015  # allow delay if loss worse than -0.15%
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
-    # Score threshold (more signals, lower bar)
-    min_score_to_enter:      int   = 50       # entry threshold (scalper signal gate)
-    signal_cooldown_minutes: int   = 15       # 15 min cooldown (prevent spam)
+    # Score threshold — HARD THRESHOLD SCALPER = 60 (TIDAK BISA DIUBAH USER)
+    min_score_to_enter:      int   = 60       # ⚠️ HARD: scalper entry gate (TETAP 60)
+    signal_cooldown_minutes: int   = 5        # 5 min cooldown scalper
     mtf_confirm_enabled:     bool  = True     # require 15m trend confirmation
     mtf_confirm_interval:    str   = "15m"
     mtf_confirm_lookback:    int   = 32       # ~8h on 15m candles
@@ -228,8 +234,9 @@ SCALPER = ScalperConfig()
 # ──────────────────────────────────────────────
 @dataclass
 class SignalConfig:
-    min_score_to_signal:     int   = 58       # STANDARD: minimum score to emit signal
-    min_score_to_auto_trade: int   = 65       # STANDARD: minimum score for full-auto execution
+    # ⚠️ HARD THRESHOLDS — TIDAK BISA DIUBAH USER (perubahan hanya via code)
+    min_score_to_signal:     int   = 60       # STANDARD: minimum score emit signal
+    min_score_to_auto_trade: int   = 65       # STANDARD: minimum score full-auto execute (TETAP)
     signal_cooldown_minutes: int   = 15       # cooldown per asset between signals
 
     # Session windows (UTC)
@@ -238,10 +245,10 @@ class SignalConfig:
     london_start_utc:        int   = 8
     london_end_utc:          int   = 17
 
-    # Session score bonuses / penalties
-    ny_session_bonus:        int   = 12       # NY dominates ~40% daily volume
-    london_session_bonus:    int   = 4
-    asia_session_penalty:    int   = -5       # 22:00-07:00 UTC
+    # Session score bonuses / penalties (Hyperliquid volume distribution 2026)
+    ny_session_bonus:        int   = 10       # NY dominates ~40% daily volume (slightly dampened)
+    london_session_bonus:    int   = 4        # London-NY overlap ~25% volume
+    asia_session_penalty:    int   = -10      # Asia 22:00-07:00 UTC ~20% volume — reduced penalty
 
     # OI / Funding thresholds
     oi_change_threshold_pct: float = 0.008     # 0.8% OI change = significant

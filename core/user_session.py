@@ -37,7 +37,7 @@ class UserSession:
                     wallet_address=self.user.hl_agent_address,
                     private_key=self.user.hl_agent_secret
                 )
-                self.executor = LiveExecutor(self.user_client, self.risk_mgr)
+                self.executor = LiveExecutor(self.user.chat_id, self.user_client, self.risk_mgr)
         else:
             self.executor = PaperExecutor(self.risk_mgr, initial_balance=self.user.paper_balance_usd, chat_id=self.user.chat_id)
             

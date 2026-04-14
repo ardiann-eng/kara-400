@@ -19,7 +19,7 @@ class TradeExcelLogger:
     def __init__(self, file_path: str = None):
         self.file_path = file_path or config.EXCEL_LOG_PATH
         self._columns = [
-            "Timestamp", "Asset", "Side", "Action", 
+            "Timestamp", "Chat ID", "Asset", "Side", "Action", 
             "Price", "Size", "Notional (USD)", "PnL ($)", 
             "PnL (%)", "Score", "Reason", "Mode", "Position ID"
         ]
@@ -35,13 +35,13 @@ class TradeExcelLogger:
             except Exception as e:
                 log.error(f" Failed to create Excel log: {e}")
 
-    def log_trade(self, data: Dict[str, Any]):
+    def log_trade(self, chat_id: str, data: Dict[str, Any]):
         """Append a new trade action to the Excel file."""
         try:
             # Prepare row data
-            # Map standard executor log format to our Excel schema
             row = {
                 "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "Chat ID": str(chat_id),
                 "Asset": data.get("asset", "Unknown"),
                 "Side": data.get("side", "").upper(),
                 "Action": data.get("type", "unknown").upper(),
@@ -57,17 +57,19 @@ class TradeExcelLogger:
             }
 
             # Read, append, write
-            # For reliability, we read/write each time (not high frequency enough to matter)
             if os.path.exists(self.file_path):
-                df = pd.read_excel(self.file_path, engine='openpyxl')
+                # Ensure we specify that header is on row 0
+                df = pd.read_excel(self.file_path, engine='openpyxl', header=0)
             else:
                 df = pd.DataFrame(columns=self._columns)
             
             new_row_df = pd.DataFrame([row])
-            df = pd.concat([df, new_row_df], ignore_index=True)
             
-            df.to_excel(self.file_path, index=False, engine='openpyxl')
-            log.debug(f" Logged trade to Excel: {row['Asset']} {row['Action']}")
+            # Use concat but only if new_row_df has data
+            if not new_row_df.empty:
+                df = pd.concat([df, new_row_df], ignore_index=True)
+                df.to_excel(self.file_path, index=False, engine='openpyxl')
+                log.debug(f" Logged trade to Excel for {chat_id}: {row['Asset']} {row['Action']}")
             
         except Exception as e:
             log.error(f" Failed to log trade to Excel: {e}")

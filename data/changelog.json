@@ -1,15 +1,21 @@
 {
-  "version": "6.2.0",
-  "release_id": "HL-400-MULTI-WALLET",
-  "date": "2026-04-09",
+  "version": "7.0.0",
+  "release_id": "KARA-INTELLIGENCE-LAYER",
+  "date": "2026-04-13",
   "features": [
-    "NEW: Secure Multi-User Multi-Wallet System 🛡️",
-    "SECURE: Fernet (AES) Encryption for Agent Secrets at-rest.",
-    "NEW: Integrated Onboarding flow for Agent Wallet setup.",
-    "FIX: Async-Native UserSession initialization (Eliminates login delays).",
-    "FEATURE: Agent Authorization verification via on-chain data check."
+    "NEW: Intelligence Layer (Self-Learning AI) 🧠",
+    "ML: HistGradientBoosting integration for 'Expected Edge' prediction.",
+    "DYNAMIC: Risk 2.0 - AI-driven sizing & automatic trade blocking.",
+    "CORE: Fixed Scoring Inversion (Funding/Liq now Trend-Following).",
+    "FIX: Scalper mode config 'max_risk_per_trade_pct' crash.",
+    "DATA: Automated 2000+ trade history ingestion & training."
   ],
   "history": [
+    {
+      "version": "7.0.0",
+      "date": "2026-04-13",
+      "notes": "Major Update: Self-Learning Intelligence Layer & Machine Learning CORE."
+    },
     {
       "version": "6.2.0",
       "date": "2026-04-09",

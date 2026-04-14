@@ -148,17 +148,17 @@ class LiquidationAnalyzer:
             # Negative funding = shorts crowded = more short liq risk = LONG
             # Real funding rates are typically +-0.00001 to +-0.00003
             if funding_rate > 0.000005:
-                # longs crowded — more liq risk on long side = SHORT
+                # extreme positive funding = momentum = LONG
                 tilt = min(int(abs(funding_rate) * 200000), 4)  # up to 4pt tilt
-                bear += base_points // 2 + tilt
-                bull += max(base_points // 2 - tilt, 0)
-                reasons.append(f"{risk_label} + positive funding -> SHORT liq tilt")
-            elif funding_rate < -0.000005:
-                # shorts crowded — more liq risk on short side = LONG
-                tilt = min(int(abs(funding_rate) * 200000), 4)
                 bull += base_points // 2 + tilt
                 bear += max(base_points // 2 - tilt, 0)
-                reasons.append(f"{risk_label} + negative funding -> LONG liq tilt")
+                reasons.append(f"{risk_label} + positive funding -> LONG liq tilt")
+            elif funding_rate < -0.000005:
+                # extreme negative funding = downside momentum = SHORT
+                tilt = min(int(abs(funding_rate) * 200000), 4)
+                bear += base_points // 2 + tilt
+                bull += max(base_points // 2 - tilt, 0)
+                reasons.append(f"{risk_label} + negative funding -> SHORT liq tilt")
             else:
                 # No funding tilt — even split but still differentiated by OI size
                 bull += base_points // 2
@@ -178,12 +178,12 @@ class LiquidationAnalyzer:
         )
 
         if long_liq_above > short_liq_below * 1.5:
-            bear += 14
+            bear += 12  # reduced from 14 to temper inflation
             reasons.append(
                 f"Large long liq cluster above ${long_liq_above:,.0f} -> SHORT cascade"
             )
         elif short_liq_below > long_liq_above * 1.5:
-            bull += 14
+            bull += 12  # reduced from 14
             reasons.append(
                 f"Large short liq cluster below ${short_liq_below:,.0f} -> LONG cascade"
             )
@@ -195,9 +195,9 @@ class LiquidationAnalyzer:
         # Cascade risk bonus
         if liq_map.cascade_risk > 0.5:
             if long_liq_above > short_liq_below:
-                bear += 8
+                bear += 6  # reduced from 8
             else:
-                bull += 8
+                bull += 6  # reduced from 8
             reasons.append(
                 f"High cascade risk {liq_map.cascade_risk*100:.0f}%"
             )

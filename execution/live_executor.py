@@ -34,9 +34,11 @@ class LiveExecutor:
 
     def __init__(
         self,
+        chat_id: str,
         hl_client: HyperliquidClient,
         risk_manager: RiskManager,
     ):
+        self.chat_id= str(chat_id)
         self.client = hl_client
         self.risk   = risk_manager
         self.mode   = BotMode.LIVE
@@ -208,7 +210,7 @@ class LiveExecutor:
             "score":     signal.score,
             "timestamp": utcnow(),
         }
-        get_excel_logger().log_trade(log_data)
+        get_excel_logger().log_trade(self.chat_id, log_data)
 
         log.info(
             f" [LIVE] Opened {signal.asset} {signal.side.value.upper()} "
@@ -341,7 +343,9 @@ class LiveExecutor:
                 "score":     getattr(pos, 'entry_score', 0),
                 "timestamp": utcnow(),
             }
-            get_excel_logger().log_trade(log_data)
+            from core.db import user_db
+            user_db.save_trade(self.chat_id, log_data)
+            get_excel_logger().log_trade(self.chat_id, log_data)
 
             log.info(
                 f" [LIVE] Closed {close_ratio*100:.0f}% of {pos.asset} "

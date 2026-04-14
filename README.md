@@ -7,7 +7,7 @@
 ## ✨ Key Features
 
 - **👥 Multi-User Architecture**: Isolated trading sessions per user. Each subscriber gets their own balance, risk settings, and position management.
-- **🇮🇩 IDR Localization**: All Telegram notifications (`/status`, `/pos`, `/pnl`) are displayed in Indonesian Rupiah (IDR) using real-time USD/IDR conversion.
+- **🇮🇩 IDR Localization**: All Telegram notifications (`/status`, `/pos`, `/journal`) are displayed in Indonesian Rupiah (IDR) using real-time USD/IDR conversion.
 - **🚀 Dual Trading Modes**:
     - **Standard**: Secure, swing-oriented trading with structured Risk/Reward.
     - **Scalper**: Ultra-aggressive, high-leverage mode for rapid market cycles.
@@ -54,7 +54,7 @@ KARA is optimized for **Railway** deployment.
 - `/status`: Check your equity, daily PnL, and current drawdown in IDR.
 - `/pos`: View active positions with interactive buttons to close or manage.
 - `/mode`: Switch between **Standard** and **Scalper** strategies.
-- `/pnl`: Detailed summary of your performance.
+- `/journal`: Detailed summary of your performance (Trade Journal).
 - `/live`: (Admin) Toggle between Paper and Live trading modes.
 
 ---

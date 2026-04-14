@@ -72,6 +72,7 @@ KARA berkomunikasi melalui Telegram dengan gaya bahasa sopan namun detail.
 ### Command Utama:
 - `/pos`: Monitor posisi aktif. Tombol [Refresh] sekarang bersifat **instan** (< 0.5 detik) karena mengambil data dari WebSocket cache.
 - `/status`: Cek saldo akun, PnL hari ini, dan riwayat "Daily Reset".
+- `/journal`: Menampilkan Trade Journal lengkap, winrate, dan performa aset.
 - `/paper`: Reset saldo simulasi ke awal ($1,000).
 
 ---

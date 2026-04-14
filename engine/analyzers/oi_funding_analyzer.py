@@ -54,46 +54,46 @@ class OIFundingAnalyzer:
         # Extreme is around 0.0001+ (0.01%/8h)
         # Very extreme is 0.0003+ (0.03%/8h)
         
-        # POSITIVE funding = longs paying shorts = longs crowded -> SHORT
+        # POSITIVE funding = extreme momentum = LONG signal
         if fr > SIGNAL.funding_extreme_threshold * 2:     # > 0.0006
-            bear += 20  # increased from 15
+            bull += 18  # reduced from 20 to temper inflation
             reasons.append(
-                f"EXTREME positive funding {fr*100:.4f}%/8h - longs very crowded -> SHORT"
+                f"EXTREME positive funding {fr*100:.4f}%/8h - massive upside momentum -> LONG"
             )
         elif fr > SIGNAL.funding_extreme_threshold:        # > 0.0003
-            bear += 14  # increased from 10
+            bull += 12  # reduced from 14
             reasons.append(
-                f"HIGH positive funding {fr*100:.4f}%/8h -> SHORT pressure"
+                f"HIGH positive funding {fr*100:.4f}%/8h -> STRONG LONG momentum"
             )
         elif fr > 0.00005:                                 # > 0.005%/8h - meaningful positive
-            bear += 8   # increased from 6
+            bull += 6   # reduced from 8
             reasons.append(
-                f"Moderate positive funding {fr*100:.4f}%/8h -> mild SHORT tilt"
+                f"Moderate positive funding {fr*100:.4f}%/8h -> LONG tilt"
             )
         elif fr < -SIGNAL.funding_extreme_threshold * 2:   # < -0.0006
-            bull += 20  # increased from 15
+            bear += 18  # reduced from 20 to temper inflation
             reasons.append(
-                f"EXTREME negative funding {fr*100:.4f}%/8h - shorts crowded -> LONG"
+                f"EXTREME negative funding {fr*100:.4f}%/8h - massive downside momentum -> SHORT"
             )
         elif fr < -SIGNAL.funding_extreme_threshold:       # < -0.0003
-            bull += 14  # increased from 10
+            bear += 12  # reduced from 14
             reasons.append(
-                f"HIGH negative funding {fr*100:.4f}%/8h -> LONG pressure"
+                f"HIGH negative funding {fr*100:.4f}%/8h -> STRONG SHORT momentum"
             )
         elif fr < -0.00005:                                # < -0.005%/8h - meaningful negative
-            bull += 8   # increased from 6
+            bear += 6   # reduced from 8
             reasons.append(
-                f"Moderate negative funding {fr*100:.4f}%/8h -> mild LONG tilt"
+                f"Moderate negative funding {fr*100:.4f}%/8h -> SHORT tilt"
             )
         elif fr > 0.00001:                                 # slightly positive
-            bear += 3
-            reasons.append(
-                f"Slight positive funding {fr*100:.4f}%/8h -> minor SHORT lean"
-            )
-        elif fr < -0.00001:                                # slightly negative
             bull += 3
             reasons.append(
-                f"Slight negative funding {fr*100:.4f}%/8h -> minor LONG lean"
+                f"Slight positive funding {fr*100:.4f}%/8h -> minor LONG lean"
+            )
+        elif fr < -0.00001:                                # slightly negative
+            bear += 3
+            reasons.append(
+                f"Slight negative funding {fr*100:.4f}%/8h -> minor SHORT lean"
             )
         else:
             # Truly flat funding — follow price momentum
@@ -126,18 +126,18 @@ class OIFundingAnalyzer:
                 trend_str = "rising" if slope > 0 else "falling"
                 log.debug(f"[FTRD] {asset}: funding_slope={slope:.6f}, trend={trend_str}")
                 
-                # Positive slope = longs getting crowded = SHORT pressure
+                # Positive slope = strong upside momentum = LONG pressure
                 if slope > 0.000005:
                     pts = min(int(slope * 400000), 8)
                     pts = max(pts, 1)
-                    bear += pts
-                    reasons.append(f"• Funding trend: 📈 RISING (slope {slope:.6f}) -> SHORT pressure")
-                # Negative slope = shorts getting crowded = LONG pressure
+                    bull += pts
+                    reasons.append(f"• Funding trend: 📈 RISING (slope {slope:.6f}) -> LONG pressure")
+                # Negative slope = strong downside momentum = SHORT pressure
                 elif slope < -0.000005:
                     pts = min(int(abs(slope) * 400000), 8)
                     pts = max(pts, 1)
-                    bull += pts
-                    reasons.append(f"• Funding trend: 📉 FALLING (slope {slope:.6f}) -> LONG pressure")
+                    bear += pts
+                    reasons.append(f"• Funding trend: 📉 FALLING (slope {slope:.6f}) -> SHORT pressure")
                 else:
                     reasons.append(f"• Funding trend: ⚖️ STABLE (slope {slope:.6f}) -> Neutral")
 
@@ -146,15 +146,15 @@ class OIFundingAnalyzer:
             pred_diff = funding.predicted_rate - fr
             if abs(pred_diff) > 0.00005:  # lowered from 0.0003
                 if pred_diff > 0:
-                    # Predicted funding more positive = longs will pay more = SHORT
-                    bear += 3
-                    reasons.append(
-                        f"Predicted funding shifting positive -> SHORT pressure building"
-                    )
-                else:
+                    # Predicted funding more positive = momentum confirming LONG
                     bull += 3
                     reasons.append(
-                        f"Predicted funding shifting negative -> LONG pressure building"
+                        f"Predicted funding shifting positive -> LONG pressure building"
+                    )
+                else:
+                    bear += 3
+                    reasons.append(
+                        f"Predicted funding shifting negative -> SHORT pressure building"
                     )
 
         # ── 4. OI Change Analysis ─────────────────────────────────────
@@ -236,21 +236,21 @@ class OIFundingAnalyzer:
             signal_str = "neutral"
             
             if basis > 0.0015:
-                bear += 12  # increased from 8
-                signal_str = "bear (+12)"
-                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> longs paying heavy premium (SHORT)")
-            elif basis > 0.0008:
-                bear += 6   # increased from 4
-                signal_str = "bear (+6)"
-                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> mild long crowding")
-            elif basis < -0.0015:
                 bull += 12  # increased from 8
                 signal_str = "bull (+12)"
-                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> extreme fear/panic (LONG)")
-            elif basis < -0.0008:
+                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> strong bullish premium (LONG)")
+            elif basis > 0.0008:
                 bull += 6   # increased from 4
                 signal_str = "bull (+6)"
-                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> mild fear (LONG)")
+                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> bullish momentum building")
+            elif basis < -0.0015:
+                bear += 12  # increased from 8
+                signal_str = "bear (+12)"
+                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> extreme fear/discount (SHORT)")
+            elif basis < -0.0008:
+                bear += 6   # increased from 4
+                signal_str = "bear (+6)"
+                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> bearish momentum building")
                 
             log.debug(f"[BASIS] {asset}: spot={spot_price:.2f} perp={mark_price:.2f} basis={basis*100:.3f}% signal={signal_str}")
         else:

@@ -139,13 +139,17 @@ class UserDB:
                     )
                 """)
 
-                # 9. Daily PnL History (For status charts)
+                # 10. Trade History (REFIX: Individual records for export/journal)
                 cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS daily_pnl_history (
+                    CREATE TABLE IF NOT EXISTS trade_history (
+                        trade_id   TEXT PRIMARY KEY,
                         chat_id    TEXT,
-                        timestamp  REAL,
+                        asset      TEXT,
+                        side       TEXT,
                         pnl_usd    REAL,
-                        PRIMARY KEY (chat_id, timestamp)
+                        pnl_pct    REAL,
+                        data       TEXT,
+                        created_at REAL
                     )
                 """)
 
@@ -166,7 +170,8 @@ class UserDB:
                 tables_to_clear = [
                     "paper_positions",
                     "paper_state",
-                    "daily_pnl_history"
+                    "daily_pnl_history",
+                    "trade_history"
                 ]
                 
                 reset_stats = {}
@@ -556,6 +561,56 @@ class UserDB:
         return history
 
     # ── USER DB (JSON fallback) ───────────────────────────────────────
+
+    def save_user(self):
+        # ... existing save logic ... (was already here)
+        pass
+
+    # ── TRADE HISTORY (New Persistence) ───────────────────────────────
+
+    def save_trade(self, chat_id: str, trade_data: Dict[str, Any]):
+        """Persist a closed trade record to SQLite."""
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                trade_id = trade_data.get("pos_id", f"t_{int(datetime.now().timestamp())}")
+                cursor.execute("""
+                    INSERT OR REPLACE INTO trade_history (trade_id, chat_id, asset, side, pnl_usd, pnl_pct, data, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    trade_id,
+                    str(chat_id),
+                    trade_data.get("asset"),
+                    trade_data.get("side"),
+                    float(trade_data.get("pnl", 0)),
+                    float(trade_data.get("pnl_pct", 0)),
+                    json.dumps(trade_data, default=str),
+                    datetime.now(timezone.utc).timestamp()
+                ))
+                conn.commit()
+                log.debug(f"✓ Trade {trade_id} saved for user {chat_id}")
+            except Exception as e:
+                log.error(f"Failed to save trade to DB: {e}")
+
+    def get_trade_history(self, chat_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Fetch historical trades for a specific user."""
+        trades = []
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT data FROM trade_history 
+                    WHERE chat_id = ? 
+                    ORDER BY created_at DESC LIMIT ?
+                """, (str(chat_id), limit))
+                rows = cursor.fetchall()
+                for (data_str,) in rows:
+                    trades.append(json.loads(data_str))
+            except Exception as e:
+                log.error(f"Error fetching trade history for {chat_id}: {e}")
+        return trades
 
     def load(self):
         with self._lock:

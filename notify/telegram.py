@@ -290,7 +290,7 @@ class KaraTelegram:
                 CommandHandler("status",   self.cmd_status),
                 CommandHandler("pos",      self.cmd_positions),
                 CommandHandler("positions",self.cmd_positions),
-                CommandHandler("pnl",      self.cmd_pnl),
+                CommandHandler("journal",  self.cmd_journal),
                 CommandHandler("export",   self.cmd_export),
                 CommandHandler("mode",     self.cmd_mode),
                 CommandHandler("scalper",  self.cmd_scalper),
@@ -326,7 +326,7 @@ class KaraTelegram:
                         BotCommand("mode",     "Ganti gaya trading"),
                         BotCommand("pos",      "Posisi terbuka saat ini"),
                         BotCommand("signal",   "Lihat sinyal trading terbaru"),
-                        BotCommand("pnl",      "Ringkasan PnL & Equity"),
+                        BotCommand("journal",  "Statistik & Jurnal performa trading"),
                         BotCommand("paper",    "Kembali ke Paper Mode & Reset Saldo"),
                         BotCommand("live",     "Setup Live Mode (Agent Wallet)"),
                         BotCommand("settings", "Pusat Kendali (Threshold & Leverage)"),
@@ -521,13 +521,16 @@ class KaraTelegram:
         is_scl = (view_mode == "scalper")
         pfx = "scl_" if is_scl else "std_"
         mode_label = "🌸 SCALPER MODE" if is_scl else "🛡️ STANDARD MODE"
+        threshold_str = "Score ≥ 60 (TETAP)" if is_scl else "Score ≥ 65 (TETAP)"
 
         text = (
-            f"⚙️ <b>KARA Settings — {mode_label}</b>\n"
-            f"• Min Score Auto-Trade : <b>{getattr(user.config, pfx+'min_score_to_auto_trade')}</b> (locked)\n"
+            f"⚙️ <b>KARA Settings — {mode_label}</b>\n\n"
+            f"🔒 <b>Parameter Dikunci Sistem</b>\n"
+            f"• Auto-Execute Threshold : <b>{threshold_str}</b>\n\n"
+            f"⚙️ <b>Parameter Yang Bisa Kamu Ubah</b>\n"
             f"• Max Leverage         : <b>{getattr(user.config, pfx+'max_leverage')}x</b>\n"
             f"• Max Open Positions   : <b>{getattr(user.config, pfx+'max_concurrent_positions')}</b>\n\n"
-            f"<i>Auto-trade score dikunci sistem. Kamu hanya bisa ubah leverage & max positions.</i> 🌸"
+            f"<i>Threshold skor dikunci untuk menjaga konsistensi dan keamanan trading. ✨</i>"
         )
 
         keyboard = [
@@ -824,7 +827,7 @@ class KaraTelegram:
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("💼 Posisi",   callback_data="status_nav:pos"),
-                InlineKeyboardButton("💰 PnL",      callback_data="status_nav:pnl")
+                InlineKeyboardButton("📖 Journal",  callback_data="status_nav:journal")
             ],
             [
                 InlineKeyboardButton("⚙️ Mode",     callback_data="status_nav:mode"),
@@ -983,12 +986,13 @@ class KaraTelegram:
             await update.effective_message.reply_html(text, reply_markup=reply_markup)
 
 
-    async def cmd_pnl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    async def cmd_journal(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Show full trade journal to the user."""
         if not self._is_authorized(update): return
         
         # Consistent throttling: 1s for buttons, 5s for commands
         thr = 1 if update.callback_query else 5
-        if self._is_throttled(str(update.effective_chat.id), threshold=thr, action_key="pnl"):
+        if self._is_throttled(str(update.effective_chat.id), threshold=thr, action_key="journal"):
             if update.callback_query:
                 await update.callback_query.answer("⚠️ Terlalu cepat! Tunggu 1 detik.", show_alert=False)
             return
@@ -998,27 +1002,79 @@ class KaraTelegram:
         
         try:
             acc = await session.get_account_state()
-            daily_sign = "+" if acc.daily_pnl >= 0 else ""
-            mode_str   = "PAPER 📝" if acc.mode.value == "paper" else "LIVE ⚡"
+            if getattr(acc, "current_drawdown_pct", 0) >= 15: status_str = "🔴 DANGER: CRITICAL DRAWDOWN"
+            elif getattr(acc, "current_drawdown_pct", 0) >= 8: status_str = "🟠 WARNING: HIGH VOLATILITY"
+            else: status_str = "🟢 SYSTEM NOMINAL"
 
+            # Trade stats
+            from core.db import user_db
+            history = user_db.get_trade_history(chat_id, limit=100)
+            
+            trades = len(history)
+            wins = sum(1 for t in history if "pnl_usd" in t and float(t["pnl_usd"]) > 0)
+            win_rate = (wins/trades * 100) if trades > 0 else 0
+            total_pnl = sum(float(t.get("pnl_usd", 0)) for t in history)
+            
+            # Calculate best/worst
+            asset_pnl = {}
+            exit_stats = {}
+            avg_hold_mins = 0
+            
+            for t in history:
+                a = t.get("asset", "Unknown")
+                p = float(t.get("pnl_usd", 0))
+                asset_pnl[a] = asset_pnl.get(a, 0) + p
+                
+                ex = t.get("close_reason", "unknown")
+                if ex not in exit_stats: exit_stats[ex] = {"trades":0, "wins":0}
+                exit_stats[ex]["trades"] += 1
+                if p > 0: exit_stats[ex]["wins"] += 1
+                
+                if "opened_at" in t and "closed_at" in t:
+                    try:
+                        open_t = datetime.fromisoformat(t["opened_at"].replace('Z','+00:00'))
+                        close_t = datetime.fromisoformat(t["closed_at"].replace('Z','+00:00'))
+                        avg_hold_mins += (close_t - open_t).total_seconds() / 60
+                    except: pass
+                    
+            if trades > 0: avg_hold_mins /= trades
+            
+            best_asset = max(asset_pnl.items(), key=lambda x: x[1])[0] if asset_pnl else "-"
+            best_asset_pnl = asset_pnl.get(best_asset, 0)
+            worst_asset = min(asset_pnl.items(), key=lambda x: x[1])[0] if asset_pnl else "-"
+            worst_asset_pnl = asset_pnl.get(worst_asset, 0)
+            
+            # Exit stats processing
+            for ex in exit_stats:
+                exit_stats[ex]["wr"] = exit_stats[ex]["wins"] / exit_stats[ex]["trades"] * 100
+            
+            best_exit = max(exit_stats.items(), key=lambda x: x[1]["wr"])[0] if exit_stats else "-"
+            best_exit_wr = exit_stats[best_exit]["wr"] if exit_stats else 0
+            worst_exit = min(exit_stats.items(), key=lambda x: x[1]["wr"])[0] if exit_stats else "-"
+            worst_exit_wr = exit_stats[worst_exit]["wr"] if exit_stats else 0
+
+            total_sign = "+" if total_pnl >= 0 else ""
+            best_a_sign = "+" if best_asset_pnl >= 0 else ""
+            worst_a_sign = "+" if worst_asset_pnl >= 0 else ""
+                
             text = (
-                "💰 <b>KARA PORTFOLIO SUMMARY</b>\n\n"
-                "💎 <b>ACCOUNT & MARGIN</b>\n"
-                f"• Ekuitas Total  : <code>{format_idr(acc.total_equity)}</code> (NAV)\n"
-                f"• Saldo Dompet   : <code>{format_idr(acc.wallet_balance)}</code>\n"
-                f"• Saldo Tersedia : <code>{format_idr(acc.available)}</code>\n\n"
-                "📊 <b>PERFORMANCE</b>\n"
-                f"• Untung/Rugi    : <code>{format_idr(acc.unrealized_pnl)}</code> (Floating)\n"
-                f"• PnL Harian     : <code>{daily_sign}{format_idr(acc.daily_pnl)} ({daily_sign}{format_pct(acc.daily_pnl_pct)})</code>\n"
-                f"• Peak Total     : <code>{format_idr(acc.peak_balance)}</code>\n"
-                f"• Max Drawdown   : <code>{format_pct(acc.current_drawdown_pct, show_sign=False)}</code>\n\n"
-                "🛡️ <b>SYSTEM STATUS</b>\n"
-                f"• Mode Eksekusi  : {mode_str}\n\n"
-                "<i>Tetap disiplin dan jaga psikologi trading ya! 🌸</i>"
+                "📔 <b>KARA Trade Journal</b>\n"
+                "─────────────────\n"
+                "<b>Performance (All Time):</b>\n"
+                f"Trades    : {trades}\n"
+                f"Win Rate  : {win_rate:.1f}%\n"
+                f"Total PnL : {total_sign}{format_idr(total_pnl)}\n\n"
+                f"<b>Insights:</b>\n"
+                f"Best asset: {best_asset} ({best_a_sign}{format_idr(best_asset_pnl)})\n"
+                f"Worst     : {worst_asset} ({worst_a_sign}{format_idr(worst_asset_pnl)})\n"
+                f"Avg hold  : {avg_hold_mins:.0f} min\n"
+                f"Best exit : {best_exit} (WR {best_exit_wr:.0f}%)\n"
+                f"Worst exit: {worst_exit} (WR {worst_exit_wr:.0f}%)\n\n"
+                f"<i>Terus belajar dari market dan evaluasi strategi ya bosku! 🌸</i>"
             )
             await update.effective_message.reply_html(text)
         except Exception as e:
-            await update.effective_message.reply_html(f"❌ PnL Error: {e}")
+            await update.effective_message.reply_html(f"❌ Journal Error: {e}")
 
     async def cmd_daily(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """On-demand daily report manual."""
@@ -1169,31 +1225,72 @@ class KaraTelegram:
 
     async def cmd_export(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return
-        if self._is_throttled(str(update.effective_chat.id), threshold=2, action_key="export"): return
+        chat_id = str(update.effective_chat.id)
+        if self._is_throttled(chat_id, threshold=2, action_key="export"): return
         
-        file_path = config.EXCEL_LOG_PATH
-        if not os.path.exists(file_path):
-            await update.effective_message.reply_html(
-                "❌ <b>Gagal:</b> Belum ada data trade untuk di-export.\n\n"
-                "<i>Tunggu sampai ada posisi yang dibuka/ditutup ya!</i>"
-            )
-            return
-
         await update.effective_message.reply_chat_action("upload_document")
+        
         try:
-            with open(file_path, 'rb') as f:
-                await update.effective_message.reply_document(
-                    document=f,
-                    filename=f"KARA_Trade_History_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    caption=(
-                        "📊 <b>KARA Trade History Export</b>\n\n"
-                        "Berikut adalah laporan lengkap riwayat trading kamu dalam format Excel.\n"
-                        "<i>Gunakan data ini untuk analisis statistik performa.</i>"
-                    ),
-                    parse_mode="HTML"
+            from core.db import user_db
+            history = user_db.get_trade_history(chat_id, limit=5000)
+            
+            if not history:
+                await update.effective_message.reply_html(
+                    "❌ <b>Gagal:</b> Belum ada data trade untuk di-export.\n\n"
+                    "<i>Tunggu sampai ada posisi yang dibuka atau ditutup ya!</i>"
                 )
+                return
+
+            # Generate individual Excel on-the-fly
+            import pandas as pd
+            import tempfile
+            
+            # Normalize list of dicts to flat DataFrame for Excel
+            df = pd.DataFrame(history)
+            
+            # Map column names to be prettier
+            column_map = {
+                "timestamp": "Time (UTC)",
+                "asset": "Asset",
+                "side": "Side",
+                "type": "Action",
+                "price": "Price",
+                "exit_price": "Exit Price",
+                "contracts": "Size",
+                "notional": "Notional ($)",
+                "pnl": "PnL ($)",
+                "pnl_pct": "PnL (%)",
+                "score": "Signal Score",
+                "reason": "Exit Reason",
+                "pos_id": "Position ID"
+            }
+            # Only keep columns that exist in the data
+            cols = [c for c in column_map.keys() if c in df.columns]
+            df = df[cols].rename(columns=column_map)
+            
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+                temp_name = tmp.name
+            
+            try:
+                df.to_excel(temp_name, index=False, engine='openpyxl')
+                
+                with open(temp_name, 'rb') as f:
+                    await update.effective_message.reply_document(
+                        document=f,
+                        filename=f"KARA_History_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        caption=(
+                            "📊 <b>KARA Trade History (Private)</b>\n\n"
+                            f"Berikut riwayat trading eksklusif kamu ({len(history)} trades).\n"
+                            "<i>Data ini sudah difilter dan tidak bercampur dengan user lain.</i>"
+                        ),
+                        parse_mode="HTML"
+                    )
+            finally:
+                if os.path.exists(temp_name):
+                    os.remove(temp_name)
+                    
         except Exception as e:
-            log.error(f"Export failed: {e}")
+            log.error(f"Export failed for {chat_id}: {e}")
             await update.effective_message.reply_html(f"❌ <b>Gagal ekspor:</b> {str(e)}")
 
     # ──────────────────────────────────────────
@@ -1642,8 +1739,8 @@ class KaraTelegram:
             target = sig_id  # pos | pnl | mode | settings
             if target == "pos":
                 await self.cmd_positions(update, ctx)
-            elif target == "pnl":
-                await self.cmd_pnl(update, ctx)
+            elif target == "journal":
+                await self.cmd_journal(update, ctx)
             elif target == "mode":
                 await self.cmd_mode(update, ctx)
             elif target == "settings":

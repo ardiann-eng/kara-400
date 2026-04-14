@@ -592,12 +592,14 @@ class KaraBot:
             sig_count = 0
             top_scorers = [] # List of (asset, score)
             
-            async def _scan_one(asset):
+            async def _scan_one(asset, scalper_only=False):
                 nonlocal max_score, sig_count
                 async with self.scan_sem:
                     try:
+                        # Scalper-only assets (SCALPER_ASSETS) only run scalper engine
+                        modes_for_asset = ["scalper"] if scalper_only else active_modes_list
                         # ScoringEngine returns Tuple[Dict[str, TradeSignal], int]
-                        signals_dict, asset_max_score = await self.scorer.run_asset(asset, active_modes=active_modes_list, meta_data=all_meta)
+                        signals_dict, asset_max_score = await self.scorer.run_asset(asset, active_modes=modes_for_asset, meta_data=all_meta)
                         
                         # Track signals
                         if signals_dict:
@@ -623,15 +625,31 @@ class KaraBot:
                         else:
                             log.error(f" ❌ Scan error for {asset}: {e}")
 
-            tasks = [_scan_one(asset) for asset in self.watched_assets]
+            # Determine assets to scan: base watched + scalper-specific if scalper mode active
+            assets_to_scan = list(self.watched_assets)
+            scalper_only_assets = []
+            if "scalper" in active_modes:
+                import config as _cfg
+                scalper_assets = getattr(_cfg, 'SCALPER_ASSETS', [])
+                scalper_only_assets = [a for a in scalper_assets if a not in assets_to_scan]
+                assets_to_scan.extend(scalper_only_assets)
+
+            tasks = [_scan_one(asset, scalper_only=(asset in scalper_only_assets)) for asset in assets_to_scan]
             await asyncio.gather(*tasks)
             
             # Sort and format top scorers for the user
             top_scorers.sort(key=lambda x: x[1], reverse=True)
             top_str = ", ".join([f"{a}:{s}" for a, s in top_scorers[:5]])
+            total_scanned = len(assets_to_scan)
+            scalper_extra = len(scalper_only_assets)
             
             # Smart log: If top score is still low, be honest but show we are alive
-            log.info(f" 🏁 Scan complete for {len(self.watched_assets)} markets. Signals: {sig_count} | Top Scorers: [{top_str or 'None'}]")
+            log.info(
+                f" 🏁 Scan complete: {total_scanned} markets "
+                f"({len(self.watched_assets)} standard"
+                f"{f' + {scalper_extra} scalper-only' if scalper_extra else ''}). "
+                f"Signals: {sig_count} | Top: [{top_str or 'None'}]"
+            )
             
             # Persist OI snapshots to prevent amnesia
             self.scorer.dump_oi_state()

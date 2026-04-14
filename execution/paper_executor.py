@@ -202,13 +202,30 @@ class PaperExecutor:
             "timestamp":utcnow(),
         }
         self._trade_log.append(log_data)
-        get_excel_logger().log_trade(log_data)
+        get_excel_logger().log_trade(self.chat_id, log_data)
 
         log.info(
             f" [PAPER] Opened {signal.asset} {signal.side.value.upper()} "
             f"@ {fill_price} | {contracts:.4f} contracts "
             f"| margin: {format_usd(margin)} | lev: {signal.suggested_leverage}x"
         )
+        
+        # 🧠 Intelligence Experience Hook (Async to avoid blocking)
+        import asyncio
+        from intelligence.experience_buffer import experience_buffer
+        
+        bd = getattr(signal, 'breakdown', None)
+        fr = float(getattr(getattr(signal, 'raw_data', None), 'funding_rate', 0.0))  # Best effort if raw_data is available
+        vol = 0.0  # Ideally passed from kwargs, but 0.0 acts as baseline gracefully
+        
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, 
+                             experience_buffer.record_entry,
+                             self.chat_id, pos.position_id, signal.asset, signal.side.value,
+                             signal.score, getattr(signal, 'meta_score_delta', 0),
+                             bd, fr, vol, 0.0, getattr(signal, 'expected_edge', 0.0)
+                            )
+                            
         return pos
 
     # ──────────────────────────────────────────
@@ -224,8 +241,12 @@ class PaperExecutor:
         Returns list of triggered actions.
         """
         actions = []
-        for pos_id, pos in list(self._positions.items()):
-            if pos.status != PositionStatus.OPEN:
+        # Iterate over a snapshot of IDs, not live dict (anti-spam)
+        position_ids = list(self._positions.keys())
+        for pos_id in position_ids:
+            pos = self._positions.get(pos_id)
+            # Anti-spam guard: skip already-closed positions
+            if pos is None or pos.status != PositionStatus.OPEN:
                 continue
             current = prices.get(pos.asset, 0)
             if current <= 0:
@@ -237,8 +258,11 @@ class PaperExecutor:
             # Check TP/SL
             action = self.risk.check_tp_trail(pos, current)
             if action:
-                result = await self._execute_partial_close(pos, action, current)
-                actions.append(result)
+                # Only process if STILL open (prevent race condition)
+                if pos.status == PositionStatus.OPEN:
+                    result = await self._execute_partial_close(pos, action, current)
+                    if result:
+                        actions.append(result)
 
         # Update peak balance
         total_equity = self._balance + sum(
@@ -297,6 +321,20 @@ class PaperExecutor:
                     user_db.update_meta_pattern_outcome(sig.meta_pattern_key, total_pnl)
         except Exception as e:
             log.debug(f"[META] Failed updating pattern outcome for {pos.signal_id}: {e}")
+            
+        # 🧠 Intelligence Experience Hook (Async labeling)
+        import asyncio
+        from intelligence.experience_buffer import experience_buffer
+        from intelligence.intelligence_model import intelligence_model
+        
+        pnl_pct_final = pos.floating_pct(fill_price)
+        duration_sec = (pos.closed_at - pos.opened_at).total_seconds()
+        
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, experience_buffer.update_label, position_id, pnl_pct_final, duration_sec)
+        
+        # Retrain gracefully asynchronously 
+        asyncio.create_task(intelligence_model.retrain_async())
 
         log_data = {
             "type":      "close",
@@ -313,7 +351,8 @@ class PaperExecutor:
             "timestamp": utcnow(),
         }
         self._trade_log.append(log_data)
-        get_excel_logger().log_trade(log_data)
+        get_excel_logger().log_trade(self.chat_id, log_data)
+        user_db.save_trade(self.chat_id, log_data)
 
         log.info(
             f" [PAPER] Closed {pos.asset} {pos.side.value.upper()} "
@@ -374,21 +413,22 @@ class PaperExecutor:
             pos.tp1_hit = True
             pos.trailing_active = True
             pos.trailing_high = current_price
-            pos.stop_loss = pos.entry_price   # Move SL to breakeven
+            pos.stop_loss = pos.entry_price * 1.0005 if pos.side == Side.LONG else pos.entry_price * 0.9995  # breakeven + tiny buffer
             log.info(f" [PAPER] TP1 hit on {pos.asset} - SL moved to breakeven")
 
         elif action["action"] == "tp2":
             pos.tp2_hit = True
             log.info(f" [PAPER] TP2 hit on {pos.asset}")
 
-        elif action["action"] in ("trailing_stop", "stop_loss", "time_exit"):
-            # Full close
-            await self.close_position(
-                pos.position_id, current_price, action["action"]
-            )
+        elif action["action"] in ("trailing_stop", "stop_loss"):
+            # Full close — guard: only if still OPEN
+            if pos.status == PositionStatus.OPEN:
+                await self.close_position(
+                    pos.position_id, current_price, action["action"]
+                )
 
         # Update trailing high
-        if pos.trailing_active:
+        if pos.trailing_active and pos.status == PositionStatus.OPEN:
             if pos.side == Side.LONG:
                 pos.trailing_high = max(pos.trailing_high, current_price)
             else:

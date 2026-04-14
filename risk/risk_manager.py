@@ -159,6 +159,11 @@ class RiskManager:
 
         if self._kill_switch or account.kill_switch_active:
             return False, "🚨 KILL SWITCH ACTIVE - trading stopped (max drawdown hit)"
+            
+        # ── Intelligence Filter (ML Expected Edge) ────────────────────
+        edge = getattr(signal, 'expected_edge', 1.0)
+        if edge is not None and edge < 0.4:
+            return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 40%)"
 
         # ── Paused ────────────────────────────────────────────────────
         if self._paused or account.is_paused:
@@ -257,7 +262,15 @@ class RiskManager:
             sl_pct = RISK.default_sl_pct
 
         # ── Leverage: Triple-Cap (Signal vs User vs Exchange) ──────────
+        # Dynamic Risk Sizing using Intelligence Model
+        from intelligence.dynamic_risk import calculate_risk_multiplier
+        edge = getattr(signal, 'expected_edge', 1.0)
+        multiplier = calculate_risk_multiplier(edge)
+
+        # Scale leverage and risk parameter
         cfg = self._cfg()
+        default_lev = signal.suggested_leverage
+        actual_lev = min(int(default_lev * multiplier), cfg.max_leverage)
         user_max_lev = self._get_user_value("max_leverage", cfg.max_leverage)
         
         # Get exchange-allowed max for this specific asset (Market-Aware)
@@ -272,7 +285,7 @@ class RiskManager:
                     break
         
         # Apply the triple cap
-        lev = min(signal.suggested_leverage, user_max_lev, exchange_max)
+        lev = min(actual_lev, user_max_lev, exchange_max)
         
         if lev != signal.suggested_leverage:
              log.info(
@@ -284,18 +297,11 @@ class RiskManager:
         cfg = self._cfg()
         
         # --- CONVICTION-WEIGHTED POSITION SIZING (AGGRESSIVE) ---
-        # Map score to risk percentage (Professional/Aggressive standards)
         score = getattr(signal, 'score', 0)
-        if score >= 90:
-            risk_pct = 0.06  # 6.0% risk per trade
-        elif score >= 80:
-            risk_pct = 0.04  # 4.0% risk per trade
-        elif score >= 71:
-            risk_pct = 0.03  # 3.0% risk per trade
-        elif score >= 63:
-            risk_pct = 0.02  # 2.0% risk per trade
-        else:
-            risk_pct = 0.01  # 1.0% risk per trade
+        risk_pct = self.get_risk_pct(score, account_balance)
+        
+        # Apply AI Multiplier to Risk!
+        risk_pct = min(risk_pct * multiplier, cfg.max_risk_per_trade_pct)
 
         # Compound sizing
         size_usd = (account_balance * risk_pct) / max(sl_pct * lev, 0.0001)
@@ -340,44 +346,49 @@ class RiskManager:
         sl_pct = abs(signal.entry_price - signal.stop_loss) / signal.entry_price
         return contracts * signal.entry_price * sl_pct
 
-    # ──────────────────────────────────────────
-    # DYNAMIC TP & ATR (Opsi B Implementation)
-    # ──────────────────────────────────────────
-
-    def get_dynamic_tp_levels(
-        self, 
-        coin: str, 
-        oi_usd: float, 
-        volatility_regime: str
-    ) -> Tuple[float, float]:
-        """
-        Calculate dynamic TP1/TP2 based on OI and Volatility.
-        Mode-aware: respects Scalper vs Standard base targets.
-        """
-        cfg = self._cfg()
+    def get_risk_pct(self, score: int, equity: float) -> float:
+        base_risk = 0.020
         
-        # 1. Base levels based on OI (Small Cap logic)
-        if oi_usd < RISK.dynamic_tp_oi_threshold:
-            tp1 = RISK.small_cap_tp1_pct
-            tp2 = RISK.small_cap_tp2_pct
-            log.debug(f"[RISK] {coin} identified as Small Cap (OI: {format_usd(oi_usd)})")
+        # Score multiplier
+        if score >= 80:
+            score_mult = 1.5   # 3.0% risk
+        elif score >= 70:
+            score_mult = 1.25  # 2.5% risk
+        elif score >= 60:
+            score_mult = 1.0   # 2.0% risk
         else:
-            # Mode-aware base TP
-            if MODE == "paper":
-                # For standard mode, use paper-specific constants if available
-                tp1 = getattr(cfg, 'paper_tp1_pct', cfg.tp1_pct)
-                tp2 = getattr(cfg, 'paper_tp2_pct', cfg.tp2_pct)
-            else:
-                tp1 = cfg.tp1_pct
-                tp2 = cfg.tp2_pct
+            score_mult = 0.5   # 1.0% risk (marginal signal)
+        
+        # Equity protection multiplier
+        ratio = equity / self._session_start_balance if self._session_start_balance > 0 else 1.0
+        if ratio >= 1.5:   equity_mult = 0.8   # protect gains
+        elif ratio <= 0.8: equity_mult = 0.5   # damaged mode
+        else:              equity_mult = 1.0
+        
+        return base_risk * score_mult * equity_mult
 
-        # 2. Volatility multiplier
-        if volatility_regime in ("high_vol", "extreme", "volatile"):
-            tp1 *= RISK.vol_tp_multiplier
-            tp2 *= RISK.vol_tp_multiplier
-            log.debug(f"[RISK] {coin} TP reduced by {int((1-RISK.vol_tp_multiplier)*100)}% due to {volatility_regime} volatility")
+    # ──────────────────────────────────────────
+    # DYNAMIC TP & SL (Fix 10)
+    # ──────────────────────────────────────────
 
-        return round(tp1, 6), round(tp2, 6)
+    def calculate_tp_levels(self, asset: str, entry_price: float, side: Side, realized_vol: float) -> Tuple[float, float, float]:
+        """Calculate dynamic SL, TP1, and TP2 levels based on realized daily volatility."""
+        daily_vol = realized_vol
+        
+        if daily_vol > 0.05:        # volatile asset
+            sl_pct  = 0.012
+            tp1_pct = 0.020
+            tp2_pct = 0.035
+        elif daily_vol > 0.025:     # normal asset
+            sl_pct  = 0.010
+            tp1_pct = 0.015
+            tp2_pct = 0.025
+        else:                       # calm asset
+            sl_pct  = 0.008
+            tp1_pct = 0.012
+            tp2_pct = 0.020
+            
+        return sl_pct, tp1_pct, tp2_pct
 
     def calculate_atr(self, candles: List[Dict[str, Any]]) -> float:
         """
@@ -413,52 +424,36 @@ class RiskManager:
         current_price: float,
     ) -> Optional[Dict]:
         """
-        Check for 5-Level Professional Exit Hierarchy.
+        Check for simplified 4-Rule Exit Hierarchy.
         Returns action dict or None.
         """
-        now_utc = datetime.now(timezone.utc)
-        duration_hrs = (now_utc - position.opened_at).total_seconds() / 3600
         floating = position.floating_pct(current_price)
-        current_score = self._latest_score.get(position.asset, position.entry_score if hasattr(position, 'entry_score') else 50)
-        entry_score = getattr(position, "entry_score", 50)
-
-        # ── Level 1: Fast Exit (first 30 minutes) ───────────────────────────
-        if duration_hrs <= 0.5 and current_score < 35:
-            return {
-                "action":       "time_exit",
-                "close_ratio":  1.0,
-                "price":        current_price,
-                "message":      (
-                    f"🏃 Level 1 Fast Exit: Score dropped to {current_score} within 30m. "
-                    f"Thesis broken. Exiting at {floating*100:.2f}%."
-                )
-            }
-
-        # ── Level 5: Re-evaluation on Score Drop ───────────────────────────
-        # Check if score dropped by > 20 points
-        score_drop = entry_score - current_score
         
-        # Set a flag to tighten trailing stop if thesis is invalidated
-        tighten_trail = score_drop >= 20
+        if position.side == Side.LONG:
+            new_high = max(position.trailing_high, current_price)
+            max_floating = (new_high - position.entry_price) / position.entry_price
+        else:
+            new_low = min(position.trailing_high, current_price)
+            max_floating = (position.entry_price - new_low) / position.entry_price
 
-        # ── Level 4: Stale Position Exit ────────────────────────────────────
-        if duration_hrs >= 4.0 and abs(floating) <= 0.003:
+        # Exit Rule A: Hard SL hit
+        if (position.side == Side.LONG and current_price <= position.stop_loss) or \
+           (position.side == Side.SHORT and current_price >= position.stop_loss):
             return {
-                "action":       "time_exit",
+                "action":       "stop_loss",
                 "close_ratio":  1.0,
                 "price":        current_price,
                 "message":      (
-                    f"🕰️ Level 4 Stale Exit: >4h hold with <0.3% move ({floating*100:.2f}%). "
-                    f"Redeploying capital."
+                    f"🛑 Stop-loss hit at {position.stop_loss:.4f}. "
+                    f"Loss: {floating*100:.2f}%. Protecting capital first. 💪"
                 )
             }
 
-        # ── 2. PARTIAL TAKE PROFIT (mode-aware ratios) ────────────────
         cfg = self._cfg()
         tp1_ratio = getattr(cfg, 'tp1_close_ratio', 0.40)
         tp2_ratio = getattr(cfg, 'tp2_close_ratio', 0.35)
 
-        # TP1: compare against actual TP1 PRICE
+        # Exit Rule B: TP1 hit -> Log TP1, take 40%, move SL to Breakeven
         tp1_hit_now = (
             (position.side == Side.LONG and current_price >= position.tp1) or
             (position.side == Side.SHORT and current_price <= position.tp1)
@@ -473,6 +468,7 @@ class RiskManager:
                 )
             }
 
+        # Exit Rule C: TP2 hit -> Log TP2, take 35%, Trail 0.3%
         tp2_hit_now = (
             (position.side == Side.LONG and current_price >= position.tp2) or
             (position.side == Side.SHORT and current_price <= position.tp2)
@@ -487,68 +483,39 @@ class RiskManager:
                 )
             }
 
-        # ── Level 3: Trailing Stop (Primary Exit) ─────────────────────────
-        # Standard: 3% trail (2% if profit > 8%), but if tighten_trail (Level 5) = 0.3%
-        if position.tp1_hit or floating >= 0.08 or tighten_trail:
-            if tighten_trail:
-                trail_pct = 0.003  # 0.3% tight trail to close naturally
-            elif self._is_scalper():
-                trail_pct = getattr(SCALPER, 'trailing_pct', 0.004) # 0.40%
-            else:
-                trail_pct = 0.02 if floating >= 0.08 else getattr(RISK, 'trailing_pct', 0.03)
+        # Exit Rule D: Standard Trailing
+        if position.tp1_hit:
+            tp1_diff_pct = abs(position.entry_price - position.tp1) / position.entry_price
+            activation_threshold = tp1_diff_pct + 0.005
             
-            if position.side == Side.LONG:
-                new_high = max(position.trailing_high, current_price)
-                trail_sl = new_high * (1 - trail_pct)
-                if current_price <= trail_sl:
-                    msg = "🛡️ Trailing Stop" if not tighten_trail else "⚠️ Level 5 Re-eval Exit (Tight Trail)"
-                    return {
-                        "action":       "trailing_stop",
-                        "close_ratio":  1.0,
-                        "price":        current_price,
-                        "trail_price":  trail_sl,
-                        "message":      (
-                            f"{msg} ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
-                            f"(peak profit +{max(0, (new_high-position.entry_price)/position.entry_price)*100:.1f}%)."
-                        )
-                    }
-            else:   # SHORT
-                new_low = min(position.trailing_high, current_price)
-                trail_sl = new_low * (1 + trail_pct)
-                if current_price >= trail_sl:
-                    msg = "🛡️ Trailing Stop" if not tighten_trail else "⚠️ Level 5 Re-eval Exit (Tight Trail)"
-                    return {
-                        "action":       "trailing_stop",
-                        "close_ratio":  1.0,
-                        "price":        current_price,
-                        "trail_price":  trail_sl,
-                        "message": (
-                            f"{msg} ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
-                            f"(peak profit +{max(0, (position.entry_price-new_low)/position.entry_price)*100:.1f}%)."
-                        )
-                    }
-
-        # ── 4. HARD STOP-LOSS ─────────────────────────────────────────
-        if position.side == Side.LONG and current_price <= position.stop_loss:
-            return {
-                "action":       "stop_loss",
-                "close_ratio":  1.0,
-                "price":        current_price,
-                "message":      (
-                    f"🛑 Stop-loss hit at {position.stop_loss:.4f}. "
-                    f"Loss: {floating*100:.2f}%. Protecting capital first. 💪"
-                )
-            }
-        if position.side == Side.SHORT and current_price >= position.stop_loss:
-            return {
-                "action":       "stop_loss",
-                "close_ratio":  1.0,
-                "price":        current_price,
-                "message":      (
-                    f"🛑 Stop-loss hit at {position.stop_loss:.4f}. "
-                    f"Loss: {floating*100:.2f}%. Protecting capital first. 💪"
-                )
-            }
+            if max_floating >= activation_threshold:
+                trail_pct = 0.003
+                if position.side == Side.LONG:
+                    trail_sl = new_high * (1 - trail_pct)
+                    if current_price <= trail_sl:
+                        return {
+                            "action":       "trailing_stop",
+                            "close_ratio":  1.0,
+                            "price":        current_price,
+                            "trail_price":  trail_sl,
+                            "message":      (
+                                f"🛡️ Trailing Stop ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
+                                f"(peak profit +{max_floating*100:.1f}%)."
+                            )
+                        }
+                else:
+                    trail_sl = new_low * (1 + trail_pct)
+                    if current_price >= trail_sl:
+                        return {
+                            "action":       "trailing_stop",
+                            "close_ratio":  1.0,
+                            "price":        current_price,
+                            "trail_price":  trail_sl,
+                            "message": (
+                                f"🛡️ Trailing Stop ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
+                                f"(peak profit +{max_floating*100:.1f}%)."
+                            )
+                        }
 
         return None
 

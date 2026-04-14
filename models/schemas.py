@@ -163,6 +163,7 @@ class TradeSignal(BaseModel):
     auto_executed:    bool = False           # True if bot took the trade automatically
     meta_pattern_key: Optional[str] = None   # outcome-learning pattern bucket
     meta_score_delta: int = 0                # score adj from meta winrate
+    expected_edge:    Optional[float] = None # ML predicted probability of win (0.0-1.0)
 
     # Levels
     entry_price:      float
