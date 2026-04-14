@@ -79,3 +79,4 @@ storage/
 !package.json
 !composer.json
 !tsconfig.json
+!zeabur.json

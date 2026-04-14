@@ -1,0 +1,15 @@
+{
+  "service": "kara-400",
+  "build": {
+    "builder": "DOCKERFILE"
+  },
+  "deploy": {
+    "instances": 1,
+    "volumes": [
+      {
+        "path": "/app/storage",
+        "name": "kara-storage"
+      }
+    ]
+  }
+}
