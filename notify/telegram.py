@@ -667,7 +667,6 @@ class KaraTelegram:
             [InlineKeyboardButton("❌ Batal / Ganti Wallet", callback_data="close_settings")]
         ])
         
-        from notify.telegram_templates import AGENT_WALLET_CREATED_TEMPLATE
         await update.effective_message.reply_html(
             AGENT_WALLET_CREATED_TEMPLATE.format(
                 address=address,
