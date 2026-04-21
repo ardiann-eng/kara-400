@@ -105,68 +105,71 @@ Score Baru: <b>{score}/100</b>
 """
 
 LIVE_SETUP_RISK_WARNING = """
-⚠️ <b>RISK WARNING: LIVE MODE</b> ⚠️
-──────────────────────────
-Halo bosku! KARA di sini untuk memperingatkan bahwa kamu akan memasuki <b>Live Mode (Real Money)</b>.
+⚠️ <b>Live Mode — Konfirmasi Risiko</b>
 
-<b>Hal yang perlu kamu tahu:</b>
-1. Bot akan mengeksekusi trade nyata di akun Hyperliquid kamu.
-2. KARA menggunakan <b>Agent Wallet</b> untuk keamanan (kamu tidak perlu memberikan private key utama).
-3. Trading crypto futures memiliki risiko tinggi. Gunakan dana yang siap untuk rugi.
+Kamu akan mengaktifkan trading dengan dana nyata di Hyperliquid. Baca ini sebelum lanjut.
 
-<i>Apakah kamu ingin melanjutkan untuk men-generate Agent Wallet khusus?</i>
+<b>Yang perlu dipahami:</b>
+1. Setiap trade yang dieksekusi KARA bersifat nyata dan menggunakan saldo akun kamu.
+2. KARA menggunakan <b>Agent Wallet</b> — kamu tidak perlu memberikan private key utama, hanya izin trading.
+3. Futures crypto berisiko tinggi. Gunakan hanya dana yang siap untuk hilang sepenuhnya.
+
+<i>Lanjut untuk membuat Agent Wallet dan mengaktifkan Live Mode?</i>
 """
 
 AGENT_WALLET_CREATED_TEMPLATE = """
-✅ <b>Agent Wallet berhasil dibuat!</b>
-──────────────────────────
-Simpan data ini dengan aman. Kamu hanya akan melihatnya <b>satu kali</b>.
+✅ <b>Agent Wallet berhasil dibuat</b>
 
-🔑 <b>Agent Wallet Address:</b>
+Simpan data ini sekarang. Data ini hanya ditampilkan <b>satu kali</b> dan tidak bisa dipulihkan.
+
+🔑 <b>Agent Wallet Address</b>
 <code>{address}</code>
 
-🔑 <b>Agent Private Key:</b>
+🔑 <b>Agent Private Key</b>
 <code>{private_key}</code>
 
-<b>Langkah Selanjutnya (PENTING!):</b>
-1. Buka link ini: <a href="https://app.hyperliquid.xyz/API">Hyperliquid API Dashboard</a>
-2. Connect dengan <b>Main Wallet</b> kamu (wallet yang punya dana).
-3. Klik "Authorize API Wallet" dan masukkan <b>Agent Wallet Address</b> di atas.
-4. Paste <b>Agent Private Key</b> jika diminta, atau cukup Approve transaksi di wallet utama kamu.
-5. Klik tombol <b>"✅ Saya Sudah Authorize"</b> di bawah ini jika sudah selesai.
+<b>Langkah selanjutnya:</b>
+1. Buka <a href="https://app.hyperliquid.xyz/API">Hyperliquid API Dashboard</a>
+2. Connect menggunakan <b>Main Wallet</b> kamu (wallet yang menyimpan dana).
+3. Klik <b>"Authorize API Wallet"</b> dan masukkan Agent Wallet Address di atas.
+4. Setelah selesai, tekan tombol <b>"✅ Saya Sudah Authorize"</b> di bawah.
 
-<i>Catatan: Agent ini hanya bisa melakukan trade (Open/Close). Penarikan dana tetap harus lewat Wallet Utama kamu. 🌸</i>
+<i>Agent Wallet hanya memiliki izin untuk membuka dan menutup posisi. Penarikan dana tetap harus dilakukan melalui Main Wallet kamu.</i>
 """
 
 TOS_TEXT = """
-⚖️ <b>TERMS OF SERVICE — KARA AI AGENT</b> 🌸
-──────────────────────────
-Sebelum kita mulai petualangan trading kita, aku perlu kamu menyetujui beberapa hal penting ya, User! ✨
+⚖️ <b>Syarat Penggunaan — KARA AI Agent</b>
 
-1. 🛡️ <b>Tanggung Jawab Pribadi:</b> Aku adalah asisten AI yang memberikan analisis berdasarkan data market. Semua keputusan akhir untuk melakukan trade ada di tangan User sepenuhnya.
-2. 📉 <b>Risiko Modal:</b> Trading futures memiliki risiko tinggi. User memahami bahwa modal bisa berkurang atau hilang sepenuhnya.
-3. 🚫 <b>Bukan Penasehat Keuangan:</b> Aku bukan penasehat keuangan berlisensi. Gunakan analisisku hanya sebagai referensi tambahan.
-4. ⚙️ <b>Teknologi:</b> User memahami risiko teknis seperti delay koneksi atau error pada API pihak ketiga (Hyperliquid).
+Sebelum menggunakan KARA, harap baca dan setujui ketentuan berikut.
 
-<i>\"Analisisku cerdas, tapi User adalah nahkodanya!\"</i> 💜
+1. 🛡️ <b>Tanggung Jawab Penuh:</b> KARA adalah sistem analisis berbasis data market. Semua keputusan trading sepenuhnya ada di tanganmu.
+2. 📉 <b>Risiko Modal:</b> Trading futures berisiko tinggi. Modal dapat berkurang atau hilang seluruhnya.
+3. 🚫 <b>Bukan Penasihat Keuangan:</b> KARA bukan penasihat keuangan berlisensi. Gunakan analisisnya sebagai referensi, bukan panduan mutlak.
+4. ⚙️ <b>Risiko Teknis:</b> Kamu memahami bahwa gangguan koneksi atau error API pihak ketiga dapat mempengaruhi eksekusi.
 
-Ayo kita mulai dengan bijak~! ✨
-──────────────────────────
-<b>Apakah User setuju dengan ketentuan di atas?</b>
+<i>KARA menganalisis, kamu yang memutuskan.</i>
+
+<b>Setujui ketentuan di atas untuk melanjutkan.</b>
 """
 
 RISK_WARNING_TEXT = """
-⚠️ <b>RISK WARNING (LIVE MODE)</b> ⚡
-──────────────────────────
-User akan memasuki <b>Live Trading Mode</b> menggunakan dana asli. Harap perhatikan hal-hal berikut:
+⚠️ <b>Peringatan Risiko — Live Mode</b>
 
-• 📉 <b>Past Performance:</b> Hasil trading masa lalu (Paper Mode) TIDAK menjamin hasil yang sama di masa depan. Market selalu dinamis.
-• 💸 <b>Loss Potential:</b> Gunakan hanya dana yang User siap untuk hilang. Jangan gunakan dana kebutuhan pokok.
-• ⚡ <b>Leverage:</b> Penggunaan leverage tinggi mempercepat potensi keuntungan sekaligus mempercepat risiko likuidasi modal.
-• ⚖️ <b>DYOR:</b> Selalu lakukan riset mandiri sebelum mengonfirmasi eksekusi dari KARA.
+Kamu akan beralih ke Live Trading menggunakan dana nyata. Perhatikan hal berikut sebelum melanjutkan.
 
-<i>KARA akan menjagamu dengan manajemen risiko ketat, tapi User harus tetap waspada!</i> 💜
-──────────────────────────
+📉 <b>Performa Masa Lalu</b>
+Hasil di Paper Mode tidak menjamin hasil serupa di Live Mode. Kondisi market selalu berubah.
+
+💸 <b>Risiko Modal</b>
+Gunakan hanya dana yang kamu siap untuk kehilangkan. Jangan gunakan dana untuk kebutuhan sehari-hari.
+
+⚡ <b>Leverage</b>
+Leverage memperbesar potensi keuntungan sekaligus mempercepat risiko likuidasi.
+
+⚖️ <b>Keputusan Akhir</b>
+KARA memberikan sinyal dan analisis, namun konfirmasi eksekusi tetap menjadi tanggung jawabmu.
+
+<i>KARA menerapkan manajemen risiko ketat, tetapi kewaspadaan tetap ada di tanganmu.</i>
 """
 
 
@@ -551,6 +554,9 @@ class KaraTelegram:
             except BadRequest as e:
                 if "not modified" not in str(e).lower(): raise
                 await update.callback_query.answer("Sudah di layar ini")
+        else:
+            await update.effective_message.reply_html(text, reply_markup=reply_markup)
+
     async def cmd_direct_set_config(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Unified handler for /setleverage 10 and /setmaxpos 5."""
         if not self._is_authorized(update): return
@@ -1010,68 +1016,117 @@ class KaraTelegram:
             from core.db import user_db
             history = user_db.get_trade_history(chat_id, limit=100)
             
+            # Key normalizer: data disimpan dengan key "pnl" dan "reason", bukan "pnl_usd"/"close_reason"
+            def get_pnl(t): return float(t.get("pnl") or t.get("pnl_usd") or 0)
+            def get_reason(t): return t.get("reason") or t.get("close_reason") or "manual"
+
             trades = len(history)
-            wins = sum(1 for t in history if "pnl_usd" in t and float(t["pnl_usd"]) > 0)
-            win_rate = (wins/trades * 100) if trades > 0 else 0
-            total_pnl = sum(float(t.get("pnl_usd", 0)) for t in history)
-            
-            # Calculate best/worst
-            asset_pnl = {}
-            exit_stats = {}
-            avg_hold_mins = 0
-            
+            wins = sum(1 for t in history if get_pnl(t) > 0)
+            win_rate = (wins / trades * 100) if trades > 0 else 0
+            total_pnl = sum(get_pnl(t) for t in history)
+
+            asset_pnl: Dict[str, float] = {}
+            exit_stats: Dict[str, Dict] = {}
+            hold_total_mins = 0.0
+            hold_count = 0
+
             for t in history:
-                a = t.get("asset", "Unknown")
-                p = float(t.get("pnl_usd", 0))
+                a = t.get("asset") or "Unknown"
+                p = get_pnl(t)
                 asset_pnl[a] = asset_pnl.get(a, 0) + p
-                
-                ex = t.get("close_reason", "unknown")
-                if ex not in exit_stats: exit_stats[ex] = {"trades":0, "wins":0}
+
+                ex = get_reason(t)
+                if ex not in exit_stats:
+                    exit_stats[ex] = {"trades": 0, "wins": 0}
                 exit_stats[ex]["trades"] += 1
-                if p > 0: exit_stats[ex]["wins"] += 1
-                
-                if "opened_at" in t and "closed_at" in t:
+                if p > 0:
+                    exit_stats[ex]["wins"] += 1
+
+                # Hold time: pakai timestamp (opened_at) + closed_at jika ada, else skip
+                ts = t.get("timestamp") or t.get("opened_at")
+                closed = t.get("closed_at")
+                if ts and closed:
                     try:
-                        open_t = datetime.fromisoformat(t["opened_at"].replace('Z','+00:00'))
-                        close_t = datetime.fromisoformat(t["closed_at"].replace('Z','+00:00'))
-                        avg_hold_mins += (close_t - open_t).total_seconds() / 60
-                    except: pass
-                    
-            if trades > 0: avg_hold_mins /= trades
-            
-            best_asset = max(asset_pnl.items(), key=lambda x: x[1])[0] if asset_pnl else "-"
-            best_asset_pnl = asset_pnl.get(best_asset, 0)
-            worst_asset = min(asset_pnl.items(), key=lambda x: x[1])[0] if asset_pnl else "-"
-            worst_asset_pnl = asset_pnl.get(worst_asset, 0)
-            
-            # Exit stats processing
+                        def _parse_dt(v):
+                            if isinstance(v, (int, float)):
+                                return datetime.fromtimestamp(v, tz=timezone.utc)
+                            s = str(v).replace('Z', '+00:00')
+                            return datetime.fromisoformat(s)
+                        hold_total_mins += (_parse_dt(closed) - _parse_dt(ts)).total_seconds() / 60
+                        hold_count += 1
+                    except Exception:
+                        pass
+
+            avg_hold_mins = (hold_total_mins / hold_count) if hold_count > 0 else 0
+
+            best_asset = max(asset_pnl, key=asset_pnl.get) if asset_pnl else None
+            worst_asset = min(asset_pnl, key=asset_pnl.get) if asset_pnl else None
+
             for ex in exit_stats:
                 exit_stats[ex]["wr"] = exit_stats[ex]["wins"] / exit_stats[ex]["trades"] * 100
-            
-            best_exit = max(exit_stats.items(), key=lambda x: x[1]["wr"])[0] if exit_stats else "-"
-            best_exit_wr = exit_stats[best_exit]["wr"] if exit_stats else 0
-            worst_exit = min(exit_stats.items(), key=lambda x: x[1]["wr"])[0] if exit_stats else "-"
-            worst_exit_wr = exit_stats[worst_exit]["wr"] if exit_stats else 0
 
-            total_sign = "+" if total_pnl >= 0 else ""
-            best_a_sign = "+" if best_asset_pnl >= 0 else ""
-            worst_a_sign = "+" if worst_asset_pnl >= 0 else ""
-                
-            text = (
-                "📔 <b>KARA Trade Journal</b>\n"
-                "─────────────────\n"
-                "<b>Performance (All Time):</b>\n"
-                f"Trades    : {trades}\n"
-                f"Win Rate  : {win_rate:.1f}%\n"
-                f"Total PnL : {total_sign}{format_idr(total_pnl)}\n\n"
-                f"<b>Insights:</b>\n"
-                f"Best asset: {best_asset} ({best_a_sign}{format_idr(best_asset_pnl)})\n"
-                f"Worst     : {worst_asset} ({worst_a_sign}{format_idr(worst_asset_pnl)})\n"
-                f"Avg hold  : {avg_hold_mins:.0f} min\n"
-                f"Best exit : {best_exit} (WR {best_exit_wr:.0f}%)\n"
-                f"Worst exit: {worst_exit} (WR {worst_exit_wr:.0f}%)\n\n"
-                f"<i>Terus belajar dari market dan evaluasi strategi ya bosku! 🌸</i>"
-            )
+            best_exit = max(exit_stats, key=lambda x: exit_stats[x]["wr"]) if exit_stats else None
+            worst_exit = min(exit_stats, key=lambda x: exit_stats[x]["wr"]) if exit_stats else None
+
+            def sign(v): return "+" if v >= 0 else ""
+            def pnl_str(v): return f"{sign(v)}{format_idr(v)}"
+
+            def fmt_hold(mins):
+                if mins < 60:
+                    return f"{mins:.0f} menit"
+                h = int(mins // 60)
+                m = int(mins % 60)
+                return f"{h}j {m}m" if m else f"{h} jam"
+
+            def fmt_exit_label(key):
+                labels = {
+                    "tp1": "Take Profit 1", "tp2": "Take Profit 2",
+                    "trailing": "Trailing Stop", "stop_loss": "Stop Loss",
+                    "manual": "Manual Close", "close_all": "Close All",
+                    "timeout": "Timeout", "sl": "Stop Loss",
+                }
+                return labels.get(key, key.replace("_", " ").title())
+
+            if trades == 0:
+                text = (
+                    "📔 <b>Trade Journal</b>\n\n"
+                    "Belum ada trade yang tercatat.\n\n"
+                    "<i>KARA akan merekam setiap trade yang ditutup secara otomatis. ✨</i>"
+                )
+            else:
+                # Build insights section
+                insights_lines = []
+                if best_asset:
+                    ba_pnl = asset_pnl[best_asset]
+                    insights_lines.append(f"📈 Aset terbaik  <b>{best_asset}</b> → {pnl_str(ba_pnl)}")
+                if worst_asset and worst_asset != best_asset:
+                    wa_pnl = asset_pnl[worst_asset]
+                    insights_lines.append(f"📉 Aset terlemah  <b>{worst_asset}</b> → {pnl_str(wa_pnl)}")
+                if avg_hold_mins > 0:
+                    insights_lines.append(f"⏱ Rata-rata hold  <b>{fmt_hold(avg_hold_mins)}</b>")
+                if best_exit:
+                    be_wr = exit_stats[best_exit]["wr"]
+                    be_n = exit_stats[best_exit]["trades"]
+                    insights_lines.append(f"✅ Exit terbaik  <b>{fmt_exit_label(best_exit)}</b> — WR {be_wr:.0f}% ({be_n}x)")
+                if worst_exit and worst_exit != best_exit:
+                    we_wr = exit_stats[worst_exit]["wr"]
+                    we_n = exit_stats[worst_exit]["trades"]
+                    insights_lines.append(f"⚠️ Exit terburuk  <b>{fmt_exit_label(worst_exit)}</b> — WR {we_wr:.0f}% ({we_n}x)")
+
+                pnl_color = "🟢" if total_pnl >= 0 else "🔴"
+                wr_color = "🟢" if win_rate >= 50 else "🔴"
+
+                text = (
+                    f"📔 <b>Trade Journal</b>\n\n"
+                    f"<b>Ringkasan Keseluruhan</b>\n"
+                    f"Total Trade   {trades}\n"
+                    f"Win Rate      {wr_color} <b>{win_rate:.1f}%</b> ({wins}W / {trades - wins}L)\n"
+                    f"Total PnL     {pnl_color} <b>{pnl_str(total_pnl)}</b>\n"
+                )
+                if insights_lines:
+                    text += "\n<b>Analisis</b>\n" + "\n".join(insights_lines)
+                text += "\n\n<i>Data direkam otomatis dari setiap posisi yang ditutup. ✨</i>"
+
             await update.effective_message.reply_html(text)
         except Exception as e:
             await update.effective_message.reply_html(f"❌ Journal Error: {e}")
@@ -1789,8 +1844,8 @@ class KaraTelegram:
             await query.answer()
             await query.edit_message_text(
                 "🛡️ <b>LANGKAH 1: IDENTITAS WALLET</b>\n\n"
-                "KARA perlu tahu alamat wallet utama bosku untuk memverifikasi izin Agent nantinya.\n\n"
-                "Silakan <b>BALAS</b> pesan ini dengan Alamat Wallet Utama (Public Address) Hyperliquid bosku.\n"
+                "KARA perlu mengetahui alamat wallet utama kamu untuk memverifikasi izin Agent nantinya.\n\n"
+                "Silakan <b>BALAS</b> pesan ini dengan Alamat Wallet Utama (Public Address) Hyperliquid kamu.\n"
                 "<i>Contoh: 0x123...abc</i>",
                 parse_mode=ParseMode.HTML
             )
@@ -1819,10 +1874,10 @@ class KaraTelegram:
                 if not is_ok:
                     await query.message.reply_html(
                         f"❌ <b>Verifikasi Gagal!</b>\n\n"
-                        f"KARA belum mendeteksi alamat agent ini terhubung ke wallet utama bosku.\n\n"
+                        f"KARA belum mendeteksi koneksi antara Agent Wallet dan Wallet Utama kamu.\n\n"
                         f"• Wallet Utama: <code>{user.hl_main_address}</code>\n"
                         f"• Agent Wallet: <code>{user.hl_agent_address}</code>\n\n"
-                        f"Pastikan bosku sudah klik <b>'Authorize'</b> di dashboard Hyperliquid untuk alamat agent di atas."
+                        f"Pastikan kamu sudah klik <b>'Authorize'</b> di dashboard Hyperliquid untuk alamat agent di atas."
                     )
                     return
                 
@@ -1831,7 +1886,7 @@ class KaraTelegram:
                 user.config.bot_mode = BotMode.LIVE
                 user_db.update_user(user)
                 
-                await query.edit_message_text("✅ <b>VERIFIKASI BERHASIL!</b>\n\nAgent Wallet telah terhubung secara sah ke Wallet Utama bosku. KARA sekarang berjalan dalam <b>LIVE MODE</b>. 🚀")
+                await query.edit_message_text("✅ <b>Verifikasi Berhasil</b>\n\nAgent Wallet sudah terhubung ke Wallet Utama kamu. KARA sekarang berjalan dalam <b>Live Mode</b>. 🚀")
                 
                 # Re-initialize user session in main app
                 if self.bot_app:

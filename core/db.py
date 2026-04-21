@@ -20,8 +20,21 @@ _fernet = None
 if Fernet and getattr(config, "FERNET_KEY", None):
     try:
         _fernet = Fernet(config.FERNET_KEY.encode())
+        log.info("🔐 Fernet encryption active — agent secrets will be encrypted at rest.")
     except Exception as e:
         log.error(f"❌ Invalid FERNET_KEY: {e}. Secure storage will be disabled.")
+else:
+    if getattr(config, "TRADE_MODE", "paper") == "live":
+        log.critical(
+            "🚨 LIVE MODE WITHOUT FERNET_KEY — agent wallet private keys are stored "
+            "in PLAINTEXT in users.json. Set HL_FERNET_KEY env var immediately. "
+            "Generate with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
+    else:
+        log.warning(
+            "⚠️  No FERNET_KEY set — agent wallet secrets will NOT be encrypted. "
+            "Set HL_FERNET_KEY before enabling Live Mode."
+        )
 
 
 class UserDB:
@@ -646,14 +659,21 @@ class UserDB:
                     for k, v in self.users.items():
                         udict = v.model_dump() if hasattr(v, 'model_dump') else v.dict()
                         # Encrypt secret before saving
-                        if udict.get("hl_agent_secret") and _fernet:
-                            try:
-                                # Only encrypt if not already encrypted
-                                secret = udict["hl_agent_secret"]
-                                if not secret.startswith("gAAAA"):
-                                    udict["hl_agent_secret"] = _fernet.encrypt(secret.encode()).decode()
-                            except Exception as e:
-                                log.error(f"Failed to encrypt secret for {k}: {e}")
+                        if udict.get("hl_agent_secret"):
+                            secret = udict["hl_agent_secret"]
+                            if _fernet:
+                                try:
+                                    # Only encrypt if not already encrypted (Fernet tokens start with gAAAA)
+                                    if not secret.startswith("gAAAA"):
+                                        udict["hl_agent_secret"] = _fernet.encrypt(secret.encode()).decode()
+                                except Exception as e:
+                                    log.error(f"Failed to encrypt secret for {k}: {e}")
+                            else:
+                                # No encryption key — redact in log but keep value so user isn't locked out
+                                log.error(
+                                    f"⚠️  Saving agent secret for {k} WITHOUT encryption. "
+                                    "Set HL_FERNET_KEY to protect user wallet keys."
+                                )
                         data[k] = udict
                     # handle datetime parsing issues in basic json
                     json.dump(data, f, default=str, indent=2)

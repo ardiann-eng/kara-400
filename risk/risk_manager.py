@@ -50,7 +50,7 @@ class RiskManager:
         self._peak_balance:   float = 0.0
         self._session_start_balance: float = 0.0
         self._last_reset_day: Optional[str] = None   # YYYY-MM-DD
-        self._cooldown_until: Optional[float] = None  # monotonic timestamp (now reset on start to prevent lockout)
+        self._cooldown_until: Optional[datetime] = None  # UTC datetime — persists across restarts
         self._kill_switch:    bool = False
         self._paused:         bool = False
         self._latest_score:   Dict[str, int] = {}     # asset -> latest score from scanner
@@ -65,7 +65,9 @@ class RiskManager:
             "peak_balance":   self._peak_balance,
             "session_start_balance": self._session_start_balance,
             "kill_switch":    self._kill_switch,
-            "last_reset_day": self._last_reset_day
+            "last_reset_day": self._last_reset_day,
+            # Store as ISO string so it survives restart (monotonic() would not)
+            "cooldown_until": self._cooldown_until.isoformat() if self._cooldown_until else None,
         })
 
     def _load_risk_state(self):
@@ -77,7 +79,21 @@ class RiskManager:
             self._session_start_balance = state.get("session_start_balance", 0.0)
             self._kill_switch    = state.get("kill_switch", False)
             self._last_reset_day = state.get("last_reset_day")
-            
+
+            # Restore cooldown as UTC datetime
+            raw_cd = state.get("cooldown_until")
+            if raw_cd:
+                try:
+                    cd = datetime.fromisoformat(raw_cd)
+                    # Only restore if it's still in the future
+                    if cd > datetime.now(timezone.utc):
+                        self._cooldown_until = cd
+                        log.warning(
+                            f"[RISK] Cooldown restored from DB — expires at {cd.isoformat()}"
+                        )
+                except Exception:
+                    pass
+
             # Validation: if session_start_balance is 0 but we have a peak, use that as fallback
             # to prevent 'amnesia' during mid-day restarts
             if self._session_start_balance <= 0 and self._peak_balance > 0:
@@ -170,8 +186,8 @@ class RiskManager:
             return False, "⏸️  Bot is paused by user"
 
         # ── Post-loss cooldown ─────────────────────────────────────────
-        if self._cooldown_until and time.monotonic() < self._cooldown_until:
-            remaining = int(self._cooldown_until - time.monotonic())
+        if self._cooldown_until and datetime.now(timezone.utc) < self._cooldown_until:
+            remaining = int((self._cooldown_until - datetime.now(timezone.utc)).total_seconds())
             hrs = remaining // 3600
             mins = (remaining % 3600) // 60
             return False, f"❄️  Post-loss cooldown active - {hrs}h {mins}m remaining"
@@ -544,10 +560,12 @@ class RiskManager:
 
         if daily_pnl_pct < -0.50 and not self._cooldown_until:
             cooldown_hrs = RISK.post_loss_cooldown_hrs
-            self._cooldown_until = time.monotonic() + cooldown_hrs * 3600
+            from datetime import timedelta
+            self._cooldown_until = datetime.now(timezone.utc) + timedelta(hours=cooldown_hrs)
+            self._persist_risk_state()  # Persist immediately so restart doesn't bypass cooldown
             log.warning(
-                f"❄️  Daily loss {daily_pnl_pct*100:.1f}% > 6% - "
-                f"cooldown activated for {cooldown_hrs:.0f} hours"
+                f"❄️  Daily loss {daily_pnl_pct*100:.1f}% > 50% - "
+                f"cooldown activated until {self._cooldown_until.isoformat()}"
             )
 
     def pause(self):
@@ -557,6 +575,7 @@ class RiskManager:
     def resume(self):
         self._paused = False
         self._cooldown_until = None
+        self._persist_risk_state()
         log.info("▶️  Risk manager: trading resumed")
 
     def reset_kill_switch(self):
@@ -572,9 +591,9 @@ class RiskManager:
             "daily_pnl":     self._daily_pnl,
             "peak_balance":  self._peak_balance,
             "session_start_balance": self._session_start_balance,
-            "cooldown_until": self._cooldown_until,
+            "cooldown_until": self._cooldown_until.isoformat() if self._cooldown_until else None,
             "in_cooldown":   bool(
                 self._cooldown_until and
-                time.monotonic() < self._cooldown_until
+                datetime.now(timezone.utc) < self._cooldown_until
             ),
         }

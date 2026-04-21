@@ -323,6 +323,12 @@ class KaraBot:
             session = UserSession(u, mode_manager=self.mode_mgr, hl_client=self.hl_client)
             if hasattr(session.executor, 'load_from_db'):
                 session.executor.load_from_db(u.chat_id)
+            # Live mode: sync open positions from chain to prevent orphaned positions after crash
+            if hasattr(session.executor, 'load_from_chain'):
+                try:
+                    await session.executor.load_from_chain()
+                except Exception as e:
+                    log.error(f"[LIVE] Chain sync failed for {u.chat_id}: {e}")
             self.sessions[u.chat_id] = session
         log.info(f"Loaded {len(self.sessions)} user sessions.")
 
@@ -735,10 +741,8 @@ class KaraBot:
             # Deep copy so nested breakdown/warnings are not shared across users/cycles.
             user_signal = base_signal.model_copy(deep=True)
             user_signal.signal_id = f"{base_signal.signal_id[:4]}{uuid.uuid4().hex[:4].upper()}"
-            if fallback_from_standard and user_signal.breakdown and hasattr(user_signal.breakdown, "warnings"):
-                fb_msg = "Scalper fallback: using standard signal due to missing dedicated scalper signal this cycle."
-                if fb_msg not in user_signal.breakdown.warnings:
-                    user_signal.breakdown.warnings.append(fb_msg)
+            if fallback_from_standard:
+                log.debug(f"[SCALPER] {chat_id}: no dedicated scalper signal this cycle, using standard signal as fallback.")
 
 
             # ── Fetch Dynamic ATR (calculated once per signal if needed)
@@ -805,7 +809,7 @@ class KaraBot:
                 continue
 
     async def _on_trade_confirmed(self, signal, chat_id: str):
-        session = self.get_session(chat_id)
+        session = await self.get_session(chat_id)
         if not session:
             return False, "Sesi user tidak ditemukan."
         
@@ -934,24 +938,49 @@ class KaraBot:
         self._stopping = True
         log.info("🛑 KARA shutting down...")
         self._running = False
-        
+
         # Give the loop some time to finish current iteration
         await asyncio.sleep(0.5)
+
+        # In live mode: notify users about open positions before shutting down.
+        # We do NOT force-close them — user may want positions to remain open.
+        # Instead, alert via Telegram so they can manage manually.
+        try:
+            for chat_id, session in list(self.sessions.items()):
+                open_pos = getattr(session.executor, 'open_positions', [])
+                if not open_pos:
+                    continue
+                assets = ", ".join(p.asset for p in open_pos)
+                log.warning(
+                    f"[SHUTDOWN] User {chat_id} has {len(open_pos)} open live position(s): {assets}. "
+                    "Bot is stopping — positions remain on-chain. User must manage manually."
+                )
+                try:
+                    await self.telegram.send_text(
+                        f"⚠️ <b>KARA sedang restart.</b>\n\n"
+                        f"Kamu memiliki <b>{len(open_pos)} posisi terbuka</b>: <code>{assets}</code>\n\n"
+                        f"Posisi tetap aktif di chain. Pantau dan kelola secara manual hingga bot kembali online.",
+                        target_chat_id=chat_id
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            log.error(f"[SHUTDOWN] Failed to notify users of open positions: {e}")
 
         try:
             await self.telegram.stop()
         except Exception as e:
             log.warning(f"Telegram stop warning: {e}")
-        
+
         try:
             await self.ws_client.stop()
         except: pass
-        
+
         try:
             await self.hl_client.close()
         except: pass
-        
-        log.info(" KARA stopped. Goodbye!")
+
+        log.info("✅ KARA stopped. Goodbye!")
 
 
 # ──────────────────────────────────────────────

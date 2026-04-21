@@ -43,13 +43,97 @@ class LiveExecutor:
         self.risk   = risk_manager
         self.mode   = BotMode.LIVE
 
-        # Local position shadow (synced from chain)
+        # Local position shadow (synced from chain on startup)
         self._positions: Dict[str, Position] = {}
+        self._chain_synced: bool = False
 
         log.warning(
             " LIVE executor initialized - REAL MONEY MODE. "
             "Double-check your config before trading."
         )
+
+    async def load_from_chain(self):
+        """
+        Sync open positions from Hyperliquid on startup/restart.
+        Prevents orphaned positions after bot crash — critical for live mode.
+        """
+        try:
+            user_state = await self.client.get_user_state()
+            if not user_state:
+                log.error("[LIVE] load_from_chain: could not fetch user state")
+                return
+
+            asset_positions = user_state.get("assetPositions", [])
+            recovered = 0
+            for ap in asset_positions:
+                pos_data = ap.get("position", {})
+                szi = float(pos_data.get("szi", 0))
+                if szi == 0:
+                    continue
+
+                asset     = pos_data.get("coin", "")
+                entry_px  = float(pos_data.get("entryPx") or 0)
+                upnl      = float(pos_data.get("unrealizedPnl") or 0)
+                side      = Side.LONG if szi > 0 else Side.SHORT
+                size_abs  = abs(szi)
+
+                # Check if we already have this position in shadow (avoid duplicates)
+                existing = next(
+                    (p for p in self._positions.values()
+                     if p.asset == asset and p.status == PositionStatus.OPEN),
+                    None
+                )
+                if existing:
+                    # Refresh live data on existing shadow
+                    existing.size_current  = size_abs
+                    existing.pnl_unrealized = upnl
+                    continue
+
+                # Reconstruct minimal position from chain data
+                # SL/TP unknown after restart — set conservative defaults
+                sl_pct = 0.03  # 3% fallback SL
+                stop_loss = (
+                    entry_px * (1 - sl_pct) if side == Side.LONG
+                    else entry_px * (1 + sl_pct)
+                )
+                margin = (size_abs * entry_px) / max(
+                    float(pos_data.get("leverage", {}).get("value", 1) if isinstance(pos_data.get("leverage"), dict) else pos_data.get("leverage", 1)),
+                    1
+                )
+
+                pos = Position(
+                    position_id=gen_id("REC"),  # REC = recovered
+                    asset=asset,
+                    side=side,
+                    entry_price=entry_px,
+                    size_initial=size_abs,
+                    size_current=size_abs,
+                    leverage=int(pos_data.get("leverage", {}).get("value", 1) if isinstance(pos_data.get("leverage"), dict) else pos_data.get("leverage", 1)),
+                    margin_usd=margin,
+                    stop_loss=stop_loss,
+                    tp1=entry_px * (1.04 if side == Side.LONG else 0.96),
+                    tp2=entry_px * (1.08 if side == Side.LONG else 0.92),
+                    trailing_high=entry_px,
+                    is_paper=False,
+                    pnl_unrealized=upnl,
+                )
+                self._positions[pos.position_id] = pos
+                recovered += 1
+                log.warning(
+                    f"[LIVE] Recovered position from chain: {asset} {side.value.upper()} "
+                    f"size={size_abs} entry={entry_px} (SL/TP set to defaults — review manually)"
+                )
+
+            self._chain_synced = True
+            if recovered > 0:
+                log.warning(
+                    f"[LIVE] Chain sync complete: {recovered} position(s) recovered. "
+                    f"SL/TP levels are fallback defaults. Monitor closely."
+                )
+            else:
+                log.info("[LIVE] Chain sync complete: no open positions found.")
+        except Exception as e:
+            log.error(f"[LIVE] load_from_chain failed: {e}", exc_info=True)
 
     # ──────────────────────────────────────────
     # ACCOUNT STATE (from chain)
@@ -441,17 +525,38 @@ class LiveExecutor:
                         filled = await self._wait_for_fill(order, timeout=EXEC.partial_fill_timeout_s)
                         if filled:
                             return order, True
-                        else:
-                            # Cancel and retry with IOC / market
-                            log.warning(f"Order not filled in {EXEC.partial_fill_timeout_s}s - cancelling")
-                            if oid:
-                                try:
-                                    await self.client.cancel_order(asset, oid)
-                                except Exception as cencal_err:
-                                    log.warning(f"Failed to cancel resting order {oid}: {cencal_err}")
-                            # Switch to IOC on last retry
-                            if attempt == EXEC.order_retry_count:
-                                order_type = "limit"  # IOC fallback
+
+                        # Not filled — cancel the resting order first
+                        log.warning(f"Order not filled in {EXEC.partial_fill_timeout_s}s - cancelling and retrying with IOC")
+                        if oid:
+                            try:
+                                await self.client.cancel_order(asset, oid)
+                            except Exception as cancel_err:
+                                log.warning(f"Failed to cancel resting order {oid}: {cancel_err}")
+
+                        # Immediately retry with IOC (market-like) instead of waiting for next loop
+                        try:
+                            ioc_result = await self.client.place_order(
+                                asset=asset,
+                                is_buy=is_buy,
+                                sz=sz,
+                                limit_px=limit_px,
+                                order_type="limit",   # IOC tif
+                                reduce_only=reduce_only,
+                            )
+                            ioc_status = ioc_result.get("status", "")
+                            if ioc_status == "ok":
+                                ioc_fill = ioc_result.get("response", {}).get("data", {}).get("statuses", [{}])[0]
+                                if "filled" in ioc_fill:
+                                    order.status = OrderStatus.FILLED
+                                    order.filled_size = sz
+                                    order.avg_fill_price = float(ioc_fill["filled"].get("avgPx", limit_px))
+                                    log.info(f"✅ IOC fallback filled: {asset} @ {order.avg_fill_price}")
+                                    return order, True
+                        except Exception as ioc_err:
+                            log.error(f"IOC fallback failed: {ioc_err}")
+                        # IOC also failed — break out of retry loop
+                        break
 
             except Exception as e:
                 log.error(f"Order attempt {attempt}/{EXEC.order_retry_count} failed: {e}")
