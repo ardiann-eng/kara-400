@@ -529,10 +529,19 @@ class KaraBot:
                 user = user_db.get_user(str(chat_id))
                 if user:
                     session = UserSession(user, mode_manager=self.mode_mgr, hl_client=self.hl_client)
+                    # Restore persisted state (balance + open positions) from DB
+                    if hasattr(session.executor, 'load_from_db'):
+                        session.executor.load_from_db(user.chat_id)
                     try:
                         await session.initialize()
                     except Exception as e:
                         log.error(f"❌ Failed to initialize session for {chat_id}: {e}")
+                    # Live mode: sync open positions from chain
+                    if hasattr(session.executor, 'load_from_chain'):
+                        try:
+                            await session.executor.load_from_chain()
+                        except Exception as e:
+                            log.error(f"[LIVE] Chain sync failed for {user.chat_id}: {e}")
                     self.sessions[str(chat_id)] = session
             return self.sessions.get(str(chat_id))
 
@@ -942,11 +951,14 @@ class KaraBot:
         # Give the loop some time to finish current iteration
         await asyncio.sleep(0.5)
 
-        # In live mode: notify users about open positions before shutting down.
-        # We do NOT force-close them — user may want positions to remain open.
-        # Instead, alert via Telegram so they can manage manually.
+        # In live mode only: notify users about open positions before shutting down.
+        # Paper mode positions are skipped — they have no real-world consequence and
+        # cause confusion when reported as "open" after they've been SL/TP closed.
         try:
             for chat_id, session in list(self.sessions.items()):
+                # Only alert for live executor instances
+                if not isinstance(session.executor, LiveExecutor):
+                    continue
                 open_pos = getattr(session.executor, 'open_positions', [])
                 if not open_pos:
                     continue
