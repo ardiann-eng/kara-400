@@ -167,8 +167,22 @@ class UserDB:
                 """)
 
                 conn.commit()
-                # conn.close() # Connection pooling applied
-                log.info(f"✓ SQLite database initialized at {self.db_path}")
+
+                # Startup diagnostic — confirms persistent storage is working
+                cursor.execute("SELECT COUNT(*) FROM trade_history")
+                trade_count = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM paper_positions")
+                pos_count = cursor.fetchone()[0]
+                log.info(
+                    f"✓ SQLite initialized at {self.db_path} "
+                    f"| trades={trade_count} | positions={pos_count}"
+                )
+                if trade_count == 0 and os.path.getsize(self.db_path) < 50_000:
+                    log.warning(
+                        "⚠️  trade_history is EMPTY on startup. "
+                        "If trades existed before, the persistent volume may not be mounted correctly. "
+                        f"DB path: {self.db_path}"
+                    )
             except Exception as e:
                 log.error(f"Failed to init SQLite: {e}")
 
@@ -184,7 +198,7 @@ class UserDB:
                     "paper_positions",
                     "paper_state",
                     "daily_pnl_history",
-                    "trade_history"
+                    # trade_history intentionally excluded — trade records must survive resets
                 ]
                 
                 reset_stats = {}
@@ -614,13 +628,14 @@ class UserDB:
                 conn = self._get_conn()
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT data FROM trade_history 
-                    WHERE chat_id = ? 
+                    SELECT data FROM trade_history
+                    WHERE chat_id = ?
                     ORDER BY created_at DESC LIMIT ?
                 """, (str(chat_id), limit))
                 rows = cursor.fetchall()
                 for (data_str,) in rows:
                     trades.append(json.loads(data_str))
+                log.debug(f"get_trade_history: chat_id={chat_id!r} → {len(trades)} trades from DB at {self.db_path}")
             except Exception as e:
                 log.error(f"Error fetching trade history for {chat_id}: {e}")
         return trades

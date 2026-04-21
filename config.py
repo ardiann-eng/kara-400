@@ -330,7 +330,7 @@ EXEC = ExecConfig()
 # ──────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE  = os.getenv("LOG_FILE", "kara.log")
-EXCEL_LOG_PATH = os.getenv("EXCEL_LOG_PATH", "trade_history.xlsx")
+EXCEL_LOG_PATH = os.getenv("EXCEL_LOG_PATH", os.path.join(STORAGE_DIR, "trade_history.xlsx"))
 
 # ──────────────────────────────────────────────
 # BACKTEST

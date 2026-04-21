@@ -403,17 +403,11 @@ class PaperExecutor:
         pos.size_current   -= close_size
         pos.pnl_unrealized = pos.unrealized_pnl(current_price)
 
-        # BUG 1 FIX: Persist partial change
-        from core.db import user_db
-        if pos.status == PositionStatus.OPEN:
-            user_db.save_paper_position(self.chat_id, pos)
-        user_db.save_paper_state(self.chat_id, self._balance, self._balance + pos.pnl_unrealized)
-
         if action["action"] == "tp1":
             pos.tp1_hit = True
             pos.trailing_active = True
             pos.trailing_high = current_price
-            pos.stop_loss = pos.entry_price * 1.0005 if pos.side == Side.LONG else pos.entry_price * 0.9995  # breakeven + tiny buffer
+            pos.stop_loss = pos.entry_price * 1.0005 if pos.side == Side.LONG else pos.entry_price * 0.9995
             log.info(f" [PAPER] TP1 hit on {pos.asset} - SL moved to breakeven")
 
         elif action["action"] == "tp2":
@@ -433,6 +427,12 @@ class PaperExecutor:
                 pos.trailing_high = max(pos.trailing_high, current_price)
             else:
                 pos.trailing_high = min(pos.trailing_high, current_price)
+
+        # Persist AFTER all state updates so DB always has the correct tp1_hit, stop_loss, trailing_high
+        from core.db import user_db
+        if pos.status == PositionStatus.OPEN:
+            user_db.save_paper_position(self.chat_id, pos)
+        user_db.save_paper_state(self.chat_id, self._balance, self._balance + pos.pnl_unrealized)
 
         return {**action, "pnl": partial_pnl, "position_id": pos.position_id}
 
