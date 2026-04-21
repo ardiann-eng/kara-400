@@ -987,15 +987,15 @@ class ScoringEngine:
         all_reasons.insert(0, f"📊 Market regime: {regime_labels.get(log_regime, '⚪ UNKNOWN')}")
 
         breakdown = ScoreBreakdown(
-            oi_funding_score=oi_bull + oi_bear,
-            liquidation_score=liq_bull + liq_bear,
-            orderbook_score=ob_bull + ob_bear,
-            session_bonus=session_bonus,
+            oi_funding_score=int(oi_bull + oi_bear),
+            liquidation_score=int(liq_bull + liq_bear),
+            orderbook_score=int(ob_bull + ob_bear),
+            session_bonus=int(session_bonus),
             regime_multiplier=final_multiplier,
-            total_bull=total_bull,
-            total_bear=total_bear,
-            raw_score=raw_score,
-            final_score=final_score,
+            total_bull=int(total_bull),
+            total_bear=int(total_bear),
+            raw_score=int(raw_score),
+            final_score=int(final_score),
             reasons=all_reasons,
             warnings=all_warnings,
         )

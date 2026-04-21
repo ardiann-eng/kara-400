@@ -367,12 +367,17 @@ class HyperliquidClient:
 
             # 3. Direct HTTP Fallback if SDK failed
             if not candles:
+                end_ms = int(time.time() * 1000)
+                # interval_ms: map common intervals to milliseconds
+                _interval_map = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
+                interval_ms = _interval_map.get(interval, 3_600_000)
+                start_ms = end_ms - interval_ms * limit
                 result, success = await self._call_info_endpoint("candleSnapshot", {
                     "req": {
                         "coin": asset,
                         "interval": interval,
-                        "startTime": 0,
-                        "endTime": 0
+                        "startTime": start_ms,
+                        "endTime": end_ms
                     }
                 })
                 if success and isinstance(result, list):

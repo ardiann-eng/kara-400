@@ -80,3 +80,4 @@ storage/
 !composer.json
 !tsconfig.json
 !zeabur.json
+!railway.json
