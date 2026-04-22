@@ -375,15 +375,15 @@ class RiskManager:
           Score >= 62: 1.5% risk (minimum threshold)
           Score <  62: 1.0% risk (seharusnya tidak masuk, tapi safety net)
         """
-        # Score-based risk tier
+        # [FIX 5 - 2026-04-22] Increased risk tiers based on user request
         if score >= 75:
-            risk_pct = 0.025   # 2.5% - high conviction trade
+            risk_pct = 0.035   # 3.5% - high conviction trade (was 2.5%)
         elif score >= 68:
-            risk_pct = 0.020   # 2.0%
-        elif score >= 62:
-            risk_pct = 0.015   # 1.5% - minimum threshold
+            risk_pct = 0.030   # 3.0% (was 2.0%)
+        elif score >= 60:
+            risk_pct = 0.025   # 2.5% (was 1.5%)
         else:
-            risk_pct = 0.010   # 1.0% - safety net (should be blocked by threshold)
+            risk_pct = 0.020   # 2.0% - minimum risk (was 1.0%)
         
         # Equity protection multiplier
         ratio = equity / self._session_start_balance if self._session_start_balance > 0 else 1.0
@@ -413,17 +413,17 @@ class RiskManager:
         daily_vol = realized_vol
         
         if daily_vol > 0.04:        # volatile asset (> 4% daily)
-            sl_pct  = 0.020         # 2.0% - survive noise
+            sl_pct  = 0.030         # 3.0% - wide margin (was 2.0%)
+            tp1_pct = 0.045         # 4.5%
+            tp2_pct = 0.070         # 7.0%
+        elif daily_vol > 0.02:      # normal asset (2-4% daily)
+            sl_pct  = 0.025         # 2.5% (was 1.5%)
+            tp1_pct = 0.035         # 3.5%
+            tp2_pct = 0.060         # 6.0%
+        else:                       # calm asset (< 2% daily)
+            sl_pct  = 0.020         # 2.0% (was 1.0%)
             tp1_pct = 0.030         # 3.0%
             tp2_pct = 0.050         # 5.0%
-        elif daily_vol > 0.02:      # normal asset (2-4% daily)
-            sl_pct  = 0.015         # 1.5%
-            tp1_pct = 0.025         # 2.5%
-            tp2_pct = 0.040         # 4.0%
-        else:                       # calm asset (< 2% daily)
-            sl_pct  = 0.010         # 1.0%
-            tp1_pct = 0.018         # 1.8%
-            tp2_pct = 0.030         # 3.0%
             
         return sl_pct, tp1_pct, tp2_pct
 
