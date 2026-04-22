@@ -413,17 +413,17 @@ class RiskManager:
         daily_vol = realized_vol
         
         if daily_vol > 0.04:        # volatile asset (> 4% daily)
-            sl_pct  = 0.030         # 3.0% - wide margin (was 2.0%)
-            tp1_pct = 0.045         # 4.5%
-            tp2_pct = 0.070         # 7.0%
+            sl_pct  = 0.030         # 3.0% - wide margin to survive noise
+            tp1_pct = 0.025         # 2.5% - quick take profit (scalp style)
+            tp2_pct = 0.045         # 4.5%
         elif daily_vol > 0.02:      # normal asset (2-4% daily)
-            sl_pct  = 0.025         # 2.5% (was 1.5%)
-            tp1_pct = 0.035         # 3.5%
-            tp2_pct = 0.060         # 6.0%
+            sl_pct  = 0.025         # 2.5%
+            tp1_pct = 0.018         # 1.8% - scalp style
+            tp2_pct = 0.035         # 3.5%
         else:                       # calm asset (< 2% daily)
-            sl_pct  = 0.020         # 2.0% (was 1.0%)
-            tp1_pct = 0.030         # 3.0%
-            tp2_pct = 0.050         # 5.0%
+            sl_pct  = 0.020         # 2.0%
+            tp1_pct = 0.012         # 1.2% - scalp style
+            tp2_pct = 0.025         # 2.5%
             
         return sl_pct, tp1_pct, tp2_pct
 

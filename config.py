@@ -132,8 +132,8 @@ class RiskConfig:
 
     # Stop-loss / Take-profit defaults
     default_sl_pct:          float = 0.030    # 3.0% from entry (was 2.5%)
-    tp1_pct:                 float = 0.025    # +2.5% -> close 40% (Securing profit earlier)
-    tp2_pct:                 float = 0.050    # +5.0% -> close 35%
+    tp1_pct:                 float = 0.018    # +1.8% -> close 40% (Scalp style)
+    tp2_pct:                 float = 0.035    # +3.5% -> close 35%
     trailing_pct:            float = 0.03     # 3% trailing on remainder
 
     # Daily / drawdown guards
