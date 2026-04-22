@@ -1302,15 +1302,14 @@ class KaraTelegram:
             # Normalize list of dicts to flat DataFrame for Excel
             df = pd.DataFrame(history)
             
-            # Map column names to be prettier
             column_map = {
                 "timestamp": "Time (UTC)",
                 "asset": "Asset",
                 "side": "Side",
                 "type": "Action",
-                "price": "Price",
+                "entry_price": "Entry Price",
                 "exit_price": "Exit Price",
-                "contracts": "Size",
+                "size": "Size",
                 "notional": "Notional ($)",
                 "pnl": "PnL ($)",
                 "pnl_pct": "PnL (%)",
@@ -2049,12 +2048,13 @@ class KaraTelegram:
         if action == "reset_cfg_defaults":
             if session:
                 u = session.user
-                u.config.std_min_score_to_signal = 58
-                u.config.std_min_score_to_auto_trade = 65
+                # Threshold: signal=55, auto_trade=60
+                u.config.std_min_score_to_signal = 55
+                u.config.std_min_score_to_auto_trade = 60
                 u.config.std_max_leverage = 10
                 u.config.std_max_concurrent_positions = 10
                 u.config.scl_min_score_to_signal = 50
-                u.config.scl_min_score_to_auto_trade = 57
+                u.config.scl_min_score_to_auto_trade = 60  # was 57
                 u.config.scl_max_leverage = 20
                 u.config.scl_max_concurrent_positions = 3
                 user_db.update_user(u)

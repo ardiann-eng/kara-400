@@ -363,17 +363,27 @@ class RiskManager:
         return contracts * signal.entry_price * sl_pct
 
     def get_risk_pct(self, score: int, equity: float) -> float:
-        base_risk = 0.020
+        """
+        [FIX 5 - 2026-04-22] Score-based position sizing.
         
-        # Score multiplier
-        if score >= 80:
-            score_mult = 1.5   # 3.0% risk
-        elif score >= 70:
-            score_mult = 1.25  # 2.5% risk
-        elif score >= 60:
-            score_mult = 1.0   # 2.0% risk
+        Data 124 trades: Losers avg notional $295 vs Winners avg $258.
+        Trade low confidence malah pakai capital lebih banyak.
+        
+        Tier baru:
+          Score >= 75: 2.5% risk (full confidence)
+          Score >= 68: 2.0% risk
+          Score >= 62: 1.5% risk (minimum threshold)
+          Score <  62: 1.0% risk (seharusnya tidak masuk, tapi safety net)
+        """
+        # Score-based risk tier
+        if score >= 75:
+            risk_pct = 0.025   # 2.5% - high conviction trade
+        elif score >= 68:
+            risk_pct = 0.020   # 2.0%
+        elif score >= 62:
+            risk_pct = 0.015   # 1.5% - minimum threshold
         else:
-            score_mult = 0.5   # 1.0% risk (marginal signal)
+            risk_pct = 0.010   # 1.0% - safety net (should be blocked by threshold)
         
         # Equity protection multiplier
         ratio = equity / self._session_start_balance if self._session_start_balance > 0 else 1.0
@@ -381,28 +391,39 @@ class RiskManager:
         elif ratio <= 0.8: equity_mult = 0.5   # damaged mode
         else:              equity_mult = 1.0
         
-        return base_risk * score_mult * equity_mult
+        return risk_pct * equity_mult
 
     # ──────────────────────────────────────────
     # DYNAMIC TP & SL (Fix 10)
     # ──────────────────────────────────────────
 
     def calculate_tp_levels(self, asset: str, entry_price: float, side: Side, realized_vol: float) -> Tuple[float, float, float]:
-        """Calculate dynamic SL, TP1, and TP2 levels based on realized daily volatility."""
+        """
+        [FIX 1 - 2026-04-22] Widen SL based on realized daily volatility.
+        
+        Root cause dari 28% WR: SL rata-rata -0.38% = di dalam market noise zone.
+        81% trades kena SL sebelum sempat bergerak.
+        Trailing stop 100% WR membuktikan sinyal benar, tapi SL terlalu sempit.
+        
+        Logika baru berdasarkan vol_cache:
+          Vol > 4%/hari  (aset volatile): SL 2.0%, TP1 3.0%, TP2 5.0%
+          Vol 2-4%/hari  (aset normal):   SL 1.5%, TP1 2.5%, TP2 4.0%
+          Vol < 2%/hari  (aset calm):     SL 1.0%, TP1 1.8%, TP2 3.0%
+        """
         daily_vol = realized_vol
         
-        if daily_vol > 0.05:        # volatile asset
-            sl_pct  = 0.012
-            tp1_pct = 0.020
-            tp2_pct = 0.035
-        elif daily_vol > 0.025:     # normal asset
-            sl_pct  = 0.010
-            tp1_pct = 0.015
-            tp2_pct = 0.025
-        else:                       # calm asset
-            sl_pct  = 0.008
-            tp1_pct = 0.012
-            tp2_pct = 0.020
+        if daily_vol > 0.04:        # volatile asset (> 4% daily)
+            sl_pct  = 0.020         # 2.0% - survive noise
+            tp1_pct = 0.030         # 3.0%
+            tp2_pct = 0.050         # 5.0%
+        elif daily_vol > 0.02:      # normal asset (2-4% daily)
+            sl_pct  = 0.015         # 1.5%
+            tp1_pct = 0.025         # 2.5%
+            tp2_pct = 0.040         # 4.0%
+        else:                       # calm asset (< 2% daily)
+            sl_pct  = 0.010         # 1.0%
+            tp1_pct = 0.018         # 1.8%
+            tp2_pct = 0.030         # 3.0%
             
         return sl_pct, tp1_pct, tp2_pct
 

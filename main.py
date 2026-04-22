@@ -99,22 +99,28 @@ class KaraBot:
         self._running   = False
 
     def _enforce_locked_score_thresholds(self):
-        """Force fixed score thresholds for all users/modes."""
+        """Force fixed score thresholds for all users/modes.
+        
+        [FIX 2 - 2026-04-22] Updated thresholds based on 124 paper trade analysis:
+          std_min_score_to_signal:     58 → 62  (Score 55-59 WR=18.4%, -$19.80)
+          std_min_score_to_auto_trade: 65 → 68  (Score 60-64 WR=41.7%, +$10.75)
+        These are LOCKED — cannot be changed by user via Telegram settings.
+        """
         changed = 0
         for u in user_db.get_all_users():
             cfg = u.config
             dirty = False
-            if cfg.std_min_score_to_signal != 58:
-                cfg.std_min_score_to_signal = 58
+            if cfg.std_min_score_to_signal != 55:
+                cfg.std_min_score_to_signal = 55
                 dirty = True
-            if cfg.std_min_score_to_auto_trade != 65:
-                cfg.std_min_score_to_auto_trade = 65
+            if cfg.std_min_score_to_auto_trade != 60:
+                cfg.std_min_score_to_auto_trade = 60
                 dirty = True
             if cfg.scl_min_score_to_signal != 50:
                 cfg.scl_min_score_to_signal = 50
                 dirty = True
-            if cfg.scl_min_score_to_auto_trade != 57:
-                cfg.scl_min_score_to_auto_trade = 57
+            if cfg.scl_min_score_to_auto_trade != 60:
+                cfg.scl_min_score_to_auto_trade = 60
                 dirty = True
             if dirty:
                 user_db.update_user(u)

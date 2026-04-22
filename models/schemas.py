@@ -347,15 +347,15 @@ class UserConfig(BaseModel):
     bot_mode:      BotMode = BotMode.PAPER # paper | live
     risk_pct:      float = 0.02            # 2% of equity
     
-    # ── Standard Mode Settings ────────────────
-    std_min_score_to_signal:     int = 58
-    std_min_score_to_auto_trade: int = 65
+    # Threshold: signal=55, auto_trade=60
+    std_min_score_to_signal:     int = 55   # minimum score to emit signal
+    std_min_score_to_auto_trade: int = 60   # minimum score to auto-execute
     std_max_leverage:            int = 10
     std_max_concurrent_positions: int = 10
 
     # ── Scalper Mode Settings ─────────────────
     scl_min_score_to_signal:     int = 50
-    scl_min_score_to_auto_trade: int = 57
+    scl_min_score_to_auto_trade: int = 60   # was 57
     scl_max_leverage:            int = 20
     scl_max_concurrent_positions: int = 5
 

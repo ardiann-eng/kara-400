@@ -234,10 +234,21 @@ SCALPER = ScalperConfig()
 # ──────────────────────────────────────────────
 @dataclass
 class SignalConfig:
-    # ⚠️ HARD THRESHOLDS — TIDAK BISA DIUBAH USER (perubahan hanya via code)
-    min_score_to_signal:     int   = 60       # STANDARD: minimum score emit signal
-    min_score_to_auto_trade: int   = 65       # STANDARD: minimum score full-auto execute (TETAP)
+    # Threshold: signal=55, auto_trade=60
+    min_score_to_signal:     int   = 55      # STANDARD: minimum score emit signal
+    min_score_to_auto_trade: int   = 60      # STANDARD: minimum score full-auto execute
     signal_cooldown_minutes: int   = 15       # cooldown per asset between signals
+
+    # Bull-Bear gap (LONG vs SHORT berbeda threshold)
+    min_bull_bear_gap:       int   = 18       # LONG: minimum gap bull vs bear pts
+    min_bull_bear_gap_short: int   = 28       # SHORT: butuh keyakinan lebih tinggi
+
+    # SHORT-specific filters (aktif saat ALLOW_SHORT = True)
+    # Solusi 2: Funding rate confirmation
+    short_min_funding_rate:  float = 0.0002   # SHORT valid HANYA jika funding >= +0.0002
+                                               # (longs paying aggressively = crowded long)
+    # Solusi 3: Anti-trend filter
+    short_max_uptrend_pct:   float = 0.02     # Block SHORT jika 24h trend > +2% (jangan lawan trend)
 
     # Session windows (UTC)
     ny_session_start_utc:    int   = 13       # 13:00 UTC = 09:00 ET
@@ -277,6 +288,23 @@ class SignalConfig:
 
 
 SIGNAL = SignalConfig()
+
+# ──────────────────────────────────────────────
+# TRADING DIRECTION FILTER
+# ──────────────────────────────────────────────
+# [FIX 3 - 2026-04-22] SHORT disabled - WR hanya 31.4%, total loss -$9.15
+# SHORT stop_loss WR: 20%, total -$20.07
+# Re-enable ONLY when paper trade menunjukkan SHORT WR > 50% untuk 30+ trades
+ALLOW_SHORT = True   # Re-enabled dengan 3 filter proteksi: funding >= +0.0002, anti-trend > 2%, gap >= 28
+
+# ──────────────────────────────────────────────
+# BLOCKED TRADING HOURS (UTC)
+# ──────────────────────────────────────────────
+# [FIX 4 - 2026-04-22] London open blocked - data 124 trades:
+# 08:00 UTC: WR 7.1%, -$7.81 | 09:00 UTC: WR 21.4%, -$7.85
+# Total 2 jam: -$15.66 = hampir seluruh account loss
+# Volatilitas London open menyebabkan SL langsung kena opening spike
+BLOCKED_HOURS_UTC = [8, 9]
 
 # ──────────────────────────────────────────────
 # MARKET SCANNING (smart selection filter)

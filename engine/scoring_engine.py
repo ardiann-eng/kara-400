@@ -258,6 +258,12 @@ class ScoringEngine:
         """
         import config
 
+        # [FIX 4] Block London open hours (08-09 UTC) - WR 7.1% di jam 08, 21.4% di jam 09
+        current_hour = datetime.now(timezone.utc).hour
+        if current_hour in config.BLOCKED_HOURS_UTC:
+            log.debug(f"{asset} [SCALPER]: blocked hour {current_hour} UTC (London open spike)")
+            return None, 0
+
         # 1. Get mark price
         mark_price = await self.client.get_mark_price(asset, meta=meta_data)
         if mark_price <= 0:
@@ -285,6 +291,11 @@ class ScoringEngine:
 
         # 4. Compute scalper indicators
         score, side, reasons = self._calculate_scalper_score(asset, mark_price, candles, mtf_trend)
+
+        # [FIX 3] Block SHORT trades until scoring is fixed
+        if side == Side.SHORT and not config.ALLOW_SHORT:
+            log.debug(f"{asset} [SCALPER]: SHORT blocked (ALLOW_SHORT=False). WR=31.4% data proof.")
+            return None, score
 
         # 3c. Apply session bonus/penalty so adaptive threshold can use it.
         session_bonus, session_reasons = self._get_session_bonus()
@@ -698,7 +709,16 @@ class ScoringEngine:
 
     async def _run_standard(self, asset: str, meta_data=None) -> Tuple[Optional[TradeSignal], int]:
         """Standard scoring pipeline (OI, Funding, Liquidation, Orderbook)."""
+        import config
         
+        # [FIX 4] Block London open hours (08-09 UTC)
+        # Data 124 trades: 08:00 UTC WR=7.1% (-$7.81), 09:00 UTC WR=21.4% (-$7.85)
+        # Total -$15.66 dalam 2 jam = hampir seluruh account loss karena opening spike
+        current_hour = datetime.now(timezone.utc).hour
+        if current_hour in config.BLOCKED_HOURS_UTC:
+            log.debug(f"{asset} [STANDARD]: blocked hour {current_hour} UTC (London open - high spread/spike)")
+            return None, 0
+
         # 1. Fetch allMids ONCE per cycle for Spot-Perp basis (cached 10s by client)
         now_mono = time.monotonic()
         if not self._spot_prices or (now_mono - self._spot_cache_time) > 10:
@@ -918,9 +938,43 @@ class ScoringEngine:
             side = Side.LONG
             raw_score = total_bull + confidence_bonus
         elif short_count >= 3:
+            # [FIX 3] Block SHORT if disabled
+            if not config.ALLOW_SHORT:
+                log.debug(f"[{asset}] SHORT signal blocked (ALLOW_SHORT=False). WR=31.4% data.")
+                return None, 0
             side = Side.SHORT
             raw_score = total_bear + confidence_bonus
+
+            # ── SHORT Quality Filters (berlaku saat ALLOW_SHORT = True) ──────
+            # Solusi 2: Funding Rate Confirmation
+            # SHORT valid HANYA jika longs paying aggressively (crowded long → reversal).
+            # Jika funding negatif = market sudah short-biased = SHORT sangat berbahaya.
+            fr = getattr(funding, 'funding_rate', 0.0)
+            min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', 0.0002)
+            if fr < 0:
+                log.debug(f"[{asset}] SHORT BLOCKED: Funding negatif ({fr:.6f}) = shorts already paying, berbahaya")
+                return None, 0
+            elif fr < min_fr:
+                log.debug(f"[{asset}] SHORT BLOCKED: Funding {fr:.6f} < {min_fr} (tidak cukup crowded long untuk reversal)")
+                return None, 0
+
+            # Solusi 3: Anti-Trend Filter
+            # Jangan SHORT jika market sedang uptrend kuat (> +2% dalam 24h).
+            max_up = getattr(config.SIGNAL, 'short_max_uptrend_pct', 0.02)
+            if trend_pct > max_up:
+                log.debug(f"[{asset}] SHORT BLOCKED: 24h uptrend {trend_pct*100:.1f}% > {max_up*100:.0f}% (jangan lawan trend)")
+                return None, 0
         else:
+            return None, 0
+
+        # ── Bull-Bear gap filter (SHORT butuh gap lebih besar dari LONG) ──
+        bull_bear_gap = abs(total_bull - total_bear)
+        if side == Side.SHORT:
+            min_gap = getattr(config.SIGNAL, 'min_bull_bear_gap_short', 28)
+        else:
+            min_gap = getattr(config.SIGNAL, 'min_bull_bear_gap', 18)
+        if bull_bear_gap < min_gap:
+            log.debug(f"[{asset}] REJECT: Bull-Bear gap {bull_bear_gap:.1f} < {min_gap} ({'SHORT' if side == Side.SHORT else 'LONG'} threshold)")
             return None, 0
 
         # ── Market Structure bonus/penalty (cache-first: trend_pct from vol cache)
@@ -1029,8 +1083,11 @@ class ScoringEngine:
         breakdown.final_score = final_score
 
         # ── Check threshold ────────────────────────────────────────────
-        threshold = 30 # Internal capture threshold
+        # [FIX 2] Threshold dinaikkan dari 30 ke 62 berdasarkan data 124 trades
+        # Score 55-59: WR 18.4% (-$19.80) | Score 60-64: WR 41.7% (+$10.75)
+        threshold = getattr(config.SIGNAL, 'min_score_to_signal', 62)
         if final_score < threshold:
+            log.debug(f"[{asset}] STANDARD: score {final_score} < threshold {threshold}, skipping")
             return None, final_score
 
         # ── Build signal ───────────────────────────────────────────────
