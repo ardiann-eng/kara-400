@@ -82,8 +82,10 @@ class ScoringEngine:
             log.info(f"💾 Loaded {len(self._oi_snapshots)} cached OI snapshot histories from DB.")
 
         # Volatility cache: asset -> (ts, regime, realized_vol, trend)
+        # Load dari SQLite supaya tidak fetch 100 candles tiap restart
         self._vol_cache: Dict[str, tuple] = {}
-        
+        self._load_vol_cache_from_db()
+
         # Spot-Perp basis cache (global)
         self._spot_prices: Dict[str, float] = {}
         self._spot_cache_time: float = 0.0
@@ -95,6 +97,39 @@ class ScoringEngine:
         """Persist OI snapshots to database to prevent amnesia on restart."""
         from core.db import user_db
         user_db.save_oi_snapshots_batch(self._oi_snapshots)
+
+    def _load_vol_cache_from_db(self):
+        """Load volatility cache dari SQLite saat startup — cegah 100 candleSnapshot sekaligus."""
+        from core.db import user_db
+        import sqlite3
+        loaded = 0
+        expired = 0
+        now_ts = time.time()
+        try:
+            conn = user_db._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT asset, regime, realized_vol, trend, cached_at FROM vol_cache")
+            rows = cursor.fetchall()
+            for asset, regime_str, realized_vol, trend, cached_at in rows:
+                age = now_ts - cached_at
+                if age < 3600:
+                    # Masih valid — masukkan ke memory cache
+                    # Kurangi waktu sisa sesuai umur entry supaya TTL tetap akurat
+                    self._vol_cache[asset] = (
+                        time.monotonic() - age,
+                        MarketRegime(regime_str),
+                        float(realized_vol),
+                        float(trend)
+                    )
+                    loaded += 1
+                else:
+                    expired += 1
+            log.info(
+                f"[VOL] Loaded {loaded} cached regimes from DB "
+                f"({expired} expired, will fetch lazily)"
+            )
+        except Exception as e:
+            log.warning(f"[VOL] Failed to load vol_cache from DB: {e}")
 
     # ──────────────────────────────────────────
     # PUBLIC
@@ -213,10 +248,10 @@ class ScoringEngine:
                 cooldown_secs = 1 * 60 # Default
                 if hasattr(config, 'SCALPER'):
                     cooldown_secs = config.SCALPER.signal_cooldown_minutes * 60
-                
+
                 last_ts = self._last_signal_ts.get(f"{asset}_scalper", 0)
                 sig, score_scl = await self._run_scalper(asset, meta_data)
-                
+
                 if score_scl > max_score_found: max_score_found = score_scl
 
                 if sig and (now_ts - last_ts >= cooldown_secs):
@@ -224,6 +259,11 @@ class ScoringEngine:
                     self._last_signal_ts[f"{asset}_scalper"] = now_ts
                 elif sig:
                     log.debug(f"{asset} [SCALPER]: cooldown active")
+            except RuntimeError as e:
+                if "backoff" in str(e):
+                    log.debug(f"[SCAN] {asset}: skipped (API backoff)")
+                    return {}, 0
+                log.error(f"Error in scalper: {e}")
             except Exception as e:
                 log.error(f"Error in scalper: {e}")
 
@@ -233,14 +273,19 @@ class ScoringEngine:
             try:
                 cooldown_secs = config.SIGNAL.signal_cooldown_minutes * 60
                 last_ts = self._last_signal_ts.get(f"{asset}_standard", 0)
-                
+
                 sig, score_std = await self._run_standard(asset, meta_data)
-                
+
                 if score_std > max_score_found: max_score_found = score_std
 
                 if sig and (now_ts - last_ts >= cooldown_secs):
                     signals["standard"] = sig
                     self._last_signal_ts[f"{asset}_standard"] = now_ts
+            except RuntimeError as e:
+                if "backoff" in str(e):
+                    log.debug(f"[SCAN] {asset}: skipped (API backoff)")
+                    return {}, 0
+                log.error(f"Error in standard: {e}")
             except Exception as e:
                 log.error(f"Error in standard: {e}")
 
@@ -674,16 +719,20 @@ class ScoringEngine:
             reasons=reasons
         )
 
-        # Compute Expected Edge using ML
-        features = extract_live_features(
-            score=score,
-            meta_delta=getattr(breakdown, 'meta_score_delta', 0),
-            bd=breakdown,
-            funding_rate=0.0, # Handled dynamically inside extract
-            realized_vol=realized_vol,
-            trend_pct=0.0
-        )
-        edge = intelligence_model.predict_edge(features)
+        # Compute Expected Edge using ML (hanya saat ENABLE_INTELLIGENCE=True)
+        import config as _cfg
+        if _cfg.ENABLE_INTELLIGENCE:
+            features = extract_live_features(
+                score=score,
+                meta_delta=getattr(breakdown, 'meta_score_delta', 0),
+                bd=breakdown,
+                funding_rate=0.0,
+                realized_vol=realized_vol,
+                trend_pct=0.0
+            )
+            edge = intelligence_model.predict_edge(features)
+        else:
+            edge = None
 
         return TradeSignal(
             signal_id=str(uuid.uuid4())[:8].upper(),
@@ -1127,8 +1176,9 @@ class ScoringEngine:
                 return regime, db_cache["realized_vol"], db_cache["trend"]
 
         try:
-            # Use candle_semaphore (3) as requested
+            # Use candle_semaphore (3) + stagger 0.35s — max ~3 req/s saat cold start
             async with self.candle_sem:
+                await asyncio.sleep(0.35)
                 log.debug(f"[VOL] {asset}: Cache expired/empty, fetching candles...")
                 now_ms = int(time.time() * 1000)
                 start_ms = now_ms - (86400 * 1000)

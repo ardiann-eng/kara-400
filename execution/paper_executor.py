@@ -324,17 +324,28 @@ class PaperExecutor:
             
         # 🧠 Intelligence Experience Hook (Async labeling)
         import asyncio
+        import config as _ai_cfg
         from intelligence.experience_buffer import experience_buffer
-        from intelligence.intelligence_model import intelligence_model
-        
+
         pnl_pct_final = pos.floating_pct(fill_price)
         duration_sec = (pos.closed_at - pos.opened_at).total_seconds()
-        
+
         loop = asyncio.get_event_loop()
         loop.run_in_executor(None, experience_buffer.update_label, position_id, pnl_pct_final, duration_sec)
-        
-        # Retrain gracefully asynchronously 
-        asyncio.create_task(intelligence_model.retrain_async())
+
+        # Retrain hanya saat ENABLE_INTELLIGENCE=True DAN data cukup DAN sudah 24 jam
+        if _ai_cfg.ENABLE_INTELLIGENCE:
+            from intelligence.intelligence_model import intelligence_model
+            from intelligence.experience_buffer import experience_buffer as _eb
+            data = _eb.get_training_data()
+            min_samples = getattr(_ai_cfg, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 500)
+            if len(data) >= min_samples:
+                asyncio.create_task(intelligence_model.retrain_async())
+            else:
+                log.debug(
+                    f"[AI] Retrain skipped — {len(data)}/{min_samples} samples "
+                    f"(ENABLE_INTELLIGENCE=True tapi data belum cukup)"
+                )
 
         log_data = {
             "type":      "close",

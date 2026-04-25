@@ -178,10 +178,15 @@ class RiskManager:
             
         # ── Intelligence Filter (ML Expected Edge) ────────────────────
         import config as _cfg
-        if _cfg.ENABLE_INTELLIGENCE:
-            edge = getattr(signal, 'expected_edge', None)
-            if edge is not None and edge < 0.4:
+        edge = getattr(signal, 'expected_edge', None)
+        if edge is not None and edge < 0.4:
+            if _cfg.ENABLE_INTELLIGENCE:
                 return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 40%)"
+            else:
+                log.debug(
+                    f"[AI] {getattr(signal, 'asset', '?')}: low edge "
+                    f"({edge*100:.1f}%) — AI disabled, passing through"
+                )
 
         # ── Paused ────────────────────────────────────────────────────
         if self._paused or account.is_paused:

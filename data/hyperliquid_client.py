@@ -84,6 +84,13 @@ class HyperliquidClient:
         self._max_retries = 3
         self._retry_delay = 0.5  # seconds, exponential backoff
 
+        # 502 backoff state — shared across all parallel asset requests
+        self._api_backoff_until: float = 0.0
+        self._consecutive_502s: int = 0
+
+        # Global rate-limit semaphore — dibuat di connect() supaya event loop sudah aktif
+        self._global_sem: Optional[asyncio.Semaphore] = None
+
         # Candle caching (asset -> (timestamp, data))
         self._candle_cache: Dict[str, Tuple[float, List]] = {}
         self._candle_ttl = 30  # seconds
@@ -95,7 +102,8 @@ class HyperliquidClient:
     async def connect(self):
         """Initialize SDK clients. Call once at startup."""
         self._loop = asyncio.get_event_loop()
-        
+        self._global_sem = asyncio.Semaphore(8)  # max 8 concurrent /info requests
+
         self._http_data = httpx.AsyncClient(
             base_url=self._data_url,
             timeout=15.0,
@@ -130,6 +138,19 @@ class HyperliquidClient:
             log.warning("No private key set - read-only mode (paper safe)")
 
         log.info(f"✓ Hyperliquid client connected [Data: {config.DATA_SOURCE.upper()} | Execution: {config.TRADE_MODE.upper()}]")
+
+    def _format_api_error(self, response_text: str, max_len: int = 80) -> str:
+        """Collapse a potentially multiline/HTML error body into one short line."""
+        import re
+        if not response_text:
+            return "empty response"
+        clean = " ".join(response_text.split())
+        clean = re.sub(r"<[^>]+>", "", clean).strip()
+        if not clean:
+            clean = "HTML error page"
+        if len(clean) > max_len:
+            clean = clean[:max_len] + "..."
+        return clean
 
     async def _run(self, func, *args, **kwargs):
         """Run a synchronous SDK call in thread pool."""
@@ -169,10 +190,36 @@ class HyperliquidClient:
         if params:
             payload.update(params)
 
+        # Check global 502 backoff before making any request
+        now_mono = asyncio.get_event_loop().time()
+        if now_mono < self._api_backoff_until:
+            wait = self._api_backoff_until - now_mono
+            raise RuntimeError(f"API in backoff for {wait:.0f}s (too many 502s)")
+
         try:
             # Use debug for all high-frequency or batch-startup calls to keep terminal clean
             log.debug(f"[API] POST /info - type={request_type}")
-            response = await self._http_data.post("/info", json=payload)
+            if self._global_sem is None:
+                self._global_sem = asyncio.Semaphore(8)
+            async with self._global_sem:
+                response = await self._http_data.post("/info", json=payload)
+
+            # Handle 502 Bad Gateway with exponential backoff
+            if response.status_code == 502:
+                self._consecutive_502s += 1
+                backoff = min(5 * (2 ** (self._consecutive_502s - 1)), 120)
+                self._api_backoff_until = asyncio.get_event_loop().time() + backoff
+                log.warning(
+                    f"[API] 502 Bad Gateway #{self._consecutive_502s} — "
+                    f"backoff {backoff:.0f}s (Hyperliquid may be down)"
+                )
+                raise RuntimeError(f"502 Bad Gateway, backoff {backoff}s")
+
+            # Successful response resets backoff counter
+            if self._consecutive_502s > 0:
+                log.info(f"[API] Hyperliquid recovered after {self._consecutive_502s} retries")
+                self._consecutive_502s = 0
+                self._api_backoff_until = 0.0
 
             # Handle 422 Unprocessable Entity specifically
             if response.status_code == 422:
@@ -211,7 +258,11 @@ class HyperliquidClient:
 
             # Check other HTTP errors
             if response.status_code >= 400:
-                log.error(f"[API {response.status_code}] {request_type}: {response.text[:200]}")
+                from utils.log_helpers import log_api_error_once
+                log_api_error_once(
+                    log, request_type,
+                    f"HTTP {response.status_code}: {self._format_api_error(response.text)}"
+                )
                 return {}, False
 
             # Parse successful response

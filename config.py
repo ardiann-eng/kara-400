@@ -297,8 +297,15 @@ SIGNAL = SignalConfig()
 # Re-enable ONLY when paper trade menunjukkan SHORT WR > 50% untuk 30+ trades
 ALLOW_SHORT = True   # Re-enabled dengan 3 filter proteksi: funding >= +0.0002, anti-trend > 2%, gap >= 28
 
-# Intelligence ML Layer kill switch — set env ENABLE_INTELLIGENCE=false untuk disable tanpa redeploy
-ENABLE_INTELLIGENCE = os.getenv("ENABLE_INTELLIGENCE", "true").lower() == "true"
+# Intelligence ML Layer kill switch
+# DEFAULT = false — model dilatih dari data rusak (ATR-SL 0.08%, SHORT WR 26%, 86% time_exit)
+# Re-enable HANYA setelah: ATR-SL fix live + 500 trades baru + WR > 50%
+# Set env KARA_INTELLIGENCE=true untuk aktifkan tanpa redeploy
+ENABLE_INTELLIGENCE = os.getenv("KARA_INTELLIGENCE", "false").lower() == "true"
+
+# Retrain schedule — hanya retrain saat data cukup banyak dan sudah lama nunggu
+INTELLIGENCE_RETRAIN_MIN_SAMPLES = 500   # minimal 500 trade sebelum retrain
+INTELLIGENCE_RETRAIN_INTERVAL_HOURS = 24  # retrain max 1x per hari
 
 # ──────────────────────────────────────────────
 # BLOCKED TRADING HOURS (UTC)
