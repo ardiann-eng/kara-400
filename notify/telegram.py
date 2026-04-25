@@ -183,6 +183,7 @@ class KaraTelegram:
         self._app: Optional[Application] = None
         self._on_confirm = on_confirm
         self._pending_signals: Dict[str, TradeSignal] = {}  # sig_id -> signal
+        self._pending_pnl_cards: Dict[str, dict] = {}      # pos_id -> {pos, close_data, account}
         self._bot_started = False
         self._authorized_chat_ids: set = set()
         self._state_file = config.TG_STATE_PATH
@@ -1690,8 +1691,9 @@ class KaraTelegram:
 
         await self.send_text(text, target_chat_id=target_chat_id)
 
-        # Send PnL card for full-close events (trailing_stop, stop_loss, tp2 final)
-        if action_type in ("trailing_stop", "stop_loss", "tp2") and pos:
+        # For full-close events (trailing_stop, stop_loss), cache PnL data and add button on-demand.
+        # tp2 is NOT a full close (25% still open with trailing) — no card offered.
+        if action_type in ("trailing_stop", "stop_loss") and pos:
             try:
                 acc_state = None
                 if session:
@@ -1709,9 +1711,21 @@ class KaraTelegram:
                             if hasattr(pos, "opened_at") and pos.opened_at else 0
                         ),
                     }
-                    await self.send_pnl_card(pos, close_data_card, acc_state)
+                    self._pending_pnl_cards[pos.position_id] = {
+                        "pos": pos,
+                        "close_data": close_data_card,
+                        "account": acc_state,
+                    }
+                    pnl_button = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📊 Lihat PnL Card", callback_data=f"card_detail:{pos.position_id}"),
+                    ]])
+                    await self.send_text(
+                        "Tekan tombol untuk melihat kartu hasil trading:",
+                        target_chat_id=target_chat_id,
+                        reply_markup=pnl_button,
+                    )
             except Exception as e:
-                log.debug(f"[PnLCard] Auto-card skipped: {e}")
+                log.debug(f"[PnLCard] Cache PnL data failed: {e}")
 
     async def send_hourly_summary(self, acc, open_count: int, target_chat_id: str = None):
         """Send a premium status overview."""
@@ -1882,7 +1896,21 @@ class KaraTelegram:
             action, sig_id = data.split(":", 1)
         else:
             action, sig_id = data, ""
-            
+
+        # ── PnL Card on-demand ───────────────────────────────────────
+        if action == "card_detail":
+            pending = self._pending_pnl_cards.get(sig_id)
+            if not pending:
+                await query.answer("Kartu tidak tersedia (sudah expired atau belum ada data).", show_alert=True)
+                return
+            try:
+                await self.send_pnl_card(pending["pos"], pending["close_data"], pending["account"])
+                self._pending_pnl_cards.pop(sig_id, None)
+            except Exception as e:
+                log.error(f"[PnLCard] on-demand generation failed: {e}")
+                await query.answer("Gagal generate kartu PnL.", show_alert=True)
+            return
+
         # ── Refresh Logic ───────────────────────────────────────────
         if action == "refresh_pos":
             await self.cmd_positions(update, ctx)
