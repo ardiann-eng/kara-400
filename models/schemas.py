@@ -205,12 +205,14 @@ class TradeSignal(BaseModel):
 
         # ── 1. Calculate Stop Loss ────────────────────────────────────
         if atr_value > 0 and config.RISK.enable_atr_sl:
-            # Dynamic ATR SL
-            sl_dist = atr_value * config.RISK.atr_multiplier
+            # atr_value adalah PERSENTASE (misal 0.015 = 1.5%), bukan harga absolut.
+            # sl_pct_atr = atr_pct * multiplier, lalu clamp ke minimum sl_pct
+            sl_pct_atr = atr_value * config.RISK.atr_multiplier
+            sl_pct_atr = max(sl_pct_atr, sl_pct)   # tidak boleh lebih tipis dari fixed SL
             if self.side == Side.LONG:
-                self.stop_loss = round(self.entry_price - sl_dist, 8)
+                self.stop_loss = round(self.entry_price * (1 - sl_pct_atr), 8)
             else:
-                self.stop_loss = round(self.entry_price + sl_dist, 8)
+                self.stop_loss = round(self.entry_price * (1 + sl_pct_atr), 8)
         else:
             # Fixed Percentage SL
             if self.side == Side.LONG:
@@ -218,13 +220,22 @@ class TradeSignal(BaseModel):
             else:
                 self.stop_loss = round(self.entry_price * (1 + sl_pct), 8)
 
-        # ── 2. Take Profit Calculation (Fixed % for now) ──────────────
-        if self.side == Side.LONG:
-            self.tp1 = round(self.entry_price * (1 + tp1_pct), 8)
-            self.tp2 = round(self.entry_price * (1 + tp2_pct), 8)
+        # ── 2. Take Profit Calculation — ikut sl_pct_atr supaya RR konsisten ──
+        # Kalau ATR SL dipakai, TP juga dihitung dari SL ATR (RR 1.5x dan 2.5x)
+        if atr_value > 0 and config.RISK.enable_atr_sl:
+            effective_sl = sl_pct_atr
+            tp1_eff = effective_sl * 1.5
+            tp2_eff = effective_sl * 2.5
         else:
-            self.tp1 = round(self.entry_price * (1 - tp1_pct), 8)
-            self.tp2 = round(self.entry_price * (1 - tp2_pct), 8)
+            tp1_eff = tp1_pct
+            tp2_eff = tp2_pct
+
+        if self.side == Side.LONG:
+            self.tp1 = round(self.entry_price * (1 + tp1_eff), 8)
+            self.tp2 = round(self.entry_price * (1 + tp2_eff), 8)
+        else:
+            self.tp1 = round(self.entry_price * (1 - tp1_eff), 8)
+            self.tp2 = round(self.entry_price * (1 - tp2_eff), 8)
 
     @property
     def risk_reward_ratio(self) -> float:
@@ -234,7 +245,10 @@ class TradeSignal(BaseModel):
         else:
             risk   = self.stop_loss - self.entry_price
             reward = self.entry_price - self.tp2
-        return round(reward / risk, 2) if risk > 0 else 0.0
+        # Clamp: RR > 20x hampir pasti bug (SL terlalu tipis)
+        if risk <= 0 or risk < self.entry_price * 0.001:
+            return 0.0
+        return round(min(reward / risk, 20.0), 2)
 
 
 # ──────────────────────────────────────────────

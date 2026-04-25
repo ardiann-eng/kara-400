@@ -442,24 +442,30 @@ class RiskManager:
         )
         return sl_pct, tp1_pct, tp2_pct
 
-    def calculate_atr(self, candles: List[Dict[str, Any]]) -> float:
+    def calculate_atr(self, candles) -> float:
         """
-        ATR as a percentage of close price (not raw price units).
-        Candle expected: {'h': high, 'l': low, 'c': close}
-        Returns atr_pct (e.g. 0.015 = 1.5%).
+        ATR sebagai persentase dari close price.
+        Mendukung dua format candle:
+          - Dict: {'h': high, 'l': low, 'c': close}   (dari SDK/direct HTTP)
+          - List: [timestamp, open, high, low, close, volume]  (dari get_candles())
+        Returns atr_pct (misal 0.015 = 1.5%).
         """
         if not candles or len(candles) < 2:
             return 0.0
 
+        def _parse(c):
+            if isinstance(c, dict):
+                return float(c.get("h", 0)), float(c.get("l", 0)), float(c.get("c", 0))
+            elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                # [timestamp, open, high, low, close, ...]
+                return float(c[2]), float(c[3]), float(c[4])
+            return 0.0, 0.0, 0.0
+
         trs = []
         for i in range(1, len(candles)):
-            curr = candles[i]
-            prev = candles[i-1]
-            h = float(curr["h"])
-            l = float(curr["l"])
-            c = float(curr["c"])
-            prev_c = float(prev["c"])
-            if prev_c <= 0:
+            h, l, c = _parse(candles[i])
+            _, _, prev_c = _parse(candles[i - 1])
+            if prev_c <= 0 or h <= 0:
                 continue
             tr_pct = max(h - l, abs(h - prev_c), abs(l - prev_c)) / prev_c
             trs.append(tr_pct)
