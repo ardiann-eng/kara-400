@@ -18,24 +18,27 @@ class IntelligenceModel:
         self.model = None
         self.is_training = False
         self.last_train_samples = 0
+        # is_ready = True hanya setelah retrain() berhasil di session ini.
+        # Model yang di-load dari disk dianggap stale sampai terbukti valid.
+        self.is_ready = False
         self.load_model()
-        
+
     def load_model(self):
         if not os.path.exists(MODEL_PATH):
             return
 
-        # Jangan load model lama kalau DB training kosong — model dari data stale
+        # Validasi: model harus dilatih dari jumlah sample yang sama dengan DB sekarang.
+        # Kalau DB punya lebih sedikit data dari saat model disimpan -> data di-reset -> stale.
         labeled_count = 0
         try:
-            from intelligence.experience_buffer import experience_buffer
             labeled_count = len(experience_buffer.get_training_data())
         except Exception:
             pass
 
-        if labeled_count < 50:
+        if labeled_count < config.INTELLIGENCE_RETRAIN_MIN_SAMPLES:
             log.warning(
-                f"[Intelligence] Model pkl ditemukan tapi DB hanya {labeled_count} samples "
-                f"— model dihapus, mulai fresh. Butuh 100 trades untuk retrain."
+                f"[Intelligence] Model pkl ada tapi DB hanya {labeled_count} samples "
+                f"(butuh {config.INTELLIGENCE_RETRAIN_MIN_SAMPLES}) — model dihapus, mulai fresh."
             )
             try:
                 os.remove(MODEL_PATH)
@@ -45,7 +48,9 @@ class IntelligenceModel:
 
         try:
             self.model = joblib.load(MODEL_PATH)
-            log.info(f"[Intelligence] Model loaded ({labeled_count} training samples).")
+            self.last_train_samples = labeled_count
+            self.is_ready = True
+            log.info(f"[Intelligence] Model loaded dan valid ({labeled_count} training samples).")
         except Exception as e:
             log.error(f"Failed to load model: {e}")
             self.model = None
@@ -133,6 +138,7 @@ class IntelligenceModel:
 
             self.model = new_model
             self.last_train_samples = len(data)
+            self.is_ready = True
             joblib.dump(self.model, MODEL_PATH)
             
         except Exception as e:
@@ -146,14 +152,14 @@ class IntelligenceModel:
         await loop.run_in_executor(None, self.retrain)
 
     def predict_edge(self, features: list) -> float:
-        """Predict the expected edge (0.0 - 1.0 probability of win)"""
-        if self.model is None:
-            return 0.5  # Neutral if no model
-            
+        """Predict the expected edge (0.0 - 1.0 probability of win).
+        Return 0.5 (netral) kalau model belum siap — tidak memblokir trade."""
+        if self.model is None or not self.is_ready:
+            return 0.5
+
         try:
             X = np.array(features).reshape(1, -1)
             probs = self.model.predict_proba(X)
-            # Output is [prob_loss, prob_win]
             prob_win = float(probs[0][1])
             return prob_win
         except Exception as e:
