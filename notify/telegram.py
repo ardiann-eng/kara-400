@@ -1490,9 +1490,10 @@ class KaraTelegram:
         try:
             import sqlite3 as _sq, os as _os
             from intelligence.intelligence_model import intelligence_model as _im, MODEL_PATH as _MP
+            from intelligence.experience_buffer import experience_buffer as _eb
 
-            # 1. Hapus semua data dari DB
-            db_path = _os.path.join("data", "kara_ml.db")
+            # 1. Hapus semua data dari DB (pakai path yang sama dengan ExperienceBuffer)
+            db_path = _eb.db_path
             if _os.path.exists(db_path):
                 conn = _sq.connect(db_path)
                 conn.execute("DELETE FROM ml_experience")
@@ -1512,7 +1513,7 @@ class KaraTelegram:
                 "✅ <b>ML Intelligence direset!</b>\n\n"
                 "• Database training: <b>kosong</b>\n"
                 "• Model pkl: <b>dihapus</b>\n"
-                "• AI ABORT: <b>nonaktif</b> sampai 100 trades terkumpul\n\n"
+                "• AI ABORT: <b>nonaktif</b> sampai 300 trades terkumpul\n\n"
                 "<i>Bot akan mulai kumpulkan data bersih dari sekarang.</i>"
             )
         except Exception as e:
