@@ -14,6 +14,7 @@ import logging
 import sys
 import os
 import signal
+import time
 import uuid
 from typing import Dict, List, Optional, Any
 # Ensure root directory is in path for module discovery (Railway/Docker Fix)
@@ -490,46 +491,64 @@ class KaraBot:
 
     async def run_trading_loop(self):
         """
-        Main loop: every 60 seconds, run scoring for all watched assets.
-        Also updates position TP/SL every 5 seconds.
-        Sends hourly PnL summary every 3600 seconds.
-        """
-        position_interval  = 5       # seconds between position TP/SL checks (always)
-        dashboard_interval = 5       # seconds between dashboard heartbeats
-        hourly_interval    = 3600    # seconds between PnL summaries
+        Titik masuk utama — spawn tiga task independen supaya tidak saling blokir:
 
-        last_scan          = 0.0
+          _position_monitor_loop  — update TP/SL tiap 5s, TIDAK pernah nunggu scan
+          _ws_watchdog_loop       — health check WS tiap 30s
+          _scan_loop              — scoring market tiap N detik (bisa lambat karena throttle)
+
+        Pemisahan ini krusial: saat scan sedang throttled oleh data_sem,
+        position monitor tetap jalan dan TP/SL tetap tereksekusi tepat waktu.
+        """
+        asyncio.create_task(self._position_monitor_loop(), name="position_monitor")
+        asyncio.create_task(self._ws_watchdog_loop(), name="ws_watchdog")
+        asyncio.create_task(self._scan_loop(), name="scan_loop")
+
+        # Loop ini hanya tetap hidup untuk menjaga bot tidak exit
+        while self._running:
+            await asyncio.sleep(5)
+
+    async def _position_monitor_loop(self):
+        """
+        Task independen — update unrealized PnL dan cek TP/SL setiap 5s.
+        TIDAK pernah diblok oleh data scan semaphore.
+        Pakai get_mark_price_fast() yang langsung tanpa throttle.
+        """
+        position_interval  = 5
+        dashboard_interval = 5
+        hourly_interval    = 3600
         last_pos_upd       = 0.0
         last_dash_upd      = 0.0
         last_hourly        = 0.0
-        last_ws_check      = 0.0
 
+        log.info("[MONITOR] Position monitor loop started (independent task)")
         while self._running:
-            now = asyncio.get_event_loop().time()
+            try:
+                now = asyncio.get_event_loop().time()
 
-            # Scan interval: use fastest mode across all active users.
-            # mode_manager is kept in sync by _sync_mode_manager() on every user switch,
-            # but re-derive here as a safety net so the loop never gets stuck at 60s
-            # when a user is in scalper mode.
-            any_scalper = any(
-                getattr(s.user.config, 'trading_mode', 'standard') == 'scalper'
-                for s in self.sessions.values()
-            )
-            scan_interval = 5 if any_scalper else self.mode_mgr.scan_interval
+                if now - last_pos_upd >= position_interval:
+                    await self._update_positions()
+                    last_pos_upd = now
 
-            # ── Position management (every 5s) ───────────────────────
-            if now - last_pos_upd >= position_interval:
-                await self._update_positions()
-                last_pos_upd = now
+                if now - last_dash_upd >= dashboard_interval:
+                    await self._broadcast_heartbeat()
+                    last_dash_upd = now
 
-            # ── Dashboard Update (every 5s) ──────────────────────────
-            if now - last_dash_upd >= dashboard_interval:
-                await self._broadcast_heartbeat()
-                last_dash_upd = now
+                if last_hourly == 0.0:
+                    last_hourly = now
+                elif now - last_hourly >= hourly_interval:
+                    last_hourly = now
 
-            # ── WS watchdog (every 30s) ──────────────────────────────────
-            if now - last_ws_check >= 30:
-                last_ws_check = now
+            except Exception as e:
+                log.error(f"[MONITOR] Position monitor error: {e}", exc_info=True)
+
+            await asyncio.sleep(1)
+
+    async def _ws_watchdog_loop(self):
+        """Task independen — health check WebSocket setiap 30s."""
+        log.info("[WS] WS watchdog loop started (independent task)")
+        while self._running:
+            try:
                 if not self.ws_client.is_healthy:
                     log.warning("WS watchdog: connection unhealthy, forcing restart")
                     try:
@@ -543,19 +562,32 @@ class KaraBot:
                         log.info("WS watchdog: resubscribed all assets")
                     except Exception as e:
                         log.error(f"WS watchdog restart failed: {e}")
+            except Exception as e:
+                log.error(f"[WS] Watchdog error: {e}")
 
-            # ── Market scan (every 60s) ───────────────────────────────
-            if now - last_scan >= scan_interval:
-                await self._scan_all_assets()
-                last_scan = now
+            await asyncio.sleep(30)
 
-            # ── Hourly PnL summary (DISABLED BY USER) ────────────────────────────────────
-            # if now - last_hourly >= hourly_interval and last_hourly > 0:
-            #     await self._send_hourly_summary()
-            if last_hourly == 0.0:
-                last_hourly = now   # start the clock without sending immediately
-            elif now - last_hourly >= hourly_interval:
-                last_hourly = now
+    async def _scan_loop(self):
+        """
+        Task independen — scoring market scan.
+        Boleh lambat karena data_sem throttle — tidak mempengaruhi position monitor.
+        """
+        last_scan = 0.0
+        log.info("[SCAN] Market scan loop started (independent task)")
+        while self._running:
+            try:
+                now = asyncio.get_event_loop().time()
+                any_scalper = any(
+                    getattr(s.user.config, 'trading_mode', 'standard') == 'scalper'
+                    for s in self.sessions.values()
+                )
+                scan_interval = 5 if any_scalper else self.mode_mgr.scan_interval
+
+                if now - last_scan >= scan_interval:
+                    await self._scan_all_assets()
+                    last_scan = now
+            except Exception as e:
+                log.error(f"[SCAN] Scan loop error: {e}", exc_info=True)
 
             await asyncio.sleep(1)
 
@@ -844,8 +876,14 @@ class KaraBot:
                 user_signal.auto_executed = True
                 user_db.save_signal(user_signal) # v17 Sync
                 await self.telegram.send_signal(user_signal, is_auto=True, target_chat_id=chat_id)
-                
+
+                _t0 = time.monotonic()
                 pos = await session.executor.open_position(user_signal)
+                _latency_ms = (time.monotonic() - _t0) * 1000
+                log.info(
+                    f"[EXEC] {user_signal.asset} {user_signal.side.value.upper()} "
+                    f"score={user_signal.score} latency={_latency_ms:.0f}ms"
+                )
                 if pos:
                     await self.telegram.send_position_opened(pos, user_signal, target_chat_id=chat_id)
             else:
@@ -874,7 +912,13 @@ class KaraBot:
         except Exception as e:
             log.error(f"Pre-trade check failed for {chat_id} {signal.asset}: {e}")
 
+        _t0 = time.monotonic()
         pos = await session.executor.open_position(signal)
+        _latency_ms = (time.monotonic() - _t0) * 1000
+        log.info(
+            f"[EXEC] {signal.asset} {signal.side.value.upper()} "
+            f"score={signal.score} latency={_latency_ms:.0f}ms"
+        )
         if pos:
             await self.telegram.send_position_opened(pos, signal, target_chat_id=chat_id)
             return True, "ok"
@@ -894,11 +938,12 @@ class KaraBot:
                 for pos in session.executor.open_positions:
                     all_open_assets.add(pos.asset)
         
-        # 2. Fetch prices ONCE (O(N_Assets) instead of O(Users * Assets))
+        # 2. Fetch prices ONCE — pakai fast path (no semaphore, no sleep)
+        # Position monitor TIDAK boleh diblok oleh data scan semaphore
         prices = {}
         for asset in all_open_assets:
             try:
-                prices[asset] = await self.hl_client.get_mark_price(asset)
+                prices[asset] = await self.hl_client.get_mark_price_fast(asset)
             except Exception as e:
                 log.debug(f"Failed to fetch market price for {asset}: {e}")
 

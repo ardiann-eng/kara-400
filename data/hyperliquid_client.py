@@ -88,8 +88,9 @@ class HyperliquidClient:
         self._api_backoff_until: float = 0.0
         self._consecutive_502s: int = 0
 
-        # Global rate-limit semaphore — dibuat di connect() supaya event loop sudah aktif
-        self._global_sem: Optional[asyncio.Semaphore] = None
+        # Semaphore untuk data fetching (scoring/scan) — throttled, boleh lambat
+        # Semaphore untuk execution path TIDAK ADA — order harus instan
+        self._data_sem: Optional[asyncio.Semaphore] = None   # dibuat di connect()
 
         # Candle caching (asset -> (timestamp, data))
         self._candle_cache: Dict[str, Tuple[float, List]] = {}
@@ -102,7 +103,8 @@ class HyperliquidClient:
     async def connect(self):
         """Initialize SDK clients. Call once at startup."""
         self._loop = asyncio.get_event_loop()
-        self._global_sem = asyncio.Semaphore(8)  # max 8 concurrent /info requests
+        # Throttle HANYA untuk data scan — execution path tidak pernah kena semaphore ini
+        self._data_sem = asyncio.Semaphore(8)
 
         self._http_data = httpx.AsyncClient(
             base_url=self._data_url,
@@ -166,21 +168,22 @@ class HyperliquidClient:
         self,
         request_type: str,
         params: Optional[Dict] = None,
-        retry: int = 0
+        retry: int = 0,
+        throttled: bool = True,
     ) -> Tuple[Dict[str, Any], bool]:
         """
-        Direct HTTP POST to /info endpoint with retry logic.
+        Direct HTTP POST to /info endpoint dengan dua jalur:
 
-        Args:
-            request_type: "allMids", "metaAndAssetCtxs", "l2Book", etc.
-            params: request parameters {"coin": "BTC", "user": "0x...", etc.}
-            retry: current retry count (internal use)
+        throttled=True  (default) — dipakai untuk data scanning/scoring.
+            Kena _data_sem (max 8 concurrent) + sleep 0.12s.
+            Boleh lambat, tidak mempengaruhi execution.
 
-        Returns:
-            Tuple of (response_dict, success_bool)
-            - On 422: Returns detailed error info
-            - On success: Returns parsed response
-            - On failure: Returns empty dict with success=False
+        throttled=False — dipakai untuk mark price (position monitor) dan
+            data yang time-sensitive. Tidak ada semaphore, tidak ada sleep.
+            JANGAN pakai untuk bulk scan karena bisa trigger 429.
+
+        Execution path (place_order/cancel_order/set_leverage) TIDAK memanggil
+        method ini sama sekali — mereka pakai SDK thread executor langsung.
         """
         if not self._http_data:
             raise RuntimeError("Call connect() first")
@@ -197,11 +200,17 @@ class HyperliquidClient:
             raise RuntimeError(f"API in backoff for {wait:.0f}s (too many 502s)")
 
         try:
-            # Use debug for all high-frequency or batch-startup calls to keep terminal clean
-            log.debug(f"[API] POST /info - type={request_type}")
-            if self._global_sem is None:
-                self._global_sem = asyncio.Semaphore(8)
-            async with self._global_sem:
+            log.debug(f"[API] POST /info - type={request_type} throttled={throttled}")
+            if throttled:
+                # Data scanning path — throttle supaya tidak trigger 429
+                if self._data_sem is None:
+                    self._data_sem = asyncio.Semaphore(8)
+                async with self._data_sem:
+                    await asyncio.sleep(0.12)
+                    response = await self._http_data.post("/info", json=payload)
+            else:
+                # Fast path — tidak ada semaphore, tidak ada sleep
+                # Dipakai untuk mark_price (position monitor) dan data time-sensitive
                 response = await self._http_data.post("/info", json=payload)
 
             # Handle 502 Bad Gateway with exponential backoff
@@ -242,18 +251,17 @@ class HyperliquidClient:
                     delay = self._retry_delay * (2 ** retry)
                     log.warning(f"🔄 [API] Retrying {request_type} (attempt {retry+1}/{self._max_retries}) after {delay}s...")
                     await asyncio.sleep(delay)
-                    return await self._call_info_endpoint(request_type, params, retry + 1)
+                    return await self._call_info_endpoint(request_type, params, retry + 1, throttled)
 
                 return {"error": "422", "details": error_detail, "type": request_type}, False
 
             # Handle Rate Limiting (429 or 430)
             if response.status_code in [429, 430]:
                 wait_time = float(response.headers.get("Retry-After", 2.0))
-                # Reduced to debug to avoid drowning out scoring results during priming bursts
                 log.debug(f"⚠️ [API 429/430] Rate limited on {request_type}. Waiting {wait_time}s...")
                 await asyncio.sleep(wait_time)
                 if retry < self._max_retries:
-                    return await self._call_info_endpoint(request_type, params, retry + 1)
+                    return await self._call_info_endpoint(request_type, params, retry + 1, throttled)
                 return {}, False
 
             # Check other HTTP errors
@@ -749,11 +757,11 @@ class HyperliquidClient:
         )
 
     async def get_mark_price(self, asset: str, meta: Optional[Any] = None) -> float:
-        """Get mark price with batch fallback."""
+        """Get mark price — pakai cache, fallback ke allMids throttled (scanning path)."""
         ctx = None
         if meta:
             ctx = self._extract_ctx(meta, asset)
-        
+
         if not ctx:
             await self.refresh_market_cache()
             if self._market_cache:
@@ -761,7 +769,34 @@ class HyperliquidClient:
 
         if ctx and isinstance(ctx, dict):
             px = float(ctx.get("markPx", 0))
-            if px > 0: return px
+            if px > 0:
+                return px
+
+        return 0.0
+
+    async def get_mark_price_fast(self, asset: str) -> float:
+        """
+        Fast path untuk position monitor — NO semaphore, NO sleep.
+        Prioritas: memory cache → allMids tanpa throttle.
+        Dipanggil setiap 5s, tidak boleh diblok oleh data scan semaphore.
+        """
+        # 1. Coba dari market cache yang sudah ada di memory (tidak perlu network)
+        if self._market_cache:
+            ctx = self._extract_ctx(self._market_cache, asset)
+            if ctx and isinstance(ctx, dict):
+                px = float(ctx.get("markPx", 0))
+                if px > 0:
+                    return px
+
+        # 2. Fast network call — tidak ada semaphore, tidak ada sleep
+        try:
+            result, success = await self._call_info_endpoint("allMids", throttled=False)
+            if success and isinstance(result, dict):
+                px_str = result.get(asset)
+                if px_str:
+                    return float(px_str)
+        except Exception as e:
+            log.debug(f"[FAST] get_mark_price_fast {asset}: {e}")
 
         return 0.0
 
