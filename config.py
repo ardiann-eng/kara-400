@@ -127,14 +127,14 @@ class RiskConfig:
 
     # Paper trade mode (tight, for fast data collection)
     paper_sl_pct:            float = 0.020    # 2.0% stop loss
-    paper_tp1_pct:           float = 0.015    # 1.5% TP1 (More realistic)
-    paper_tp2_pct:           float = 0.030    # 3.0% TP2
+    paper_tp1_pct:           float = 0.012    # 1.2% TP1
+    paper_tp2_pct:           float = 0.022    # 2.2% TP2
 
     # Stop-loss / Take-profit defaults
-    default_sl_pct:          float = 0.030    # 3.0% from entry (was 2.5%)
-    tp1_pct:                 float = 0.018    # +1.8% -> close 40% (Scalp style)
-    tp2_pct:                 float = 0.035    # +3.5% -> close 35%
-    trailing_pct:            float = 0.03     # 3% trailing on remainder
+    default_sl_pct:          float = 0.030    # 3.0% from entry
+    tp1_pct:                 float = 0.014    # +1.4% -> close 40%
+    tp2_pct:                 float = 0.025    # +2.5% -> close 35%
+    trailing_pct:            float = 0.025    # 2.5% trailing on remainder
     # Daily / drawdown guards
     daily_loss_limit_pct:    float = 0.80     # [RELAXED] 80% daily loss -> pause
     daily_loss_hard_pct:     float = 0.90     # [RELAXED] 90% -> full stop today
