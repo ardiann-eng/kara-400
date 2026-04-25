@@ -483,7 +483,7 @@ class ScoringEngine:
                 # Spread Filter (Institutional Filter)
                 if bids and asks and bids[0][0] > 0:
                     spread_pct = (asks[0][0] - bids[0][0]) / asks[0][0]
-                    if spread_pct > 0.0008:
+                    if spread_pct > 0.0015:
                         log.info(f"[{asset}] SCALPER REJECT: Spread too wide ({spread_pct*100:.2f}%)")
                         return 0, Side.LONG, ["REJECT: Spread too wide"]
             except Exception:
@@ -844,8 +844,8 @@ class ScoringEngine:
             ob_snap = None
 
         # ── Spread Filter (Institutional Filter) ──────────────────────
-        if ob_snap is not None and ob_snap.spread_pct > 0.0008:
-            log.info(f"[{asset}] REJECT: Bid-Ask Spread too wide ({ob_snap.spread_pct*100:.2f}% > 0.08%)")
+        if ob_snap is not None and ob_snap.spread_pct > 0.0025:
+            log.info(f"[{asset}] REJECT: Bid-Ask Spread too wide ({ob_snap.spread_pct*100:.2f}% > 0.25%)")
             return None, 0
 
         # Store OI snapshot for change calculation
