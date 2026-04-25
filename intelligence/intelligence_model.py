@@ -21,13 +21,34 @@ class IntelligenceModel:
         self.load_model()
         
     def load_model(self):
-        if os.path.exists(MODEL_PATH):
+        if not os.path.exists(MODEL_PATH):
+            return
+
+        # Jangan load model lama kalau DB training kosong — model dari data stale
+        labeled_count = 0
+        try:
+            from intelligence.experience_buffer import experience_buffer
+            labeled_count = len(experience_buffer.get_training_data())
+        except Exception:
+            pass
+
+        if labeled_count < 50:
+            log.warning(
+                f"[Intelligence] Model pkl ditemukan tapi DB hanya {labeled_count} samples "
+                f"— model dihapus, mulai fresh. Butuh 100 trades untuk retrain."
+            )
             try:
-                self.model = joblib.load(MODEL_PATH)
-                log.info("🧠 Loaded existing Intelligence model.")
-            except Exception as e:
-                log.error(f"Failed to load model: {e}")
-                self.model = None
+                os.remove(MODEL_PATH)
+            except Exception:
+                pass
+            return
+
+        try:
+            self.model = joblib.load(MODEL_PATH)
+            log.info(f"[Intelligence] Model loaded ({labeled_count} training samples).")
+        except Exception as e:
+            log.error(f"Failed to load model: {e}")
+            self.model = None
 
     def get_features(self, row):
         """Convert a row from experience buffer into a feature array"""
