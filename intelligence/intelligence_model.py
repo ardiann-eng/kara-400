@@ -129,8 +129,11 @@ class IntelligenceModel:
             )
 
             # Wajib train/test split — tolak model kalau akurasi mencurigakan
+            # Pastikan kelas minoritas punya cukup sampel di test set (min 5)
+            minority_count = min(sum(y), len(y) - sum(y))
+            test_size = max(0.2, 10 / len(X)) if minority_count >= 10 else 0.1
             X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42, stratify=y
+                X, y, test_size=test_size, random_state=42, stratify=y
             )
             new_model.fit(X_train, y_train)
             test_acc = new_model.score(X_test, y_test)

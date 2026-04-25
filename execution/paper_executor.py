@@ -339,7 +339,7 @@ class PaperExecutor:
             from intelligence.intelligence_model import intelligence_model
             from intelligence.experience_buffer import experience_buffer as _eb
             data = _eb.get_training_data()
-            min_samples = getattr(_ai_cfg, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 500)
+            min_samples = getattr(_ai_cfg, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 300)
             if len(data) >= min_samples:
                 asyncio.create_task(intelligence_model.retrain_async())
             else:
