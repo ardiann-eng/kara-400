@@ -1080,6 +1080,19 @@ class KaraBot:
 # ──────────────────────────────────────────────
 
 async def main():
+    # Force-hapus model pkl jika DB training belum cukup — cegah model stale dari volume Railway
+    try:
+        import joblib as _jl
+        from intelligence.experience_buffer import experience_buffer as _eb
+        from intelligence.intelligence_model import MODEL_PATH as _MP
+        _n = len(_eb.get_training_data())
+        _min = getattr(config, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 100)
+        if os.path.exists(_MP) and _n < _min:
+            os.remove(_MP)
+            log.info(f"[Intelligence] Startup: hapus model stale (DB={_n} < {_min}). Mulai fresh.")
+    except Exception as _e:
+        log.debug(f"[Intelligence] Startup check skip: {_e}")
+
     bot = KaraBot()
 
     # 1. Start Dashboard FIRST in background to pass Railway Health Checks
