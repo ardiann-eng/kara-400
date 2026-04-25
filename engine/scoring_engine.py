@@ -693,13 +693,13 @@ class ScoringEngine:
         """Build a TradeSignal with scalper-specific dynamic TP/SL levels."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
         
-        # Determine dynamic TP levels using ATR based Volatility (Fix #10)
-        sl_pct, tp1_pct, tp2_pct = self.risk_mgr.calculate_tp_levels(asset, mark_price, side, realized_vol)
-        
-        # Adjust SL specifically for scalper if we want it tighter, or use the dynamic SL
-        # Here we just use what calculate_tp_levels returned.
+        # Scalper mode pakai SL/TP dari SCALPER config — bukan dynamic vol-based levels
+        # (calculate_tp_levels() didesain untuk standard swing, SL 2-3% jauh untuk scalper)
         import config
         scfg = config.SCALPER
+        sl_pct  = scfg.sl_pct    # 0.65%
+        tp1_pct = scfg.tp1_pct   # 0.85%
+        tp2_pct = scfg.tp2_pct   # 1.50%
         leverage = min(scfg.default_leverage, scfg.max_leverage)
 
         if side == Side.LONG:
