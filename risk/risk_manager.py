@@ -177,9 +177,11 @@ class RiskManager:
             return False, "🚨 KILL SWITCH ACTIVE - trading stopped (max drawdown hit)"
             
         # ── Intelligence Filter (ML Expected Edge) ────────────────────
-        edge = getattr(signal, 'expected_edge', 1.0)
-        if edge is not None and edge < 0.4:
-            return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 40%)"
+        import config as _cfg
+        if _cfg.ENABLE_INTELLIGENCE:
+            edge = getattr(signal, 'expected_edge', None)
+            if edge is not None and edge < 0.4:
+                return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 40%)"
 
         # ── Paused ────────────────────────────────────────────────────
         if self._paused or account.is_paused:
@@ -279,9 +281,13 @@ class RiskManager:
 
         # ── Leverage: Triple-Cap (Signal vs User vs Exchange) ──────────
         # Dynamic Risk Sizing using Intelligence Model
-        from intelligence.dynamic_risk import calculate_risk_multiplier
-        edge = getattr(signal, 'expected_edge', 1.0)
-        multiplier = calculate_risk_multiplier(edge)
+        import config as _cfg
+        if _cfg.ENABLE_INTELLIGENCE:
+            from intelligence.dynamic_risk import calculate_risk_multiplier
+            edge = getattr(signal, 'expected_edge', None)
+            multiplier = calculate_risk_multiplier(edge)
+        else:
+            multiplier = 1.0
 
         # Scale leverage and risk parameter
         cfg = self._cfg()
@@ -414,42 +420,73 @@ class RiskManager:
         
         if daily_vol > 0.04:        # volatile asset (> 4% daily)
             sl_pct  = 0.030         # 3.0% - wide margin to survive noise
-            tp1_pct = 0.025         # 2.5% - quick take profit (scalp style)
-            tp2_pct = 0.045         # 4.5%
+            tp1_pct = sl_pct * 1.5  # min RR 1.5x
+            tp2_pct = sl_pct * 2.5  # min RR 2.5x
         elif daily_vol > 0.02:      # normal asset (2-4% daily)
             sl_pct  = 0.025         # 2.5%
-            tp1_pct = 0.018         # 1.8% - scalp style
-            tp2_pct = 0.035         # 3.5%
+            tp1_pct = sl_pct * 1.5
+            tp2_pct = sl_pct * 2.5
         else:                       # calm asset (< 2% daily)
             sl_pct  = 0.020         # 2.0%
-            tp1_pct = 0.012         # 1.2% - scalp style
-            tp2_pct = 0.025         # 2.5%
-            
+            tp1_pct = sl_pct * 1.5
+            tp2_pct = sl_pct * 2.5
+
+        log.info(
+            f"[ATR-SL] {asset}: daily_vol={daily_vol*100:.3f}% "
+            f"sl_pct={sl_pct*100:.3f}% tp1_pct={tp1_pct*100:.3f}% tp2_pct={tp2_pct*100:.3f}%"
+        )
         return sl_pct, tp1_pct, tp2_pct
 
     def calculate_atr(self, candles: List[Dict[str, Any]]) -> float:
         """
-        Standard ATR calculation (Average True Range).
-        Requires at least 2 candles. 
+        ATR as a percentage of close price (not raw price units).
         Candle expected: {'h': high, 'l': low, 'c': close}
+        Returns atr_pct (e.g. 0.015 = 1.5%).
         """
         if not candles or len(candles) < 2:
             return 0.0
-        
+
         trs = []
         for i in range(1, len(candles)):
             curr = candles[i]
             prev = candles[i-1]
-            
-            # True Range components
-            tr1 = float(curr["h"]) - float(curr["l"])
-            tr2 = abs(float(curr["h"]) - float(prev["c"]))
-            tr3 = abs(float(curr["l"]) - float(prev["c"]))
-            
-            trs.append(max(tr1, tr2, tr3))
-            
-        if not trs: return 0.0
+            h = float(curr["h"])
+            l = float(curr["l"])
+            c = float(curr["c"])
+            prev_c = float(prev["c"])
+            if prev_c <= 0:
+                continue
+            tr_pct = max(h - l, abs(h - prev_c), abs(l - prev_c)) / prev_c
+            trs.append(tr_pct)
+
+        if not trs:
+            return 0.0
         return sum(trs) / len(trs)
+
+    def calculate_sl_from_atr(self, asset: str, entry: float, atr_pct: float, side) -> Tuple[float, float, float]:
+        """
+        Compute percentage-based SL and TP levels from ATR percentage.
+        Returns (sl_pct, tp1_pct, tp2_pct).
+        """
+        if atr_pct < 0.010:
+            sl_pct = 0.010
+        elif atr_pct < 0.020:
+            sl_pct = atr_pct * 1.5
+        else:
+            sl_pct = atr_pct * 1.2
+
+        tp1_pct = sl_pct * 1.5
+        tp2_pct = sl_pct * 2.5
+
+        from models.schemas import Side as _Side
+        sl_price = entry * (1 - sl_pct) if side == _Side.LONG else entry * (1 + sl_pct)
+
+        log.info(
+            f"[ATR-SL] {asset}: atr_raw_pct={atr_pct*100:.3f}% "
+            f"entry={entry:.6f} sl_pct={sl_pct*100:.3f}% "
+            f"sl_price={sl_price:.6f} tp1={tp1_pct*100:.3f}% tp2={tp2_pct*100:.3f}%"
+        )
+        return sl_pct, tp1_pct, tp2_pct
 
     # ──────────────────────────────────────────
     # PARTIAL TP & TRAILING STOP

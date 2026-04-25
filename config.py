@@ -135,7 +135,6 @@ class RiskConfig:
     tp1_pct:                 float = 0.018    # +1.8% -> close 40% (Scalp style)
     tp2_pct:                 float = 0.035    # +3.5% -> close 35%
     trailing_pct:            float = 0.03     # 3% trailing on remainder
-
     # Daily / drawdown guards
     daily_loss_limit_pct:    float = 0.80     # [RELAXED] 80% daily loss -> pause
     daily_loss_hard_pct:     float = 0.90     # [RELAXED] 90% -> full stop today
@@ -241,14 +240,15 @@ class SignalConfig:
 
     # Bull-Bear gap (LONG vs SHORT berbeda threshold)
     min_bull_bear_gap:       int   = 18       # LONG: minimum gap bull vs bear pts
-    min_bull_bear_gap_short: int   = 28       # SHORT: butuh keyakinan lebih tinggi
+    min_bull_bear_gap_short: int   = 20       # SHORT: slightly higher than LONG (was 28 — too restrictive)
 
     # SHORT-specific filters (aktif saat ALLOW_SHORT = True)
     # Solusi 2: Funding rate confirmation
-    short_min_funding_rate:  float = 0.0002   # SHORT valid HANYA jika funding >= +0.0002
-                                               # (longs paying aggressively = crowded long)
+    # Real HL funding rates are typically +-0.00002; threshold must match that range
+    short_min_funding_rate:  float = 0.00001  # SHORT valid if funding >= +0.00001 (longs paying)
+                                               # Previously 0.0002 which is 10x too high — blocked all SHORTs
     # Solusi 3: Anti-trend filter
-    short_max_uptrend_pct:   float = 0.02     # Block SHORT jika 24h trend > +2% (jangan lawan trend)
+    short_max_uptrend_pct:   float = 0.03     # Block SHORT jika 24h trend > +3% (jangan lawan trend)
 
     # Session windows (UTC)
     ny_session_start_utc:    int   = 13       # 13:00 UTC = 09:00 ET
@@ -297,6 +297,9 @@ SIGNAL = SignalConfig()
 # Re-enable ONLY when paper trade menunjukkan SHORT WR > 50% untuk 30+ trades
 ALLOW_SHORT = True   # Re-enabled dengan 3 filter proteksi: funding >= +0.0002, anti-trend > 2%, gap >= 28
 
+# Intelligence ML Layer kill switch — set env ENABLE_INTELLIGENCE=false untuk disable tanpa redeploy
+ENABLE_INTELLIGENCE = os.getenv("ENABLE_INTELLIGENCE", "true").lower() == "true"
+
 # ──────────────────────────────────────────────
 # BLOCKED TRADING HOURS (UTC)
 # ──────────────────────────────────────────────
@@ -330,8 +333,8 @@ class MarketScanConfig:
 
     # Fallback (if API fails, use these safe defaults)
     fallback_markets: list = field(default_factory=lambda: [
-        "BTC", "ETH", "SOL", "HYPE", "FARTCOIN", "JUP", "SOL", "ARB", "DOGE", "XRP", 
-        "ADA", "LINK", "UNI", "NEAR", "AVAX", "MATIC", "PEPE", "WIF", "BONK", "TIA", 
+        "BTC", "ETH", "SOL", "HYPE", "FARTCOIN", "JUP", "ARB", "DOGE", "XRP",
+        "ADA", "LINK", "UNI", "NEAR", "AVAX", "MATIC", "PEPE", "WIF", "BONK", "TIA",
         "OP", "SUI", "APT", "VINE", "FET", "RENDER", "INJ"
     ])
 

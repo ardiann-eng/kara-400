@@ -224,6 +224,29 @@ class KaraTelegram:
         except Exception as e:
             log.error(f"Failed to save state: {e}")
 
+    def _sync_mode_manager(self):
+        """
+        Sync the global ModeManager to reflect the fastest mode across all active users.
+        Called after every user mode switch so scan_interval stays correct.
+        If ANY user is in scalper mode, mode_manager is set to scalper (fastest wins).
+        If ALL users are standard, mode_manager is set to standard.
+        """
+        if not self.mode_manager:
+            return
+        try:
+            all_users = user_db.get_all_users()
+            any_scalper = any(
+                getattr(u.config, 'trading_mode', 'standard') == 'scalper'
+                for u in all_users
+                if u.is_authorized
+            )
+            target = 'scalper' if any_scalper else 'standard'
+            if self.mode_manager.mode != target:
+                self.mode_manager.switch(target)
+                log.info(f"[MODE] mode_manager synced to '{target}' after user switch")
+        except Exception as e:
+            log.error(f"_sync_mode_manager failed: {e}")
+
     # ──────────────────────────────────────────
     # STARTUP
     # ──────────────────────────────────────────
@@ -1451,9 +1474,10 @@ class KaraTelegram:
         chat_id = str(update.effective_chat.id)
         session = await self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return
-        
+
         session.user.config.trading_mode = "standard"
         user_db.update_user(session.user)
+        self._sync_mode_manager()
         await update.effective_message.reply_html("📊 <b>Ganti ke Standard Mode Berhasil!</b>")
 
     # ──────────────────────────────────────────
@@ -1666,6 +1690,29 @@ class KaraTelegram:
 
         await self.send_text(text, target_chat_id=target_chat_id)
 
+        # Send PnL card for full-close events (trailing_stop, stop_loss, tp2 final)
+        if action_type in ("trailing_stop", "stop_loss", "tp2") and pos:
+            try:
+                acc_state = None
+                if session:
+                    acc_state = await session.get_account_state()
+                if acc_state:
+                    total_pnl_for_card = pnl + getattr(pos, "pnl_realized", 0)
+                    close_data_card = {
+                        "exit_price": current,
+                        "pnl": total_pnl_for_card,
+                        "pnl_pct": pos.floating_pct(current),
+                        "reason": action_type,
+                        "score": getattr(pos, "entry_score", 0) or 0,
+                        "duration_sec": (
+                            (utcnow() - pos.opened_at).total_seconds()
+                            if hasattr(pos, "opened_at") and pos.opened_at else 0
+                        ),
+                    }
+                    await self.send_pnl_card(pos, close_data_card, acc_state)
+            except Exception as e:
+                log.debug(f"[PnLCard] Auto-card skipped: {e}")
+
     async def send_hourly_summary(self, acc, open_count: int, target_chat_id: str = None):
         """Send a premium status overview."""
         daily_sign = "+" if acc.daily_pnl >= 0 else ""
@@ -1693,6 +1740,79 @@ class KaraTelegram:
             f"<i>Semua sistem beroperasi maksimal, siap tangkap peluang~! ✨</i>"
         )
         await self.send_text(text, target_chat_id=target_chat_id)
+
+    async def send_pnl_card(self, position, close_data: dict, account):
+        """Generate and send a visual PnL card after every position close."""
+        if not self._app:
+            return
+
+        try:
+            from notify.pnl_card import generate_pnl_card
+            import io as _io
+
+            hold_minutes = close_data.get("hold_minutes", 0)
+            if not hold_minutes:
+                duration_sec = close_data.get("duration_sec", 0)
+                hold_minutes = duration_sec / 60 if duration_sec else 0
+
+            card_bytes = generate_pnl_card(
+                asset=position.asset,
+                side=position.side.value,
+                entry_price=position.entry_price,
+                exit_price=close_data.get("exit_price", position.entry_price),
+                pnl_usd=close_data.get("pnl", 0),
+                pnl_pct=close_data.get("pnl_pct", 0),
+                exit_reason=close_data.get("reason", "manual"),
+                hold_minutes=hold_minutes,
+                leverage=getattr(position, "leverage", 1),
+                score=close_data.get("score", getattr(position, "entry_score", 0) or 0),
+                session_pnl=getattr(account, "daily_pnl", 0),
+                session_pnl_pct=getattr(account, "daily_pnl_pct", 0),
+                total_equity=getattr(account, "total_equity", getattr(account, "balance", 0)),
+            )
+
+            pnl_usd = close_data.get("pnl", 0)
+            sign = "+" if pnl_usd >= 0 else ""
+            reason = close_data.get("reason", "")
+            if "tp" in reason.lower():
+                emoji = "🎯"
+            elif reason.lower() == "trailing_stop":
+                emoji = "📍"
+            else:
+                emoji = "🛑"
+
+            caption = (
+                f"{emoji} <b>{position.asset} {position.side.value.upper()}</b>\n"
+                f"<code>{sign}{pnl_usd:+.2f} USD</code>"
+            )
+
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📊 Detail Posisi", callback_data=f"card_detail:{position.position_id}"),
+            ]])
+
+            chat_ids = list(self._authorized_chat_ids)
+            for cid in chat_ids:
+                try:
+                    await self._app.bot.send_photo(
+                        chat_id=cid,
+                        photo=_io.BytesIO(card_bytes),
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=keyboard,
+                    )
+                except Exception as e:
+                    log.error(f"[PnLCard] Failed to send card to {cid}: {e}")
+                    await self.send_text(caption, target_chat_id=cid)
+
+        except Exception as e:
+            log.error(f"[PnLCard] Card generation failed: {e}")
+            # Fallback to text notification
+            pnl_usd = close_data.get("pnl", 0)
+            sign = "+" if pnl_usd >= 0 else ""
+            await self.send_text(
+                f"📊 <b>{position.asset} {position.side.value.upper()}</b> closed\n"
+                f"<code>{sign}{pnl_usd:+.2f} USD</code>"
+            )
 
     async def send_trade_update(self, message: str):
         """Send a plain trade update (fallback)."""
@@ -1818,6 +1938,7 @@ class KaraTelegram:
             elif sig_id == "standard":
                 session.user.config.trading_mode = "standard"
                 user_db.update_user(session.user)
+                self._sync_mode_manager()
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.message.reply_html("📊 <b>STANDARD MODE AKTIF!</b>\n\nMode swing yang lebih aman dan terukur.")
             else:
@@ -1828,6 +1949,7 @@ class KaraTelegram:
         if action == "scalper_confirm":
             session.user.config.trading_mode = "scalper"
             user_db.update_user(session.user)
+            self._sync_mode_manager()
             await query.edit_message_reply_markup(reply_markup=None)
             await query.message.reply_html(
                 "🚀 <b>SCALPER MODE AKTIF!</b>\n\n"

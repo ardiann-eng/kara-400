@@ -5,6 +5,7 @@ import asyncio
 import numpy as np
 import joblib
 from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.model_selection import train_test_split
 import config
 from intelligence.experience_buffer import experience_buffer
 
@@ -85,18 +86,33 @@ class IntelligenceModel:
                 learning_rate=0.05,
                 early_stopping=True,
                 validation_fraction=0.1,
-                random_state=42
+                random_state=42,
+                class_weight="balanced"  # tangani imbalance win rate rendah (12-28%)
             )
-            
-            new_model.fit(X, y)
+
+            # Train/test split jika data cukup — hindari in-sample accuracy palsu
+            if len(X) >= 100:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=0.2, random_state=42, stratify=y
+                )
+                new_model.fit(X_train, y_train)
+                test_acc = new_model.score(X_test, y_test)
+                log.info(
+                    f"🧠 Intelligence updated: {len(data)} samples | "
+                    f"Out-of-sample accuracy: {test_acc*100:.1f}% (n_test={len(X_test)})"
+                )
+            else:
+                # Data terlalu sedikit untuk split — fit semua tapi tandai sebagai tidak valid
+                new_model.fit(X, y)
+                train_acc = new_model.score(X, y)
+                log.warning(
+                    f"🧠 Intelligence updated (IN-SAMPLE ONLY — {len(data)} data < 100). "
+                    f"Accuracy: {train_acc*100:.1f}% — angka ini TIDAK VALID, butuh 100+ trades."
+                )
+
             self.model = new_model
             self.last_train_samples = len(data)
-            
             joblib.dump(self.model, MODEL_PATH)
-            
-            # Evaluate briefly
-            train_acc = new_model.score(X, y)
-            log.info(f"🧠 Intelligence updated: Expected Edge model refreshed. Accuracy: {train_acc*100:.1f}%.")
             
         except Exception as e:
             log.error(f"Failed to retrain ML model: {e}")

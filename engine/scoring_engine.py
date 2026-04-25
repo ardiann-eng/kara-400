@@ -866,11 +866,12 @@ class ScoringEngine:
             buys = sum(float(t.get('sz', 0)) for t in recent_trades if t.get('side') == 'B')
             sells = sum(float(t.get('sz', 0)) for t in recent_trades if t.get('side') == 'S')
             cvd_val = buys - sells
-            
+
         log.debug(
-            f"🔍 [DIAG] {asset}: funding={funding.funding_rate:.7f}, "
-            f"basis={basis:.4f}, cvd={cvd_val:.1f}, "
-            f"ob_imbal={ob_snap.bid_ask_imbalance if ob_snap else 0.0:.3f}"
+            f"[BEAR DEBUG] {asset}: funding={funding.funding_rate:.6f} "
+            f"oi_chg={oi.oi_change_pct:.4f} price_1h={price_change_1h:.4f} "
+            f"ob_imbal={ob_snap.bid_ask_imbalance if ob_snap else 0.0:.3f} cvd={cvd_val:.0f} "
+            f"basis={basis:.4f}"
         )
 
         # ── Tally total bull vs bear evidence ──────────────────────────
@@ -1295,6 +1296,21 @@ class ScoringEngine:
         if score >= 75:
             leverage = min(RISK.default_leverage + 2, RISK.max_leverage)
 
+        # Compute Expected Edge via Intelligence Model (sama seperti scalper mode)
+        import config as _cfg
+        if _cfg.ENABLE_INTELLIGENCE:
+            features = extract_live_features(
+                score=score,
+                meta_delta=getattr(breakdown, 'meta_score_delta', 0),
+                bd=breakdown,
+                funding_rate=0.0,
+                realized_vol=realized_vol,
+                trend_pct=0.0
+            )
+            expected_edge = intelligence_model.predict_edge(features)
+        else:
+            expected_edge = None
+
         return TradeSignal(
             signal_id=str(uuid.uuid4())[:8].upper(),
             asset=asset,
@@ -1309,7 +1325,8 @@ class ScoringEngine:
             tp2=tp2,
             suggested_leverage=leverage,
             meta_pattern_key=getattr(breakdown, 'meta_pattern_key', None),
-            meta_score_delta=getattr(breakdown, 'meta_score_delta', 0)
+            meta_score_delta=getattr(breakdown, 'meta_score_delta', 0),
+            expected_edge=expected_edge
         )
 
     # ──────────────────────────────────────────
