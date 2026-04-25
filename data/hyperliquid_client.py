@@ -296,49 +296,69 @@ class HyperliquidClient:
                     mids[u.get("name")] = px
         return mids
 
-    async def get_top_volume_markets(self, top_n: int = 20) -> List[str]:
+    async def get_top_volume_markets(self, top_n: int = 100, max_retries: int = 5) -> List[str]:
         """
-        Fetch top volume markets directly from HTTP API.
-        Filter by dayNtlVlm > 0 and return top N markets.
+        Fetch top volume markets with retry logic to survive 429 rate limits.
+        Returns up to top_n markets sorted by 24h volume, deduped.
         """
-        try:
-            if not self._http_data:
-                raise RuntimeError("Call connect() first")
-                
-            payload = {"type": "metaAndAssetCtxs"}
-            resp = await self._http_data.post("/info", json=payload)
-            data = resp.json()
-            if not isinstance(data, list) or len(data) < 2:
-                log.error(f"get_top_volume_markets: Invalid response structure (likely 429 rate limit). Using {len(config.MARKET_SCAN.fallback_markets)} fallback markets.")
-                return config.MARKET_SCAN.fallback_markets
-            
-            universe = data[0].get("universe", []) if isinstance(data[0], dict) else []
-            contexts = data[1] if isinstance(data[1], list) else []
-            
-            markets = []
-            for i, ctx in enumerate(contexts):
-                if i < len(universe):
-                    name = universe[i].get("name")
-                    if name:
-                        vol = float(ctx.get("dayNtlVlm") or 0)
-                        if vol > 0:
-                            markets.append((name, vol))
-                            
-            markets.sort(key=lambda x: x[1], reverse=True)
-            symbols = [name for name, _ in markets[:top_n]]
-            
-            if symbols:
-                log.info(f"✓ Loaded {len(symbols)} top volume markets ({', '.join(symbols[:5])}{'...' if len(symbols)>5 else ''})")
-                return symbols
-            else:
-                log.warning("No markets qualified, using fallback")
-                return config.MARKET_SCAN.fallback_markets
-                
-        except Exception as e:
-            log.error(f"get_top_volume_markets failed: {e}", exc_info=False)
-            fallback = config.MARKET_SCAN.fallback_markets
-            log.info(f"✓ Using {len(fallback)} fallback markets: {', '.join(fallback)}")
-            return fallback
+        if not self._http_data:
+            raise RuntimeError("Call connect() first")
+
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    delay = 2 ** attempt  # 2, 4, 8, 16s
+                    log.warning(f"Rate limit on market fetch, retry {attempt}/{max_retries} in {delay}s...")
+                    await asyncio.sleep(delay)
+
+                payload = {"type": "metaAndAssetCtxs"}
+                resp = await self._http_data.post("/info", json=payload)
+
+                if resp.status_code == 429:
+                    log.warning(f"get_top_volume_markets: 429 rate limit (attempt {attempt+1}/{max_retries})")
+                    continue
+
+                if resp.status_code >= 400:
+                    log.warning(f"get_top_volume_markets: HTTP {resp.status_code} (attempt {attempt+1}/{max_retries})")
+                    continue
+
+                data = resp.json()
+                if not isinstance(data, list) or len(data) < 2:
+                    log.warning(f"get_top_volume_markets: Invalid response structure (attempt {attempt+1}/{max_retries})")
+                    continue
+
+                universe = data[0].get("universe", []) if isinstance(data[0], dict) else []
+                contexts = data[1] if isinstance(data[1], list) else []
+
+                markets = []
+                seen: set = set()
+                for i, ctx in enumerate(contexts):
+                    if i >= len(universe):
+                        break
+                    name = universe[i].get("name") if isinstance(universe[i], dict) else None
+                    if not name or name in seen:
+                        continue
+                    seen.add(name)
+                    vol = float(ctx.get("dayNtlVlm") or 0)
+                    if vol > 0:
+                        markets.append((name, vol))
+
+                markets.sort(key=lambda x: x[1], reverse=True)
+                result = [name for name, _ in markets[:top_n]]
+
+                if result:
+                    log.info(f"✓ Loaded {len(result)} markets: {', '.join(result[:5])}...")
+                    return result
+
+                log.warning(f"get_top_volume_markets: No markets with volume (attempt {attempt+1}/{max_retries})")
+
+            except Exception as e:
+                log.error(f"get_top_volume_markets attempt {attempt+1}: {e}")
+
+        # All retries failed — use deduped fallback
+        fallback = list(dict.fromkeys(config.MARKET_SCAN.fallback_markets))
+        log.error(f"All market fetch retries failed. Using {len(fallback)} fallback markets.")
+        return fallback
 
     async def get_candles(self, asset: str, interval: str = "1h", limit: int = 100) -> List[List[Any]]:
         """

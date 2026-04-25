@@ -268,6 +268,10 @@ class KaraBot:
         # Load market list (always top volume as requested)
         log.info("Loading top volume markets...")
         self.watched_assets = await self.hl_client.get_top_volume_markets(top_n=100)
+        if len(self.watched_assets) < 50:
+            log.warning(f"Low market count ({len(self.watched_assets)}), retrying in 10s...")
+            await asyncio.sleep(10)
+            self.watched_assets = await self.hl_client.get_top_volume_markets(top_n=100)
 
         log.info(f"   Markets ({len(self.watched_assets)}): {', '.join(self.watched_assets[:15])}{'...' if len(self.watched_assets) > 15 else ''}")
         log.info(f"   Full-auto: {config.FULL_AUTO}")
@@ -498,12 +502,20 @@ class KaraBot:
         last_pos_upd       = 0.0
         last_dash_upd      = 0.0
         last_hourly        = 0.0
+        last_ws_check      = 0.0
 
         while self._running:
             now = asyncio.get_event_loop().time()
 
-            # Scan interval is dynamic: 5s scalper, 60s standard
-            scan_interval = self.mode_mgr.scan_interval
+            # Scan interval: use fastest mode across all active users.
+            # mode_manager is kept in sync by _sync_mode_manager() on every user switch,
+            # but re-derive here as a safety net so the loop never gets stuck at 60s
+            # when a user is in scalper mode.
+            any_scalper = any(
+                getattr(s.user.config, 'trading_mode', 'standard') == 'scalper'
+                for s in self.sessions.values()
+            )
+            scan_interval = 5 if any_scalper else self.mode_mgr.scan_interval
 
             # ── Position management (every 5s) ───────────────────────
             if now - last_pos_upd >= position_interval:
@@ -514,6 +526,23 @@ class KaraBot:
             if now - last_dash_upd >= dashboard_interval:
                 await self._broadcast_heartbeat()
                 last_dash_upd = now
+
+            # ── WS watchdog (every 30s) ──────────────────────────────────
+            if now - last_ws_check >= 30:
+                last_ws_check = now
+                if not self.ws_client.is_healthy:
+                    log.warning("WS watchdog: connection unhealthy, forcing restart")
+                    try:
+                        await self.ws_client.stop()
+                        await self.ws_client.start()
+                        for asset in self.watched_assets:
+                            await self.ws_client.subscribe_orderbook(asset)
+                            await self.ws_client.subscribe_trades(asset)
+                            await self.ws_client.subscribe_funding(asset)
+                        await self.ws_client.subscribe_liquidations()
+                        log.info("WS watchdog: resubscribed all assets")
+                    except Exception as e:
+                        log.error(f"WS watchdog restart failed: {e}")
 
             # ── Market scan (every 60s) ───────────────────────────────
             if now - last_scan >= scan_interval:

@@ -114,29 +114,29 @@ class KaraWebSocketClient:
             log.warning(f"WS send failed: {e}")
 
     async def _run_loop(self):
-        """Main reconnect loop."""
+        """Main reconnect loop. Never permanently gives up."""
         cfg = config.EXEC
+        consecutive_failures = 0
         while self._running:
             try:
                 await self._connect_and_listen()
-                self._reconnect_count = 0   # reset on clean disconnect
+                consecutive_failures = 0  # reset on any successful connection
             except Exception as e:
                 self._connected = False
                 if not self._running:
                     break
-                self._reconnect_count += 1
-                if self._reconnect_count > cfg.ws_reconnect_max_retries:
-                    log.error(" WS max reconnect retries exceeded - giving up")
-                    break
+                consecutive_failures += 1
 
                 delay = min(
-                    cfg.ws_reconnect_base_delay_s * (2 ** self._reconnect_count),
-                    60.0   # cap at 60s
+                    cfg.ws_reconnect_base_delay_s * (2 ** min(consecutive_failures, 6)),
+                    120.0   # cap at 2 minutes
                 )
                 log.warning(
-                    f"🔄 WS reconnect #{self._reconnect_count} in {delay:.1f}s... ({e})"
+                    f"🔄 WS disconnected (failure #{consecutive_failures}). "
+                    f"Retrying in {delay:.1f}s... ({e})"
                 )
                 await asyncio.sleep(delay)
+                # NEVER give up — keep retrying as long as bot is running
 
     async def _connect_and_listen(self):
         """Single WS session: connect -> subscribe -> listen."""
