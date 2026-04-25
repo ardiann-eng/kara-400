@@ -467,6 +467,58 @@ async def set_mode(mode: str):
     return {"status": "success" if success else "no_change", "mode": _mode_manager.mode}
 
 
+# ── ML Intelligence Status ──────────────────────────────────────────────────
+
+@app.get("/api/ml_status")
+async def get_ml_status():
+    try:
+        from intelligence.intelligence_model import intelligence_model
+        from intelligence.experience_buffer import experience_buffer
+
+        data = experience_buffer.get_training_data()
+        total = len(data)
+        wins  = sum(1 for r in data if int(r.get('is_win', 0)) == 1)
+        losses = total - wins
+        win_rate = (wins / total * 100) if total > 0 else 0.0
+
+        min_samples = getattr(config, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 300)
+        progress_pct = min(total / min_samples * 100, 100.0)
+
+        # Recent 20 trades win/loss streak
+        recent = data[-20:] if len(data) >= 20 else data
+        recent_results = [{"win": bool(int(r.get('is_win', 0))), "asset": r.get('asset', '?'), "score": r.get('score', 0)} for r in recent]
+
+        # Feature importance proxy — avg score of wins vs losses
+        win_scores  = [float(r.get('score', 0)) for r in data if int(r.get('is_win', 0)) == 1]
+        loss_scores = [float(r.get('score', 0)) for r in data if int(r.get('is_win', 0)) == 0]
+        avg_win_score  = sum(win_scores)  / len(win_scores)  if win_scores  else 0.0
+        avg_loss_score = sum(loss_scores) / len(loss_scores) if loss_scores else 0.0
+
+        return {
+            "is_ready":        intelligence_model.is_ready,
+            "is_training":     intelligence_model.is_training,
+            "total_samples":   total,
+            "wins":            wins,
+            "losses":          losses,
+            "win_rate":        round(win_rate, 1),
+            "min_samples":     min_samples,
+            "progress_pct":    round(progress_pct, 1),
+            "last_train_samples": intelligence_model.last_train_samples,
+            "avg_win_score":   round(avg_win_score, 1),
+            "avg_loss_score":  round(avg_loss_score, 1),
+            "recent_results":  recent_results,
+        }
+    except Exception as e:
+        log.warning(f"[ML Status] {e}")
+        return {
+            "is_ready": False, "is_training": False,
+            "total_samples": 0, "wins": 0, "losses": 0,
+            "win_rate": 0.0, "min_samples": 300, "progress_pct": 0.0,
+            "last_train_samples": 0, "avg_win_score": 0.0, "avg_loss_score": 0.0,
+            "recent_results": [],
+        }
+
+
 # ── WebSocket ────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws")

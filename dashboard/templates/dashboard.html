@@ -650,6 +650,13 @@
         </svg>
         User Settings
       </div>
+      <div class="nav-item" onclick="navigate('ml-intelligence')" data-page="ml-intelligence">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" class="w-4 h-4">
+          <path d="M12 2a4 4 0 0 1 4 4c0 1.5-.8 2.8-2 3.5V12l3 3-3 1v2l-2-1-2 1v-2l-3-1 3-3V9.5A4 4 0 0 1 8 6a4 4 0 0 1 4-4z"/>
+          <circle cx="12" cy="18" r="3"/>
+        </svg>
+        ML Intelligence
+      </div>
       <div class="nav-item" onclick="navigate('recent-trades')" data-page="recent-trades">
         <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
           <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
@@ -991,6 +998,140 @@
         </div>
       </div>
 
+      <!-- PAGE: ML Intelligence -->
+      <div id="page-ml-intelligence" class="page">
+
+        <!-- Row 1: Status + Progress -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 mb-4">
+
+          <!-- Status Card -->
+          <div class="glass p-4 md:p-5 flex flex-col gap-3">
+            <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(196,181,253,.4)">Status Model</div>
+            <div class="flex items-center gap-3">
+              <span class="dot dot-gray blink" id="ml-status-dot"></span>
+              <span class="font-mono text-sm font-semibold text-white" id="ml-status-text">--</span>
+            </div>
+            <div class="text-xs font-mono" style="color:rgba(196,181,253,.5)" id="ml-status-desc">Memuat...</div>
+          </div>
+
+          <!-- Sample Progress Card -->
+          <div class="glass p-4 md:p-5 flex flex-col gap-3 md:col-span-2">
+            <div class="flex justify-between items-center">
+              <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(196,181,253,.4)">Progress Training Data</div>
+              <span class="font-mono text-xs" style="color:rgba(196,181,253,.6)"><span id="ml-total-samples">0</span> / <span id="ml-min-samples">300</span> trades</span>
+            </div>
+            <!-- Progress bar -->
+            <div class="w-full rounded-full overflow-hidden" style="height:10px;background:rgba(196,181,253,.08)">
+              <div id="ml-progress-bar" class="h-full rounded-full transition-all duration-700"
+                style="width:0%;background:linear-gradient(90deg,#8b5cf6,#c4b5fd)"></div>
+            </div>
+            <div class="flex justify-between text-xs font-mono" style="color:rgba(196,181,253,.4)">
+              <span>0</span>
+              <span id="ml-progress-pct" class="font-semibold" style="color:#c4b5fd">0%</span>
+              <span id="ml-min-samples-label">300 (unlock)</span>
+            </div>
+            <div class="text-xs" style="color:rgba(196,181,253,.4)" id="ml-progress-hint">AI hanya bisa memblok sinyal setelah 300 data trade terkumpul.</div>
+          </div>
+        </div>
+
+        <!-- Row 2: Win/Loss Stats -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-4">
+          <div class="glass p-4 flex flex-col gap-1">
+            <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(196,181,253,.4)">Total Trades</div>
+            <div class="font-mono text-2xl font-semibold text-white" id="ml-total">--</div>
+            <div class="text-xs" style="color:rgba(196,181,253,.4)">data terkumpul</div>
+          </div>
+          <div class="glass p-4 flex flex-col gap-1">
+            <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(52,211,153,.5)">Win</div>
+            <div class="font-mono text-2xl font-semibold" style="color:#34d399" id="ml-wins">--</div>
+            <div class="text-xs" style="color:rgba(196,181,253,.4)" id="ml-winrate">-- win rate</div>
+          </div>
+          <div class="glass p-4 flex flex-col gap-1">
+            <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(248,113,113,.5)">Loss</div>
+            <div class="font-mono text-2xl font-semibold" style="color:#f87171" id="ml-losses">--</div>
+            <div class="text-xs" style="color:rgba(196,181,253,.4)">trades loss</div>
+          </div>
+          <div class="glass p-4 flex flex-col gap-1">
+            <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(196,181,253,.4)">Trained On</div>
+            <div class="font-mono text-2xl font-semibold" style="color:#c4b5fd" id="ml-trained-on">--</div>
+            <div class="text-xs" style="color:rgba(196,181,253,.4)">samples terakhir</div>
+          </div>
+        </div>
+
+        <!-- Row 3: Score Insight + Recent Results -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4 mb-4">
+
+          <!-- Score Insight -->
+          <div class="glass p-4 md:p-5">
+            <div class="text-xs font-semibold uppercase tracking-widest mb-4" style="color:rgba(196,181,253,.4)">Rata-Rata Score</div>
+            <div class="flex flex-col gap-4">
+              <!-- Win avg score -->
+              <div>
+                <div class="flex justify-between text-xs mb-1.5">
+                  <span style="color:#34d399">✓ Rata-rata score WIN</span>
+                  <span class="font-mono font-semibold" style="color:#34d399" id="ml-avg-win-score">--</span>
+                </div>
+                <div class="w-full rounded-full overflow-hidden" style="height:6px;background:rgba(52,211,153,.1)">
+                  <div id="ml-win-score-bar" class="h-full rounded-full transition-all duration-700" style="width:0%;background:#34d399"></div>
+                </div>
+              </div>
+              <!-- Loss avg score -->
+              <div>
+                <div class="flex justify-between text-xs mb-1.5">
+                  <span style="color:#f87171">✗ Rata-rata score LOSS</span>
+                  <span class="font-mono font-semibold" style="color:#f87171" id="ml-avg-loss-score">--</span>
+                </div>
+                <div class="w-full rounded-full overflow-hidden" style="height:6px;background:rgba(248,113,113,.1)">
+                  <div id="ml-loss-score-bar" class="h-full rounded-full transition-all duration-700" style="width:0%;background:#f87171"></div>
+                </div>
+              </div>
+              <div class="text-xs mt-1 p-3 rounded-xl" style="background:rgba(196,181,253,.05);color:rgba(196,181,253,.5)" id="ml-score-insight">
+                Semakin jauh selisih kedua score, semakin baik model bisa membedakan sinyal bagus vs buruk.
+              </div>
+            </div>
+          </div>
+
+          <!-- Recent 20 Results -->
+          <div class="glass p-4 md:p-5">
+            <div class="text-xs font-semibold uppercase tracking-widest mb-4" style="color:rgba(196,181,253,.4)">20 Trade Terakhir</div>
+            <div id="ml-recent-strip" class="flex flex-wrap gap-1.5 mb-3"></div>
+            <div class="text-xs" style="color:rgba(196,181,253,.4)">
+              <span class="inline-block w-3 h-3 rounded-sm mr-1" style="background:#34d399;vertical-align:middle"></span>Win &nbsp;
+              <span class="inline-block w-3 h-3 rounded-sm mr-1" style="background:#f87171;vertical-align:middle"></span>Loss
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 4: AI Guard Status -->
+        <div class="glass p-4 md:p-5">
+          <div class="text-xs font-semibold uppercase tracking-widest mb-4" style="color:rgba(196,181,253,.4)">AI Guard — Kondisi Aktif</div>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div class="flex items-start gap-3 p-3 rounded-xl" style="background:rgba(196,181,253,.04)">
+              <span class="dot mt-0.5" id="guard-samples-dot"></span>
+              <div>
+                <div class="text-xs font-semibold text-white mb-0.5">Data Cukup</div>
+                <div class="text-xs" style="color:rgba(196,181,253,.5)" id="guard-samples-desc">Butuh 300 samples</div>
+              </div>
+            </div>
+            <div class="flex items-start gap-3 p-3 rounded-xl" style="background:rgba(196,181,253,.04)">
+              <span class="dot mt-0.5" id="guard-balance-dot"></span>
+              <div>
+                <div class="text-xs font-semibold text-white mb-0.5">Data Seimbang</div>
+                <div class="text-xs" style="color:rgba(196,181,253,.5)" id="guard-balance-desc">Win rate 10%–90%</div>
+              </div>
+            </div>
+            <div class="flex items-start gap-3 p-3 rounded-xl" style="background:rgba(196,181,253,.04)">
+              <span class="dot mt-0.5" id="guard-ready-dot"></span>
+              <div>
+                <div class="text-xs font-semibold text-white mb-0.5">Model Siap</div>
+                <div class="text-xs" style="color:rgba(196,181,253,.5)" id="guard-ready-desc">is_ready = False</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /page-ml-intelligence -->
+
     </div><!-- /p-4 -->
   </main>
 
@@ -1026,6 +1167,13 @@
         <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
       </svg>
       Trades
+    </div>
+    <div class="bnav-item" onclick="navigate('ml-intelligence')" data-bpage="ml-intelligence">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+        <path d="M12 2a4 4 0 0 1 4 4c0 1.5-.8 2.8-2 3.5V12l2 2-2 1v2l-2-1-2 1v-2l-2-1 2-2V9.5A4 4 0 0 1 8 6a4 4 0 0 1 4-4z"/>
+        <circle cx="12" cy="18" r="3"/>
+      </svg>
+      ML
     </div>
   </nav>
 
@@ -1073,7 +1221,7 @@
 
   <script>
     const S = { page: 'overview', userId: null, tab: 'standard' };
-    const META = { 'overview': { t: 'Overview', s: 'System intelligence at a glance' }, 'all-users': { t: 'All Users', s: 'Registered agents in the system' }, 'user-settings': { t: 'User Settings', s: 'Configure per-user trading parameters' }, 'recent-trades': { t: 'Recent Trades', s: 'Latest signal executions' } };
+    const META = { 'overview': { t: 'Overview', s: 'System intelligence at a glance' }, 'all-users': { t: 'All Users', s: 'Registered agents in the system' }, 'user-settings': { t: 'User Settings', s: 'Configure per-user trading parameters' }, 'recent-trades': { t: 'Recent Trades', s: 'Latest signal executions' }, 'ml-intelligence': { t: 'ML Intelligence', s: 'Training progress & model health' } };
 
     function navigate(page) {
       S.page = page;
@@ -1095,6 +1243,7 @@
       else if (p === 'all-users') loadUsers();
       else if (p === 'recent-trades') loadTrades();
       else if (p === 'user-settings') populateUserSelect();
+      else if (p === 'ml-intelligence') loadMlStatus();
     }
 
     // --- Overview Charts Logic ---
@@ -1550,7 +1699,108 @@
       } catch (e) { tbody.innerHTML = `<tr><td colspan="11" class="text-center py-10 text-sm" style="color:#f87171">Error: ${e.message}</td></tr>` }
     }
 
-    setInterval(() => { if (S.page === 'overview') loadOverview() }, 10000);
+    async function loadMlStatus() {
+      try {
+        const d = await api('/api/ml_status');
+
+        // Status dot & text
+        const dot = document.getElementById('ml-status-dot');
+        const txt = document.getElementById('ml-status-text');
+        const desc = document.getElementById('ml-status-desc');
+        if (d.is_training) {
+          dot.className = 'dot dot-amber blink';
+          txt.textContent = 'Sedang Training...';
+          desc.textContent = 'Model sedang dilatih ulang di background.';
+        } else if (d.is_ready) {
+          dot.className = 'dot dot-green blink';
+          txt.textContent = 'Aktif & Siap';
+          desc.textContent = `Dilatih dari ${d.last_train_samples} samples. AI bisa memblok sinyal buruk.`;
+        } else {
+          dot.className = 'dot dot-gray';
+          txt.textContent = 'Belum Aktif';
+          desc.textContent = `Mengumpulkan data... AI tidak akan memblok sinyal sampai ${d.min_samples} trades.`;
+        }
+
+        // Progress bar
+        document.getElementById('ml-total-samples').textContent = d.total_samples;
+        document.getElementById('ml-min-samples').textContent = d.min_samples;
+        document.getElementById('ml-min-samples-label').textContent = `${d.min_samples} (unlock)`;
+        document.getElementById('ml-progress-bar').style.width = d.progress_pct + '%';
+        document.getElementById('ml-progress-pct').textContent = d.progress_pct + '%';
+        const hint = document.getElementById('ml-progress-hint');
+        const remaining = d.min_samples - d.total_samples;
+        hint.textContent = remaining > 0
+          ? `Butuh ${remaining} trade lagi agar AI mulai aktif memfilter sinyal.`
+          : 'Data sudah cukup — AI aktif memfilter sinyal.';
+
+        // Win/Loss stats
+        document.getElementById('ml-total').textContent = d.total_samples;
+        document.getElementById('ml-wins').textContent = d.wins;
+        document.getElementById('ml-losses').textContent = d.losses;
+        document.getElementById('ml-winrate').textContent = d.win_rate + '% win rate';
+        document.getElementById('ml-trained-on').textContent = d.last_train_samples || '--';
+
+        // Score bars
+        const ws = Math.min(d.avg_win_score, 100);
+        const ls = Math.min(d.avg_loss_score, 100);
+        document.getElementById('ml-avg-win-score').textContent = d.avg_win_score || '--';
+        document.getElementById('ml-avg-loss-score').textContent = d.avg_loss_score || '--';
+        document.getElementById('ml-win-score-bar').style.width = ws + '%';
+        document.getElementById('ml-loss-score-bar').style.width = ls + '%';
+
+        const diff = d.avg_win_score - d.avg_loss_score;
+        const insight = document.getElementById('ml-score-insight');
+        if (!d.total_samples) {
+          insight.textContent = 'Belum ada data trade.';
+        } else if (diff >= 10) {
+          insight.textContent = `Selisih ${diff.toFixed(1)} poin — model punya sinyal yang cukup jelas untuk membedakan win vs loss. ✓`;
+        } else if (diff >= 5) {
+          insight.textContent = `Selisih ${diff.toFixed(1)} poin — model mulai bisa membedakan, tapi butuh lebih banyak data.`;
+        } else {
+          insight.textContent = `Selisih hanya ${diff.toFixed(1)} poin — score saja belum cukup membedakan win vs loss. Butuh lebih banyak data.`;
+        }
+
+        // Recent results strip
+        const strip = document.getElementById('ml-recent-strip');
+        if (d.recent_results && d.recent_results.length) {
+          strip.innerHTML = d.recent_results.map(r => `
+            <div title="${r.asset} score=${r.score}" style="
+              width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+              background:${r.win ? 'rgba(52,211,153,.18)' : 'rgba(248,113,113,.18)'};
+              border:1px solid ${r.win ? 'rgba(52,211,153,.3)' : 'rgba(248,113,113,.3)'};
+              font-size:10px;font-family:JetBrains Mono,monospace;
+              color:${r.win ? '#34d399' : '#f87171'};cursor:default">
+              ${r.asset.slice(0,3)}
+            </div>`).join('');
+        } else {
+          strip.innerHTML = '<span style="color:rgba(196,181,253,.3);font-size:12px">Belum ada data</span>';
+        }
+
+        // Guard status
+        const samplesOk = d.total_samples >= d.min_samples;
+        const balanceOk = d.win_rate >= 10 && d.win_rate <= 90 && d.total_samples > 0;
+        const readyOk   = d.is_ready;
+
+        const setGuard = (dotId, descId, ok, okText, failText) => {
+          document.getElementById(dotId).className = 'dot mt-0.5 ' + (ok ? 'dot-green' : 'dot-gray');
+          document.getElementById(descId).textContent = ok ? okText : failText;
+        };
+        setGuard('guard-samples-dot', 'guard-samples-desc', samplesOk,
+          `✓ ${d.total_samples} / ${d.min_samples} terpenuhi`, `${d.total_samples} / ${d.min_samples} — butuh lebih banyak`);
+        setGuard('guard-balance-dot', 'guard-balance-desc', balanceOk,
+          `✓ Win rate ${d.win_rate}% — seimbang`, `Win rate ${d.win_rate}% — data belum seimbang`);
+        setGuard('guard-ready-dot', 'guard-ready-desc', readyOk,
+          '✓ Model aktif & siap pakai', 'Model belum dilatih atau tidak valid');
+
+      } catch (e) {
+        console.warn('ML Status error:', e);
+      }
+    }
+
+    setInterval(() => {
+      if (S.page === 'overview') loadOverview();
+      if (S.page === 'ml-intelligence') loadMlStatus();
+    }, 10000);
     loadOverview();
   </script>
 </body>
