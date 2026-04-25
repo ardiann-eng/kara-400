@@ -304,7 +304,7 @@ ALLOW_SHORT = True   # Re-enabled dengan 3 filter proteksi: funding >= +0.0002, 
 ENABLE_INTELLIGENCE = os.getenv("KARA_INTELLIGENCE", "true").lower() == "true"
 
 # Retrain schedule
-INTELLIGENCE_RETRAIN_MIN_SAMPLES = 100   # retrain pertama setelah 100 trades bersih
+INTELLIGENCE_RETRAIN_MIN_SAMPLES = 300   # AI boleh block signal hanya setelah 300 trades
 INTELLIGENCE_RETRAIN_INTERVAL_HOURS = 12  # retrain max 2x per hari
 
 # ──────────────────────────────────────────────

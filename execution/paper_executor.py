@@ -173,6 +173,7 @@ class PaperExecutor:
             trailing_high=fill_price,
             liquidation_price=liq_price,
             signal_id=signal.signal_id,
+            trade_mode=getattr(signal, 'trade_mode', 'standard'),
             is_paper=True,
             entry_score=signal.score,
         )
@@ -426,7 +427,7 @@ class PaperExecutor:
             pos.tp2_hit = True
             log.info(f" [PAPER] TP2 hit on {pos.asset}")
 
-        elif action["action"] in ("trailing_stop", "stop_loss"):
+        elif action["action"] in ("trailing_stop", "stop_loss", "time_exit"):
             # Full close — guard: only if still OPEN
             if pos.status == PositionStatus.OPEN:
                 await self.close_position(

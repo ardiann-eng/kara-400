@@ -1726,11 +1726,10 @@ class KaraTelegram:
                 await self.send_text(msg, target_chat_id=target_chat_id)
             return
 
-        await self.send_text(text, target_chat_id=target_chat_id)
-
-        # For full-close events (trailing_stop, stop_loss), cache PnL data and add button on-demand.
-        # tp2 is NOT a full close (25% still open with trailing) — no card offered.
-        if action_type in ("trailing_stop", "stop_loss") and pos:
+        # PnL Card button: only for profit events (tp1, tp2, trailing_stop), inline in same message.
+        # stop_loss gets no button.
+        inline_markup = None
+        if action_type in ("tp1", "tp2", "trailing_stop") and pos:
             try:
                 acc_state = None
                 if session:
@@ -1753,16 +1752,13 @@ class KaraTelegram:
                         "close_data": close_data_card,
                         "account": acc_state,
                     }
-                    pnl_button = InlineKeyboardMarkup([[
+                    inline_markup = InlineKeyboardMarkup([[
                         InlineKeyboardButton("📊 Lihat PnL Card", callback_data=f"card_detail:{pos.position_id}"),
                     ]])
-                    await self.send_text(
-                        "Tekan tombol untuk melihat kartu hasil trading:",
-                        target_chat_id=target_chat_id,
-                        reply_markup=pnl_button,
-                    )
             except Exception as e:
                 log.debug(f"[PnLCard] Cache PnL data failed: {e}")
+
+        await self.send_text(text, target_chat_id=target_chat_id, reply_markup=inline_markup)
 
     async def send_hourly_summary(self, acc, open_count: int, target_chat_id: str = None):
         """Send a premium status overview."""

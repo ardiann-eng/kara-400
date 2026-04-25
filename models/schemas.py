@@ -164,6 +164,7 @@ class TradeSignal(BaseModel):
     meta_pattern_key: Optional[str] = None   # outcome-learning pattern bucket
     meta_score_delta: int = 0                # score adj from meta winrate
     expected_edge:    Optional[float] = None # ML predicted probability of win (0.0-1.0)
+    trade_mode:       str = "standard"       # "scalper" | "standard"
 
     # Levels
     entry_price:      float
@@ -190,6 +191,7 @@ class TradeSignal(BaseModel):
         import config
         from models.schemas import Side
 
+        self.trade_mode = mode
         if mode == "scalper":
             cfg = config.SCALPER
             sl_pct  = cfg.sl_pct
@@ -300,6 +302,7 @@ class Position(BaseModel):
 
     # Meta
     signal_id:        Optional[str] = None
+    trade_mode:       str = "standard"   # "scalper" | "standard"
     opened_at:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at:        Optional[datetime] = None
     is_paper:         bool = True

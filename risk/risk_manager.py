@@ -182,9 +182,9 @@ class RiskManager:
         edge = getattr(signal, 'expected_edge', None)
         # Hanya block jika: intelligence aktif DAN model sudah is_ready (dilatih session ini)
         # is_ready=False berarti model dari disk stale atau belum ada data cukup
-        if edge is not None and edge < 0.4 and _cfg.ENABLE_INTELLIGENCE and _im.is_ready:
-            return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 40%)"
-        elif edge is not None and edge < 0.4:
+        if edge is not None and edge < 0.2 and _cfg.ENABLE_INTELLIGENCE and _im.is_ready:
+            return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 20%)"
+        elif edge is not None and edge < 0.2:
             log.debug(
                 f"[AI] {getattr(signal, 'asset', '?')}: low edge ({edge*100:.1f}%) "
                 f"— passing through (is_ready={getattr(_im, 'is_ready', False)})"
@@ -603,6 +603,39 @@ class RiskManager:
                                 f"(peak profit +{max_floating*100:.1f}%)."
                             )
                         }
+
+        # Exit Rule E: Scalper max-hold timeout
+        if getattr(position, 'trade_mode', 'standard') == 'scalper':
+            scfg = SCALPER
+            max_hold = getattr(scfg, 'max_hold_minutes', 12.0)
+            grace = getattr(scfg, 'max_hold_grace_minutes', 6.0)
+            soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.15)
+
+            from datetime import timezone as _tz
+            from datetime import datetime as _dt
+            now = _dt.now(_tz.utc)
+            opened = position.opened_at
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=_tz.utc)
+            hold_minutes = (now - opened).total_seconds() / 60.0
+
+            hard_limit = max_hold + grace
+            if hold_minutes >= max_hold:
+                # Grace: jika posisi masih rugi lebih dari soft_floor, tunggu sampai hard_limit
+                if floating <= soft_floor / 100.0 and hold_minutes < hard_limit:
+                    pass  # masih dalam grace, tahan dulu
+                else:
+                    return {
+                        "action":      "time_exit",
+                        "close_ratio": 1.0,
+                        "price":       current_price,
+                        "pnl":         position.pnl_unrealized,
+                        "position_id": position.position_id,
+                        "message":     (
+                            f"⏱️ Scalper max-hold {hold_minutes:.0f}m — posisi ditutup paksa. "
+                            f"PnL: {floating*100:.2f}%."
+                        )
+                    }
 
         return None
 

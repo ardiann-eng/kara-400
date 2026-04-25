@@ -79,8 +79,9 @@ class IntelligenceModel:
             return
             
         data = experience_buffer.get_training_data()
-        if len(data) < 50:
-            log.debug(f"🧠 Not enough data to train. Have {len(data)}, need 50.")
+        min_samples = getattr(config, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 300)
+        if len(data) < min_samples:
+            log.debug(f"🧠 Not enough data to train. Have {len(data)}, need {min_samples}.")
             return
             
         if len(data) <= self.last_train_samples + 20 and self.model is not None:
@@ -101,9 +102,20 @@ class IntelligenceModel:
             X = np.array(X)
             y = np.array(y)
             
-            # Count wins and losses to ensure both classes exist
+            # Guard: kedua kelas harus ada
             if sum(y) == 0 or sum(y) == len(y):
                 log.warning("🧠 Cannot train model: Only one class present (all wins or all losses).")
+                self.is_training = False
+                return
+
+            # Guard: data harus cukup berimbang — min 10% dari kelas minoritas
+            win_rate = sum(y) / len(y)
+            if win_rate > 0.90 or win_rate < 0.10:
+                log.warning(
+                    f"🧠 Skipping retrain: data terlalu imbalanced "
+                    f"(win_rate={win_rate*100:.1f}%, butuh 10%-90%). "
+                    f"Model lama tetap dipakai."
+                )
                 self.is_training = False
                 return
 
@@ -113,28 +125,29 @@ class IntelligenceModel:
                 early_stopping=True,
                 validation_fraction=0.1,
                 random_state=42,
-                class_weight="balanced"  # tangani imbalance win rate rendah (12-28%)
+                class_weight="balanced"
             )
 
-            # Train/test split jika data cukup — hindari in-sample accuracy palsu
-            if len(X) >= 100:
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X, y, test_size=0.2, random_state=42, stratify=y
-                )
-                new_model.fit(X_train, y_train)
-                test_acc = new_model.score(X_test, y_test)
-                log.info(
-                    f"🧠 Intelligence updated: {len(data)} samples | "
-                    f"Out-of-sample accuracy: {test_acc*100:.1f}% (n_test={len(X_test)})"
-                )
-            else:
-                # Data terlalu sedikit untuk split — fit semua tapi tandai sebagai tidak valid
-                new_model.fit(X, y)
-                train_acc = new_model.score(X, y)
+            # Wajib train/test split — tolak model kalau akurasi mencurigakan
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, stratify=y
+            )
+            new_model.fit(X_train, y_train)
+            test_acc = new_model.score(X_test, y_test)
+
+            # Guard: akurasi > 90% berarti overfit atau data bocor — jangan pakai
+            if test_acc > 0.90:
                 log.warning(
-                    f"🧠 Intelligence updated (IN-SAMPLE ONLY — {len(data)} data < 100). "
-                    f"Accuracy: {train_acc*100:.1f}% — angka ini TIDAK VALID, butuh 100+ trades."
+                    f"🧠 Skipping retrain: akurasi terlalu tinggi ({test_acc*100:.1f}%) "
+                    f"— kemungkinan overfit atau data tidak valid. Model lama tetap dipakai."
                 )
+                self.is_training = False
+                return
+
+            log.info(
+                f"🧠 Intelligence updated: {len(data)} samples | win_rate={win_rate*100:.1f}% | "
+                f"out-of-sample accuracy: {test_acc*100:.1f}% (n_test={len(X_test)})"
+            )
 
             self.model = new_model
             self.last_train_samples = len(data)
