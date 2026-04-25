@@ -329,6 +329,7 @@ class KaraTelegram:
                 # Direct Config Commands
                 CommandHandler("setleverage",  self.cmd_direct_set_config),
                 CommandHandler("setmaxpos",    self.cmd_direct_set_config),
+                CommandHandler("resetml",      self.cmd_reset_ml),
                 # No more manual whatsnew command, it's automatic now
 
                 CallbackQueryHandler(self.on_callback),
@@ -1480,6 +1481,42 @@ class KaraTelegram:
         user_db.update_user(session.user)
         self._sync_mode_manager()
         await update.effective_message.reply_html("📊 <b>Ganti ke Standard Mode Berhasil!</b>")
+
+    async def cmd_reset_ml(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Hapus semua data ML + model pkl dari Railway volume. Mulai fresh."""
+        if not self._is_authorized(update): return
+        chat_id = str(update.effective_chat.id)
+        await update.effective_message.reply_html("⏳ <b>Mereset ML Intelligence...</b>")
+        try:
+            import sqlite3 as _sq, os as _os
+            from intelligence.intelligence_model import intelligence_model as _im, MODEL_PATH as _MP
+
+            # 1. Hapus semua data dari DB
+            db_path = _os.path.join("data", "kara_ml.db")
+            if _os.path.exists(db_path):
+                conn = _sq.connect(db_path)
+                conn.execute("DELETE FROM ml_experience")
+                conn.commit()
+                conn.close()
+
+            # 2. Hapus pkl dari volume
+            if _os.path.exists(_MP):
+                _os.remove(_MP)
+
+            # 3. Reset state model in-memory
+            _im.model = None
+            _im.is_ready = False
+            _im.last_train_samples = 0
+
+            await update.effective_message.reply_html(
+                "✅ <b>ML Intelligence direset!</b>\n\n"
+                "• Database training: <b>kosong</b>\n"
+                "• Model pkl: <b>dihapus</b>\n"
+                "• AI ABORT: <b>nonaktif</b> sampai 100 trades terkumpul\n\n"
+                "<i>Bot akan mulai kumpulkan data bersih dari sekarang.</i>"
+            )
+        except Exception as e:
+            await update.effective_message.reply_html(f"❌ Reset gagal: <code>{e}</code>")
 
     # ──────────────────────────────────────────
     # SIGNAL NOTIFICATION
