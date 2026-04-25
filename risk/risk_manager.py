@@ -178,15 +178,17 @@ class RiskManager:
             
         # ── Intelligence Filter (ML Expected Edge) ────────────────────
         import config as _cfg
+        from intelligence.intelligence_model import intelligence_model as _im
         edge = getattr(signal, 'expected_edge', None)
-        if edge is not None and edge < 0.4:
-            if _cfg.ENABLE_INTELLIGENCE:
-                return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 40%)"
-            else:
-                log.debug(
-                    f"[AI] {getattr(signal, 'asset', '?')}: low edge "
-                    f"({edge*100:.1f}%) — AI disabled, passing through"
-                )
+        # Hanya block jika: intelligence aktif DAN model sudah is_ready (dilatih session ini)
+        # is_ready=False berarti model dari disk stale atau belum ada data cukup
+        if edge is not None and edge < 0.4 and _cfg.ENABLE_INTELLIGENCE and _im.is_ready:
+            return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 40%)"
+        elif edge is not None and edge < 0.4:
+            log.debug(
+                f"[AI] {getattr(signal, 'asset', '?')}: low edge ({edge*100:.1f}%) "
+                f"— passing through (is_ready={getattr(_im, 'is_ready', False)})"
+            )
 
         # ── Paused ────────────────────────────────────────────────────
         if self._paused or account.is_paused:
