@@ -176,6 +176,7 @@ class TradeSignal(BaseModel):
     # Position sizing (filled by RiskManager)
     suggested_size_usd: Optional[float] = None
     suggested_contracts: Optional[float] = None
+    realized_vol:       float = 0.02             # daily realized vol — used for trail distance
 
     # Meta
     timestamp:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -307,6 +308,7 @@ class Position(BaseModel):
     closed_at:        Optional[datetime] = None
     is_paper:         bool = True
     entry_score:      int = 50
+    realized_vol:     float = 0.02       # daily realized vol at entry — used for trail distance
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:

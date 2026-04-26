@@ -263,11 +263,14 @@ class MarketDataCache:
                 self.trades[coin] = self.trades[coin][-500:]  # last 500 trades
 
     def on_liquidations(self, data):
+        before = len(self.liquidations)
         if isinstance(data, list):
             self.liquidations.extend(data)
         elif isinstance(data, dict):
             self.liquidations.append(data)
         self.liquidations = self.liquidations[-100:]
+        if len(self.liquidations) > before:
+            log.debug(f"[WS] Liquidation event: +{len(self.liquidations)-before} (total={len(self.liquidations)})")
 
 
 # Global cache singleton

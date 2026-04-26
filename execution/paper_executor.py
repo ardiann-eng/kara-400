@@ -176,6 +176,7 @@ class PaperExecutor:
             trade_mode=getattr(signal, 'trade_mode', 'standard'),
             is_paper=True,
             entry_score=signal.score,
+            realized_vol=getattr(signal, 'realized_vol', 0.02),
         )
 
         # Update balances
@@ -320,6 +321,16 @@ class PaperExecutor:
                 sig = user_db.get_signal_by_id(pos.signal_id)
                 if sig and getattr(sig, "meta_pattern_key", None):
                     user_db.update_meta_pattern_outcome(sig.meta_pattern_key, total_pnl)
+                    stats = user_db.get_meta_pattern_stats(sig.meta_pattern_key)
+                    n = stats["samples"] if stats else 1
+                    log.info(
+                        f"🧠 [META] {sig.meta_pattern_key} | "
+                        f"pnl={total_pnl:+.2f} | "
+                        f"wr={stats['winrate_ema']*100:.0f}% | "
+                        f"n={n}"
+                        if stats else
+                        f"🧠 [META] {sig.meta_pattern_key} | pnl={total_pnl:+.2f} | n=1"
+                    )
         except Exception as e:
             log.debug(f"[META] Failed updating pattern outcome for {pos.signal_id}: {e}")
             

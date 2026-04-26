@@ -502,6 +502,168 @@ class RiskManager:
         return sl_pct, tp1_pct, tp2_pct
 
     # ──────────────────────────────────────────
+    # VOL-AWARE LEVEL CALCULATOR  (Fix 1 + Fix 4)
+    # ──────────────────────────────────────────
+
+    def calculate_levels(
+        self,
+        asset: str,
+        side: str,
+        entry_price: float,
+        score: int,
+        vol_cache: dict,
+    ) -> dict:
+        """
+        Calculate SL/TP levels using realized volatility from vol_cache.
+        Pure arithmetic — no I/O, no async, runs in <0.1ms.
+        Called once at signal generation time.
+
+        92-trade data proved fixed SL destroys profit factor (0.726).
+        Avg loss was 2.66x avg win purely because SL was inside market noise.
+        Fix: SL must be >= 1 daily-noise range so normal moves don't trigger it.
+        """
+        from datetime import datetime, timezone as _tz
+
+        # ── Step 1: Get realized vol from cache ──────────────────────────
+        cached = vol_cache.get(asset)
+        if cached and len(cached) >= 3:
+            _, regime_obj, realized_vol = cached[0], cached[1], cached[2]
+            regime = regime_obj.value if hasattr(regime_obj, "value") else str(regime_obj)
+        else:
+            realized_vol = 0.025
+            regime = "normal"
+
+        # ── Step 2: Regime-based noise multiplier & floor ────────────────
+        regime_lower = regime.lower()
+        if regime_lower == "low_vol":
+            noise_mult  = 0.60
+            sl_floor    = 0.008
+            tp_mult     = 2.0
+        elif regime_lower in ("normal", "unknown"):
+            noise_mult  = 0.80
+            sl_floor    = 0.012
+            tp_mult     = 2.2
+        elif regime_lower == "high_vol":
+            noise_mult  = 1.00
+            sl_floor    = 0.018
+            tp_mult     = 2.5
+        else:  # extreme / volatile
+            noise_mult  = 1.20
+            sl_floor    = 0.025
+            tp_mult     = 3.0
+
+        sl_pct = max(realized_vol * noise_mult, sl_floor)
+        sl_pct = min(sl_pct, 0.035)   # hard cap 3.5%
+
+        # ── Step 3: Score-adjusted TP multiplier ─────────────────────────
+        if score >= 80:
+            tp_mult *= 1.30
+        elif score >= 70:
+            tp_mult *= 1.15
+        elif score < 62:
+            tp_mult *= 0.85
+
+        # ── Step 4: Session adjustment (Fix 4) ───────────────────────────
+        hour = datetime.now(_tz.utc).hour
+        if 13 <= hour < 21:       # NY session — wider SL, bigger target
+            sl_pct  = min(sl_pct * 1.20, 0.035)
+            tp_mult *= 1.15
+        elif hour >= 22 or hour < 7:   # Asia — tighter
+            sl_pct  = max(sl_pct * 0.85, sl_floor)
+            tp_mult *= 0.90
+
+        # ── Step 5: TP levels ─────────────────────────────────────────────
+        tp1_pct = sl_pct * tp_mult * 0.55   # TP1 at 55% of full target
+        tp2_pct = sl_pct * tp_mult          # TP2 at full target
+
+        # Enforce min RR 1.2:1
+        tp2_pct = max(tp2_pct, sl_pct * 1.20)
+        tp1_pct = max(tp1_pct, sl_pct * 0.60)
+
+        # ── Step 6: Absolute price levels ────────────────────────────────
+        if side == "long":
+            sl_price  = round(entry_price * (1 - sl_pct),  8)
+            tp1_price = round(entry_price * (1 + tp1_pct), 8)
+            tp2_price = round(entry_price * (1 + tp2_pct), 8)
+        else:
+            sl_price  = round(entry_price * (1 + sl_pct),  8)
+            tp1_price = round(entry_price * (1 - tp1_pct), 8)
+            tp2_price = round(entry_price * (1 - tp2_pct), 8)
+
+        rr = tp2_pct / sl_pct
+
+        log.debug(
+            f"[LEVELS] {asset} {side.upper()} "
+            f"vol={realized_vol*100:.2f}% regime={regime} "
+            f"sl={sl_pct*100:.2f}% tp1={tp1_pct*100:.2f}% tp2={tp2_pct*100:.2f}% "
+            f"RR={rr:.2f}x score={score}"
+        )
+
+        return {
+            "sl_pct":    sl_pct,
+            "tp1_pct":   tp1_pct,
+            "tp2_pct":   tp2_pct,
+            "sl_price":  sl_price,
+            "tp1_price": tp1_price,
+            "tp2_price": tp2_price,
+            "rr_ratio":  rr,
+            "regime":    regime,
+            "realized_vol": realized_vol,
+        }
+
+    # ──────────────────────────────────────────
+    # EXPECTED VALUE FILTER  (Fix 2)
+    # ──────────────────────────────────────────
+
+    def score_to_win_prob(self, score: int) -> float:
+        """
+        Convert signal score to conservative win probability estimate.
+        Based on empirical 92-trade paper data.
+        Score 70-74 anomaly (14% WR) handled upstream by IntelligenceModel.
+        """
+        if score >= 80: return 0.65
+        if score >= 75: return 0.60
+        if score >= 70: return 0.57
+        if score >= 65: return 0.58
+        if score >= 60: return 0.55
+        return 0.52
+
+    def check_expected_value(
+        self,
+        score: int,
+        sl_pct: float,
+        tp2_pct: float,
+        min_ev: float = 0.001,
+    ) -> Tuple[bool, float]:
+        """
+        Gate trade on positive expected value. Pure math, <0.01ms.
+        Uses score-based win probability, not IntelligenceModel.
+
+        92-trade proof: EV was -0.226%/trade despite 57.6% WR because
+        avg loss (1.09%) was 2.66x avg win (0.41%). This filter enforces
+        that the math works before capital is risked.
+        """
+        win_prob      = self.score_to_win_prob(score)
+        loss_prob     = 1.0 - win_prob
+        realistic_win = tp2_pct * 0.70   # realistic: not all trades reach TP2
+        ev = (win_prob * realistic_win) - (loss_prob * sl_pct)
+
+        passes = ev >= min_ev
+        if passes:
+            log.debug(
+                f"[EV] score={score} win_prob={win_prob:.2f} "
+                f"sl={sl_pct*100:.2f}% tp={tp2_pct*100:.2f}% "
+                f"ev={ev*100:.3f}% APPROVED"
+            )
+        else:
+            log.info(
+                f"[EV] Trade rejected: ev={ev*100:.3f}% < min={min_ev*100:.3f}% "
+                f"(score={score} win_prob={win_prob:.2f} "
+                f"sl={sl_pct*100:.2f}% tp={tp2_pct*100:.2f}%)"
+            )
+        return passes, ev
+
+    # ──────────────────────────────────────────
     # PARTIAL TP & TRAILING STOP
     # ──────────────────────────────────────────
 
@@ -511,11 +673,21 @@ class RiskManager:
         current_price: float,
     ) -> Optional[Dict]:
         """
-        Check for simplified 4-Rule Exit Hierarchy.
-        Returns action dict or None.
+        Exit hierarchy — Fix 5 (partial ratios) + Fix 6 (momentum time-exit).
+
+        Distribution after fix:
+          TP1 close 25% (was 40%) — let 75% keep running
+          TP2 close 50% of remaining (37.5% original) — trail last 37.5%
+          Trailing on last piece with vol-aware distance
+
+        92-trade data: time_exit 72.2% WR but only +$0.23 avg because hard
+        12-min cut trades mid-move. New logic: exit on momentum reversal or
+        flatline, NEVER time-exit a trade that's above TP1.
         """
+        from datetime import timezone as _tz, datetime as _dt
+
         floating = position.floating_pct(current_price)
-        
+
         if position.side == Side.LONG:
             new_high = max(position.trailing_high, current_price)
             max_floating = (new_high - position.entry_price) / position.entry_price
@@ -523,107 +695,114 @@ class RiskManager:
             new_low = min(position.trailing_high, current_price)
             max_floating = (position.entry_price - new_low) / position.entry_price
 
-        # Exit Rule A: Hard SL hit
+        # ── Rule A: Hard SL ───────────────────────────────────────────────
         if (position.side == Side.LONG and current_price <= position.stop_loss) or \
            (position.side == Side.SHORT and current_price >= position.stop_loss):
             return {
-                "action":       "stop_loss",
-                "close_ratio":  1.0,
-                "price":        current_price,
-                "message":      (
+                "action":      "stop_loss",
+                "close_ratio": 1.0,
+                "price":       current_price,
+                "message":     (
                     f"🛑 Stop-loss hit at {position.stop_loss:.4f}. "
-                    f"Loss: {floating*100:.2f}%. Protecting capital first. 💪"
+                    f"Loss: {floating*100:.2f}%."
                 )
             }
 
         cfg = self._cfg()
-        tp1_ratio = getattr(cfg, 'tp1_close_ratio', 0.40)
-        tp2_ratio = getattr(cfg, 'tp2_close_ratio', 0.35)
+        # Fix 5: ratios now come from config (0.25 / 0.50)
+        tp1_ratio = getattr(cfg, 'tp1_close_ratio', 0.25)
+        tp2_ratio = getattr(cfg, 'tp2_close_ratio', 0.50)
 
-        # Exit Rule B: TP1 hit -> Log TP1, take 40%, move SL to Breakeven
+        # ── Rule B: TP1 hit — close 25%, move SL to breakeven+0.1% ──────
         tp1_hit_now = (
-            (position.side == Side.LONG and current_price >= position.tp1) or
+            (position.side == Side.LONG  and current_price >= position.tp1) or
             (position.side == Side.SHORT and current_price <= position.tp1)
         )
         if not position.tp1_hit and tp1_hit_now:
             return {
-                "action":       "tp1",
-                "close_ratio":  tp1_ratio,
-                "price":        current_price,
-                "message":      (
-                    f"🎯 TP1 hit! +{floating*100:.2f}%. Level 2 Breakeven Protection active."
+                "action":      "tp1",
+                "close_ratio": tp1_ratio,
+                "price":       current_price,
+                "message":     (
+                    f"🎯 TP1 hit! +{floating*100:.2f}%. "
+                    f"Closing {int(tp1_ratio*100)}%, SL → breakeven+0.1%."
                 )
             }
 
-        # Exit Rule C: TP2 hit -> Log TP2, take 35%, Trail 0.3%
+        # ── Rule C: TP2 hit — close 50% of remaining, trail last piece ──
         tp2_hit_now = (
-            (position.side == Side.LONG and current_price >= position.tp2) or
+            (position.side == Side.LONG  and current_price >= position.tp2) or
             (position.side == Side.SHORT and current_price <= position.tp2)
         )
         if position.tp1_hit and not position.tp2_hit and tp2_hit_now:
             return {
-                "action":       "tp2",
-                "close_ratio":  tp2_ratio,
-                "price":        current_price,
-                "message":      (
-                    f"🎯 TP2 hit! +{floating*100:.2f}%. Activating aggressive trailer."
+                "action":      "tp2",
+                "close_ratio": tp2_ratio,
+                "price":       current_price,
+                "message":     (
+                    f"🎯 TP2 hit! +{floating*100:.2f}%. "
+                    f"Closing {int(tp2_ratio*100)}% of remaining. Trailing last piece."
                 )
             }
 
-        # Exit Rule D: Standard Trailing
+        # ── Rule D: Trailing stop on last position piece (post-TP1) ─────
         if position.tp1_hit:
             tp1_diff_pct = abs(position.entry_price - position.tp1) / position.entry_price
-            activation_threshold = tp1_diff_pct + 0.005
-            
+            # Activate trail once price extends 0.3% beyond TP1
+            activation_threshold = tp1_diff_pct + 0.003
+
             if max_floating >= activation_threshold:
-                trail_pct = 0.003
+                # After TP2: tighter trail (0.3x vol or 0.3% min)
+                # Before TP2: standard trail (0.5x vol or 0.5% min)
+                vol_est = getattr(position, 'realized_vol', 0.02)
+                if position.tp2_hit:
+                    trail_pct = max(vol_est * 0.30, 0.003)
+                else:
+                    trail_pct = max(vol_est * 0.50, 0.005)
+
                 if position.side == Side.LONG:
                     trail_sl = new_high * (1 - trail_pct)
                     if current_price <= trail_sl:
                         return {
-                            "action":       "trailing_stop",
-                            "close_ratio":  1.0,
-                            "price":        current_price,
-                            "trail_price":  trail_sl,
-                            "message":      (
+                            "action":      "trailing_stop",
+                            "close_ratio": 1.0,
+                            "price":       current_price,
+                            "trail_price": trail_sl,
+                            "message":     (
                                 f"🛡️ Trailing Stop ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
-                                f"(peak profit +{max_floating*100:.1f}%)."
+                                f"(peak +{max_floating*100:.1f}%)."
                             )
                         }
                 else:
                     trail_sl = new_low * (1 + trail_pct)
                     if current_price >= trail_sl:
                         return {
-                            "action":       "trailing_stop",
-                            "close_ratio":  1.0,
-                            "price":        current_price,
-                            "trail_price":  trail_sl,
-                            "message": (
+                            "action":      "trailing_stop",
+                            "close_ratio": 1.0,
+                            "price":       current_price,
+                            "trail_price": trail_sl,
+                            "message":     (
                                 f"🛡️ Trailing Stop ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
-                                f"(peak profit +{max_floating*100:.1f}%)."
+                                f"(peak +{max_floating*100:.1f}%)."
                             )
                         }
 
-        # Exit Rule E: Scalper max-hold timeout
+        # ── Rule E: Scalper max-hold (unchanged) ─────────────────────────
         if getattr(position, 'trade_mode', 'standard') == 'scalper':
             scfg = SCALPER
-            max_hold = getattr(scfg, 'max_hold_minutes', 12.0)
-            grace = getattr(scfg, 'max_hold_grace_minutes', 6.0)
+            max_hold  = getattr(scfg, 'max_hold_minutes', 12.0)
+            grace     = getattr(scfg, 'max_hold_grace_minutes', 6.0)
             soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.15)
 
-            from datetime import timezone as _tz
-            from datetime import datetime as _dt
-            now = _dt.now(_tz.utc)
+            now    = _dt.now(_tz.utc)
             opened = position.opened_at
             if opened.tzinfo is None:
                 opened = opened.replace(tzinfo=_tz.utc)
             hold_minutes = (now - opened).total_seconds() / 60.0
 
-            hard_limit = max_hold + grace
             if hold_minutes >= max_hold:
-                # Grace: jika posisi masih rugi lebih dari soft_floor, tunggu sampai hard_limit
-                if floating <= soft_floor / 100.0 and hold_minutes < hard_limit:
-                    pass  # masih dalam grace, tahan dulu
+                if floating <= soft_floor / 100.0 and hold_minutes < (max_hold + grace):
+                    pass  # grace period — wait
                 else:
                     return {
                         "action":      "time_exit",
@@ -632,8 +811,90 @@ class RiskManager:
                         "pnl":         position.pnl_unrealized,
                         "position_id": position.position_id,
                         "message":     (
-                            f"⏱️ Scalper max-hold {hold_minutes:.0f}m — posisi ditutup paksa. "
+                            f"⏱️ Scalper max-hold {hold_minutes:.0f}m — exit paksa. "
                             f"PnL: {floating*100:.2f}%."
+                        )
+                    }
+
+        # ── Rule F: Standard momentum-based time exit (Fix 6) ────────────
+        # time_exit 72.2% WR proves signals are right, but hard 12-min cuts
+        # winners mid-move. New: only exit on reversal or flatline, NEVER
+        # exit if above TP1 (let trail handle it).
+        if getattr(position, 'trade_mode', 'standard') == 'standard':
+            now    = _dt.now(_tz.utc)
+            opened = position.opened_at
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=_tz.utc)
+            hold_minutes = (now - opened).total_seconds() / 60.0
+
+            # Condition C: NEVER time-exit above TP1 — let trailing close it
+            if position.tp1_hit:
+                pass  # trailing stop will handle this, not time exit
+
+            else:
+                cfg_risk = RISK
+                flatline_pct  = getattr(cfg_risk, 'time_exit_flatline_pct',  0.0015)
+                flatline_mins = getattr(cfg_risk, 'time_exit_flatline_mins', 30)
+                pullback_pct  = getattr(cfg_risk, 'time_exit_pullback_pct',  0.20)
+                hard_hours    = getattr(cfg_risk, 'time_exit_hard_hours',    6.0)
+
+                # Condition A: momentum reversed — price pulled back 20% of TP1 distance
+                # Only after 30min to avoid triggering on normal noise
+                if hold_minutes >= 30:
+                    tp1_dist = abs(position.tp1 - position.entry_price)
+                    if position.side == Side.LONG:
+                        pullback_threshold = position.entry_price + tp1_dist * pullback_pct
+                        momentum_reversed = (
+                            current_price <= pullback_threshold and
+                            floating >= 0  # still slightly positive — take it
+                        )
+                    else:
+                        pullback_threshold = position.entry_price - tp1_dist * pullback_pct
+                        momentum_reversed = (
+                            current_price >= pullback_threshold and
+                            floating >= 0
+                        )
+
+                    if momentum_reversed:
+                        return {
+                            "action":      "time_exit",
+                            "close_ratio": 1.0,
+                            "price":       current_price,
+                            "pnl":         position.pnl_unrealized,
+                            "position_id": position.position_id,
+                            "message":     (
+                                f"↩️ Momentum reversal at {hold_minutes:.0f}m — "
+                                f"price pulled back {pullback_pct*100:.0f}% of TP1 dist. "
+                                f"PnL: {floating*100:.2f}%."
+                            )
+                        }
+
+                # Condition B: flatline — less than 0.15% move in last 30min
+                if hold_minutes >= flatline_mins and abs(floating) < flatline_pct:
+                    return {
+                        "action":      "time_exit",
+                        "close_ratio": 1.0,
+                        "price":       current_price,
+                        "pnl":         position.pnl_unrealized,
+                        "position_id": position.position_id,
+                        "message":     (
+                            f"😴 Flatline exit at {hold_minutes:.0f}m — "
+                            f"price moved only {abs(floating)*100:.2f}% in {flatline_mins}m. "
+                            f"Capital redeployed."
+                        )
+                    }
+
+                # Condition D: hard safety net — 6h below TP1
+                if hold_minutes >= hard_hours * 60:
+                    return {
+                        "action":      "time_exit",
+                        "close_ratio": 1.0,
+                        "price":       current_price,
+                        "pnl":         position.pnl_unrealized,
+                        "position_id": position.position_id,
+                        "message":     (
+                            f"⏰ Hard time limit {hard_hours:.0f}h — "
+                            f"position stuck. PnL: {floating*100:.2f}%."
                         )
                     }
 

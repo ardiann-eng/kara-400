@@ -156,15 +156,21 @@ class RiskConfig:
     small_cap_tp2_pct:         float = 0.015       # 1.5%
     vol_tp_multiplier:         float = 0.80        # 20% reduction for high vol
 
-    # Partial TP ratios
-    tp1_close_ratio:         float = 0.40
-    tp2_close_ratio:         float = 0.35
+    # Partial TP ratios  (Fix 5: close less at TP1, let winners run)
+    tp1_close_ratio:         float = 0.25     # was 0.40 — close only 25% at TP1
+    tp2_close_ratio:         float = 0.50     # 50% of remaining (37.5% of original)
     # ATR-Based (Opsi B) Calibration
     enable_atr_sl:           bool  = True     # Use volatility-based SL
     atr_multiplier:          float = 2.0      # ATR lookback buffer
     atr_lookback:            int   = 14       # candles for calculation
-    
-    # remaining 25% uses trailing stop
+
+    # Momentum-based time exit thresholds (Fix 6)
+    time_exit_pullback_pct:  float = 0.20     # if price retraces 20% of TP1 distance, exit
+    time_exit_flatline_pct:  float = 0.0015   # < 0.15% move in 30min = dead market
+    time_exit_flatline_mins: int   = 30       # window for flatline check
+    time_exit_hard_hours:    float = 6.0      # safety net: force-exit after 6h below TP1
+
+    # remaining 37.5% uses trailing stop
 
 RISK = RiskConfig()
 
@@ -281,7 +287,7 @@ class SignalConfig:
 
     # Meta-Scoring (Outcome-based learning)
     meta_learning_enabled:   bool = True
-    meta_min_samples:        int = 5          # need at least 5 trades to trust winrate
+    meta_min_samples:        int = 3          # need at least 3 trades to trust winrate
     meta_boost_threshold:    float = 0.62     # winrate > 62% = +8 pts
     meta_penalty_threshold:  float = 0.40     # winrate < 40% = -12 pts
     meta_max_delta:          int = 15         # absolute max cap for adj

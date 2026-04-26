@@ -165,77 +165,6 @@ class KaraBot:
             return True
         return False
 
-    def _bucket_component(self, x: float) -> str:
-        if x >= 10:
-            return "pos"
-        if x <= -10:
-            return "neg"
-        return "neu"
-
-    def _build_meta_pattern_key(self, signal, user_mode: str) -> str:
-        bd = getattr(signal, "breakdown", None)
-        oi = float(getattr(bd, "oi_funding_score", 0) or 0)
-        ob = float(getattr(bd, "orderbook_score", 0) or 0)
-        liq = float(getattr(bd, "liquidation_score", 0) or 0)
-        ses = int(getattr(bd, "session_bonus", 0) or 0)
-        regime = getattr(getattr(signal, "regime", None), "value", "unknown")
-        side = getattr(getattr(signal, "side", None), "value", "long")
-
-        if ses >= int(config.SIGNAL.ny_session_bonus):
-            ses_tag = "ny"
-        elif ses > 0:
-            ses_tag = "lon"
-        elif ses < 0:
-            ses_tag = "asia"
-        else:
-            ses_tag = "off"
-
-        return (
-            f"m:{user_mode}|r:{regime}|s:{ses_tag}|"
-            f"oi:{self._bucket_component(oi)}|"
-            f"ob:{self._bucket_component(ob)}|"
-            f"liq:{self._bucket_component(liq)}|"
-            f"side:{side}"
-        )
-
-    def _apply_meta_score_delta(self, signal, user_mode: str) -> int:
-        """
-        Boost/penalize score from rolling pattern winrate.
-        Conservative and bounded to avoid overfitting.
-        """
-        key = self._build_meta_pattern_key(signal, user_mode)
-        signal.meta_pattern_key = key
-        stats = user_db.get_meta_pattern_stats(key)
-        if not stats:
-            signal.meta_score_delta = 0
-            return 0
-
-        samples = int(stats.get("samples", 0))
-        winrate = float(stats.get("winrate_ema", 0.5))
-        pnl_ema = float(stats.get("pnl_ema", 0.0))
-
-        # Need enough observations before affecting score materially.
-        if samples < 8:
-            signal.meta_score_delta = 0
-            return 0
-
-        # Core signal from winrate around 50%; bounded to [-6, +6].
-        delta = int(round((winrate - 0.5) * 20))
-        if pnl_ema < 0:
-            delta -= 1
-        elif pnl_ema > 0:
-            delta += 1
-        delta = max(-6, min(6, delta))
-
-        signal.meta_score_delta = delta
-        signal.score = max(0, min(100, int(signal.score + delta)))
-
-        # Keep explanation visible in saved signal detail.
-        if getattr(signal, "breakdown", None) and hasattr(signal.breakdown, "warnings"):
-            signal.breakdown.warnings.append(
-                f"Meta-score delta {delta:+d} (wr={winrate:.2f}, n={samples})"
-            )
-        return delta
 
 
     # ──────────────────────────────────────────
@@ -419,6 +348,17 @@ class KaraBot:
 
         self._running = True
 
+        # ── Session diagnostic log ──────────────────────────────────────
+        _sess_bonus, _sess_reasons = self.scorer._get_session_bonus()
+        from datetime import datetime as _dt, timezone as _tz
+        _hour = _dt.now(_tz.utc).hour
+        log.info(
+            f"[SESSION] Startup: UTC hour={_hour:02d}  "
+            f"London({SIGNAL.london_start_utc}-{SIGNAL.london_end_utc} UTC)  "
+            f"NY({SIGNAL.ny_session_start_utc}-{SIGNAL.ny_session_end_utc} UTC)  "
+            f"Current bonus={_sess_bonus:+d}  Reasons: {', '.join(_sess_reasons) or 'none'}"
+        )
+
         # Start Snapshot Loop (Phase 2: History Tracking)
         asyncio.create_task(self._snapshot_loop())
 
@@ -459,7 +399,9 @@ class KaraBot:
             if (i + 1) % 25 == 0:
                 log.info(f"   📡 WS progress: {i+1}/{len(self.watched_assets)} assets subscribed")
 
+        log.info("[WS] Subscribing to liquidations channel...")
         await self.ws_client.subscribe_liquidations()
+        log.info("[WS] Liquidation subscription sent (events will appear in debug log when received)")
 
         if config.WALLET_ADDRESS:
             await self.ws_client.subscribe_user_events(config.WALLET_ADDRESS)
@@ -646,14 +588,25 @@ class KaraBot:
 
     async def _scan_all_assets(self):
         """Perform scoring scan on all watched assets in parallel, mode-aware."""
+        scan_start = time.monotonic()
         log.info(f" 🔍 Scanning {len(self.watched_assets)} markets (parallel)...")
-        
+
         try:
             # 1. Fetch batch meta data once for all assets
             await self.hl_client.refresh_market_cache(force=True)
             all_meta = await self.hl_client.get_all_market_data()
+
+            # ── HEALTH CHECK: abort early if cache is completely empty ──────
             if not all_meta:
-                log.warning(" Could not fetch batch metadata, will fallback to individual requests")
+                log.error(
+                    "[SCAN] ABORTED — market cache is empty after refresh. "
+                    "Hyperliquid API may be down or returning bad data. "
+                    "Skipping this scan cycle, will retry next interval."
+                )
+                return
+
+            cached_asset_count = len(all_meta[0]) if all_meta else 0
+            log.debug(f"[SCAN] Cache OK: {cached_asset_count} assets in ctx")
 
             # Gather active modes across all authorized users
             target_ids = list(self.telegram._authorized_chat_ids)
@@ -662,52 +615,50 @@ class KaraBot:
                 session = await self.get_session(cid)
                 if session and session.user and hasattr(session.user.config, 'trading_mode'):
                     active_modes.add(session.user.config.trading_mode)
-            
-            # If no authorized users use the bot yet, default to standard to keep cache warm
+
+            # If no authorized users yet, default to standard to keep cache warm
             if not active_modes:
                 active_modes.add("standard")
-                
+
             active_modes_list = list(active_modes)
 
             # 2. Parallel scan with Semaphore(5)
             max_score = 0
             sig_count = 0
-            top_scorers = [] # List of (asset, score)
-            
+            scored_count = 0
+            top_scorers = []  # List of (asset, score)
+
             async def _scan_one(asset, scalper_only=False):
-                nonlocal max_score, sig_count
+                nonlocal max_score, sig_count, scored_count
                 async with self.scan_sem:
                     try:
-                        # Scalper-only assets (SCALPER_ASSETS) only run scalper engine
                         modes_for_asset = ["scalper"] if scalper_only else active_modes_list
-                        # ScoringEngine returns Tuple[Dict[str, TradeSignal], int]
-                        signals_dict, asset_max_score = await self.scorer.run_asset(asset, active_modes=modes_for_asset, meta_data=all_meta)
-                        
-                        # Track signals
+                        signals_dict, asset_max_score = await self.scorer.run_asset(
+                            asset, active_modes=modes_for_asset, meta_data=all_meta
+                        )
+
                         if signals_dict:
                             sig_count += len(signals_dict)
                             await self._handle_signals(signals_dict)
-                        
-                        # Track highest score regardless of signal
+
                         if asset_max_score > 0:
+                            scored_count += 1
                             top_scorers.append((asset, asset_max_score))
                             if asset_max_score > max_score:
                                 max_score = asset_max_score
-                            
-                            # Update RiskManagers
+
                             for cid in target_ids:
                                 session = await self.get_session(cid)
                                 if session:
                                     session.risk_mgr.update_score(asset, asset_max_score)
-                            
+
                     except Exception as e:
-                        # Log errors but don't stop the whole scan
                         if "429" in str(e):
                             log.debug(f" ⚠️ Rate limited on {asset}")
                         else:
                             log.error(f" ❌ Scan error for {asset}: {e}")
 
-            # Determine assets to scan: base watched + scalper-specific if scalper mode active
+            # Determine assets to scan
             assets_to_scan = list(self.watched_assets)
             scalper_only_assets = []
             if "scalper" in active_modes:
@@ -718,19 +669,28 @@ class KaraBot:
 
             tasks = [_scan_one(asset, scalper_only=(asset in scalper_only_assets)) for asset in assets_to_scan]
             await asyncio.gather(*tasks)
-            
-            # Sort and format top scorers for the user
+
+            scan_elapsed = time.monotonic() - scan_start
+
+            # ── ANOMALY DETECTION ─────────────────────────────────────────
+            total_scanned = len(assets_to_scan)
+            if scored_count == 0 and total_scanned > 0:
+                log.error(
+                    f"[SCAN] ANOMALY: 0/{total_scanned} assets scored in {scan_elapsed:.1f}s "
+                    f"(expected 4-8s). Cache has {cached_asset_count} assets. "
+                    f"Check [PRICE] warnings above for root cause."
+                )
+
             top_scorers.sort(key=lambda x: x[1], reverse=True)
             top_str = ", ".join([f"{a}:{s}" for a, s in top_scorers[:5]])
-            total_scanned = len(assets_to_scan)
             scalper_extra = len(scalper_only_assets)
-            
-            # Smart log: If top score is still low, be honest but show we are alive
+
             log.info(
                 f" 🏁 Scan complete: {total_scanned} markets "
                 f"({len(self.watched_assets)} standard"
                 f"{f' + {scalper_extra} scalper-only' if scalper_extra else ''}). "
-                f"Signals: {sig_count} | Top: [{top_str or 'None'}]"
+                f"Signals: {sig_count} | Scored: {scored_count} | "
+                f"Top: [{top_str or 'None'}] | {scan_elapsed:.1f}s"
             )
             
             # Persist OI snapshots to prevent amnesia
@@ -832,15 +792,63 @@ class KaraBot:
                     if candles:
                         atr_value = session.risk_mgr.calculate_atr(candles)
                         if atr_value > 0:
-                            log.info(f"📐 [ATR-SL] Calculated for {user_signal.asset}: {atr_value:.6f}")
+                            log.info(f"📐 [ATR-SL] Calculated for {user_signal.asset}: daily_vol={atr_value*100:.3f}% sl_pct={max(atr_value * config.RISK.atr_multiplier, config.RISK.default_sl_pct)*100:.3f}%")
                     else:
                         log.warning(f"⚠️  [ATR] No candles returned for {user_signal.asset}, using fixed SL.")
                 except Exception as e:
                     log.error(f"Failed to calculate dynamic ATR for {user_signal.asset}: {e}")
                 
             user_signal.localize_for_user(user_mode, atr_value=atr_value)
-            self._apply_meta_score_delta(user_signal, user_mode)
-            
+
+            # ── Vol-aware SL/TP recalculation (Fix 1 + Fix 4) ────────────────
+            # calculate_levels() pakai vol_cache dari scorer — zero API calls.
+            # Override stop_loss/tp1/tp2 yang diset oleh localize_for_user()
+            # dengan level yang sudah mempertimbangkan regime + session + RR.
+            # Hanya untuk standard mode; scalper pakai fixed levels karena
+            # hold time 12 menit tidak butuh vol-based SL.
+            if user_mode != 'scalper':
+                try:
+                    levels = session.risk_mgr.calculate_levels(
+                        asset=user_signal.asset,
+                        side=user_signal.side.value,
+                        entry_price=user_signal.entry_price,
+                        score=user_signal.score,
+                        vol_cache=self.scorer._vol_cache,
+                    )
+                    user_signal.stop_loss = levels["sl_price"]
+                    user_signal.tp1       = levels["tp1_price"]
+                    user_signal.tp2       = levels["tp2_price"]
+                    # Store realized_vol on signal for trailing stop width
+                    user_signal.realized_vol = levels["realized_vol"]
+                    log.info(
+                        f"[LEVELS] {user_signal.asset} {user_signal.side.value.upper()} "
+                        f"vol={levels['realized_vol']*100:.2f}% regime={levels['regime']} "
+                        f"sl={levels['sl_pct']*100:.2f}% "
+                        f"tp1={levels['tp1_pct']*100:.2f}% "
+                        f"tp2={levels['tp2_pct']*100:.2f}% "
+                        f"RR={levels['rr_ratio']:.2f}x"
+                    )
+                except Exception as _e:
+                    log.warning(f"[LEVELS] {user_signal.asset}: calculate_levels failed ({_e}), keeping localize_for_user levels")
+
+            # ── Expected Value gate (Fix 2) ───────────────────────────────────
+            # Pure arithmetic check sebelum kapital dipakai.
+            # Bukti 92 trades: EV -0.226%/trade meski WR 57.6% karena RR terbalik.
+            if user_mode != 'scalper':
+                sl_pct_check  = abs(user_signal.entry_price - user_signal.stop_loss) / user_signal.entry_price
+                tp2_pct_check = abs(user_signal.tp2 - user_signal.entry_price) / user_signal.entry_price
+                ev_ok, ev_val = session.risk_mgr.check_expected_value(
+                    score=user_signal.score,
+                    sl_pct=sl_pct_check,
+                    tp2_pct=tp2_pct_check,
+                )
+                if not ev_ok:
+                    log.info(
+                        f"⛔ [EV_BLOCKED] {user_signal.asset} score={user_signal.score} "
+                        f"ev={ev_val*100:.3f}% — mathematical EV negative, skip"
+                    )
+                    continue
+
             acc = await session.get_account_state()
 
             # Full-auto only behavior requested:
@@ -849,7 +857,7 @@ class KaraBot:
             effective_auto_threshold = auto_threshold
             if user_signal.score < effective_auto_threshold:
                 continue
-            
+
             # Enrich signal with position sizing for THIS user
             size_usd, contracts, actual_lev = session.risk_mgr.calculate_position_size(
                 user_signal, acc.total_equity
@@ -863,9 +871,8 @@ class KaraBot:
                 approved, reason = session.risk_mgr.pre_trade_check(
                     user_signal, acc, session.executor.open_positions
                 )
-                
+
                 if not approved:
-                    # FULL_AUTO policy: do not notify non-executed signals.
                     log.info(
                         f"⛔ [AUTO_BLOCKED] user={chat_id} mode={user_mode} asset={user_signal.asset} "
                         f"score={user_signal.score} auto_threshold={effective_auto_threshold} reason={reason}"

@@ -257,8 +257,9 @@ class ScoringEngine:
                 if sig and (now_ts - last_ts >= cooldown_secs):
                     signals["scalper"] = sig
                     self._last_signal_ts[f"{asset}_scalper"] = now_ts
+                    log.info(f"⚡ SCALPER SIGNAL: {asset} {sig.side.value.upper()} score={score_scl} (Meta: {getattr(sig, 'meta_score_delta', 0):+d})")
                 elif sig:
-                    log.debug(f"{asset} [SCALPER]: cooldown active")
+                    log.debug(f"{asset} [SCALPER]: cooldown active (score={score_scl} blocked)")
             except RuntimeError as e:
                 if "backoff" in str(e):
                     log.debug(f"[SCAN] {asset}: skipped (API backoff)")
@@ -363,8 +364,6 @@ class ScoringEngine:
         signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol)
         signal.meta_pattern_key = pattern_key
         signal.meta_score_delta = meta_delta
-        
-        log.info(f"⚡ SCALPER SIGNAL: {asset} {side.value.upper()} score={score} (Meta: {meta_delta:+d})")
         return signal, score
 
     async def _fetch_scalper_mtf_candles(self, asset: str) -> list:
@@ -892,8 +891,10 @@ class ScoringEngine:
         )
 
         # Step 2: Liquidation map (pass funding_rate for OI proxy tilting)
+        # oi.open_interest adalah dalam contracts — konversi ke USD dulu
+        oi_usd = oi.open_interest * mark_price
         liq_bull, liq_bear, liq_reasons, liq_warns, liq_map = self.liq_analyzer.analyze(
-            asset, mark_price, recent_liqs, oi.open_interest,
+            asset, mark_price, recent_liqs, oi_usd,
             funding_rate=funding.funding_rate
         )
 
@@ -1144,7 +1145,7 @@ class ScoringEngine:
         signal = self._build_signal(
             asset, side, final_score, log_regime, breakdown, mark_price,
             realized_vol=realized_vol,
-            oi_usd=oi.open_interest
+            oi_usd=oi_usd
         )
 
         return signal, final_score
@@ -1276,7 +1277,8 @@ class ScoringEngine:
 
     def _get_session_bonus(self):
         """Apply trading session bonus/penalty based on UTC hour."""
-        hour = datetime.now(timezone.utc).hour
+        now_utc = datetime.now(timezone.utc)
+        hour = now_utc.hour
         ny_start = SIGNAL.ny_session_start_utc
         ny_end   = SIGNAL.ny_session_end_utc
         lon_start= SIGNAL.london_start_utc
@@ -1285,7 +1287,7 @@ class ScoringEngine:
         score = 0
         reasons = []
 
-        is_ny = ny_start <= hour < ny_end
+        is_ny  = ny_start  <= hour < ny_end
         is_lon = lon_start <= hour < lon_end
 
         if is_ny:
@@ -1303,6 +1305,11 @@ class ScoringEngine:
             else:
                 reasons.append("⏰ Off-session neutral")
 
+        log.debug(
+            f"[SESSION] UTC={now_utc.strftime('%H:%M')} hour={hour} "
+            f"London={is_lon}({lon_start}-{lon_end}) NY={is_ny}({ny_start}-{ny_end}) "
+            f"bonus={score:+d}"
+        )
         return score, reasons
 
     # ──────────────────────────────────────────

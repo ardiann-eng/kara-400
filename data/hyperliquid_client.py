@@ -198,6 +198,14 @@ class HyperliquidClient:
         if now_mono < self._api_backoff_until:
             wait = self._api_backoff_until - now_mono
             raise RuntimeError(f"API in backoff for {wait:.0f}s (too many 502s)")
+        elif self._consecutive_502s > 0 and now_mono >= self._api_backoff_until:
+            # Backoff window expired — auto-reset so API calls can resume
+            log.info(
+                f"[API] Circuit breaker auto-reset after backoff "
+                f"(was {self._consecutive_502s} consecutive 502s)"
+            )
+            self._consecutive_502s = 0
+            self._api_backoff_until = 0.0
 
         try:
             log.debug(f"[API] POST /info - type={request_type} throttled={throttled}")
@@ -292,34 +300,63 @@ class HyperliquidClient:
             return {}, False
 
     async def refresh_market_cache(self, force: bool = False):
-        """Fetch all market data batch and populate cache (10s TTL)."""
+        """Fetch all market data batch and populate cache (30s TTL).
+
+        CRITICAL: jika fetch gagal, cache LAMA tetap dipertahankan (jangan di-clear).
+        Ini mencegah semua asset return None hanya karena 1 API call gagal.
+        """
         import time
         now = time.monotonic()
         if not force and (now - self._market_cache_time) < 30 and self._market_cache:
             return
-            
+
         data = await self.get_get_all_market_data_raw()
         if data:
+            prev_count = len(self._market_cache[0]) if self._market_cache else 0
             self._market_cache = data
             self._market_cache_time = now
-            log.debug(f"✓ Refreshed market data cache ({len(data[0])} assets)")
+            log.debug(f"✓ Refreshed market data cache ({len(data[0])} assets, was {prev_count})")
+        else:
+            # Fetch gagal — pertahankan cache lama, jangan set ke None/{}
+            cache_age = now - self._market_cache_time
+            cached_count = len(self._market_cache[0]) if self._market_cache else 0
+            if cached_count > 0:
+                log.warning(
+                    f"[CTX] metaAndAssetCtxs fetch FAILED — "
+                    f"using stale cache ({cached_count} assets, age={cache_age:.0f}s)"
+                )
+            else:
+                log.error(
+                    "[CTX] metaAndAssetCtxs fetch FAILED and cache is EMPTY — "
+                    "all assets will return price=0 this scan"
+                )
 
     async def get_get_all_market_data_raw(self) -> Optional[Tuple[List, List]]:
         """Fetch all metadata and contexts in ONE call and return (universe, contexts)."""
         try:
             result, success = await self._call_info_endpoint("metaAndAssetCtxs")
             if not success:
+                log.warning("[CTX] metaAndAssetCtxs: API call returned success=False")
                 return None
-                
+
             if isinstance(result, list) and len(result) >= 2:
-                # metaAndAssetCtxs returns [meta, assetCtxs]
-                # meta contains "universe"
                 universe = result[0].get("universe", []) if isinstance(result[0], dict) else []
                 contexts = result[1]
+                if not universe or not contexts:
+                    log.warning(
+                        f"[CTX] metaAndAssetCtxs: empty universe={len(universe)} "
+                        f"or contexts={len(contexts)}"
+                    )
+                    return None
                 return (universe, contexts)
+
+            log.warning(
+                f"[CTX] metaAndAssetCtxs: unexpected response type={type(result).__name__} "
+                f"len={len(result) if isinstance(result, list) else 'N/A'}"
+            )
             return None
         except Exception as e:
-            log.error(f"get_all_market_data_raw failed: {e}")
+            log.error(f"[CTX] get_all_market_data_raw failed: {e}")
             return None
 
     async def get_all_market_data(self) -> Optional[Tuple[List, List]]:
@@ -771,6 +808,13 @@ class HyperliquidClient:
             px = float(ctx.get("markPx", 0))
             if px > 0:
                 return px
+            log.warning(f"[PRICE] {asset}: markPx=0 in ctx (ctx keys: {list(ctx.keys())[:5]})")
+        else:
+            cached_count = len(self._market_cache[0]) if self._market_cache else 0
+            log.warning(
+                f"[PRICE] {asset}: no ctx found — "
+                f"cache has {cached_count} assets, meta={'yes' if meta else 'no'}"
+            )
 
         return 0.0
 
