@@ -232,6 +232,7 @@ class ScoringEngine:
     async def run_asset(self, asset: str, active_modes: List[str] = None, meta_data=None) -> Tuple[Dict[str, TradeSignal], int]:
         """
         Run full scoring pipeline for one asset.
+        Returns -1 as max_score if ALL active modes were blocked by schedule.
         """
         import config
         if active_modes is None:
@@ -239,6 +240,7 @@ class ScoringEngine:
             
         signals = {}
         max_score_found = 0
+        all_mode_scores = []  # track per-mode scores for sentinel propagation
         now_ts = time.monotonic()
 
         # 1. SCALPER MODE
@@ -251,6 +253,7 @@ class ScoringEngine:
 
                 last_ts = self._last_signal_ts.get(f"{asset}_scalper", 0)
                 sig, score_scl = await self._run_scalper(asset, meta_data)
+                all_mode_scores.append(score_scl)
 
                 if score_scl > max_score_found: max_score_found = score_scl
 
@@ -276,6 +279,7 @@ class ScoringEngine:
                 last_ts = self._last_signal_ts.get(f"{asset}_standard", 0)
 
                 sig, score_std = await self._run_standard(asset, meta_data)
+                all_mode_scores.append(score_std)
 
                 if score_std > max_score_found: max_score_found = score_std
 
@@ -289,6 +293,11 @@ class ScoringEngine:
                 log.error(f"Error in standard: {e}")
             except Exception as e:
                 log.error(f"Error in standard: {e}")
+
+        # Propagate blocked-by-schedule sentinel:
+        # If ALL active modes returned -1, this asset was entirely blocked.
+        if all_mode_scores and all(s == -1 for s in all_mode_scores):
+            return signals, -1
 
         return signals, max_score_found
 
@@ -308,7 +317,7 @@ class ScoringEngine:
         current_hour = datetime.now(timezone.utc).hour
         if current_hour in config.BLOCKED_HOURS_UTC:
             log.debug(f"{asset} [SCALPER]: blocked hour {current_hour} UTC (London open spike)")
-            return None, 0
+            return None, -1  # sentinel: blocked by schedule, not an error
 
         # 1. Get mark price
         mark_price = await self.client.get_mark_price(asset, meta=meta_data)
@@ -765,7 +774,7 @@ class ScoringEngine:
         current_hour = datetime.now(timezone.utc).hour
         if current_hour in config.BLOCKED_HOURS_UTC:
             log.debug(f"{asset} [STANDARD]: blocked hour {current_hour} UTC (London open - high spread/spike)")
-            return None, 0
+            return None, -1  # sentinel: blocked by schedule, not an error
 
         # 1. Fetch allMids ONCE per cycle for Spot-Perp basis (cached 10s by client)
         now_mono = time.monotonic()

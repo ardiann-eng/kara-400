@@ -359,12 +359,150 @@ class KaraBot:
             f"Current bonus={_sess_bonus:+d}  Reasons: {', '.join(_sess_reasons) or 'none'}"
         )
 
+        # ── Stale Cache Cleanup ──────────────────────────────────────────
+        await self._clean_stale_cache()
+
+        # ── Startup Self-Test ────────────────────────────────────────────
+        await self._startup_selftest()
+
         # Start Snapshot Loop (Phase 2: History Tracking)
         asyncio.create_task(self._snapshot_loop())
+
+        # ── Blocked hours awareness ──────────────────────────────────────
+        if _hour in config.BLOCKED_HOURS_UTC:
+            log.warning(
+                f"⏸️  Starting during BLOCKED hour (UTC {_hour:02d}). "
+                f"Blocked hours: {config.BLOCKED_HOURS_UTC}. "
+                f"Scanning will resume after hour {max(config.BLOCKED_HOURS_UTC) + 1}:00 UTC."
+            )
 
         # Greeting log
         mode_emoji = "🧪" if config.TRADE_MODE == "paper" else "💰"
         log.info(f"{mode_emoji} KARA is ready! Starting trading loop...")
+
+    # ──────────────────────────────────────────
+    # STARTUP HEALTH CHECKS
+    # ──────────────────────────────────────────
+
+    async def _clean_stale_cache(self):
+        """Remove vol_cache and OI snapshot entries for assets no longer in the Hyperliquid universe."""
+        try:
+            all_meta = await self.hl_client.get_all_market_data()
+            if not all_meta or not isinstance(all_meta, (list, tuple)) or len(all_meta) < 2:
+                log.warning("[CACHE] Could not fetch universe for stale cache cleanup")
+                return
+
+            universe = all_meta[0]
+            valid_names = set()
+            for u in universe:
+                if isinstance(u, dict) and u.get("name"):
+                    valid_names.add(u["name"])
+
+            if len(valid_names) < 50:
+                log.warning(f"[CACHE] Universe too small ({len(valid_names)}), skipping cleanup")
+                return
+
+            # Clean vol_cache in memory
+            stale_vol = [a for a in self.scorer._vol_cache if a not in valid_names]
+            for a in stale_vol:
+                del self.scorer._vol_cache[a]
+
+            # Clean OI snapshots in memory
+            stale_oi = [a for a in self.scorer._oi_snapshots if a not in valid_names]
+            for a in stale_oi:
+                del self.scorer._oi_snapshots[a]
+
+            # Clean vol_cache in SQLite
+            if stale_vol:
+                try:
+                    from core.db import user_db
+                    conn = user_db._get_conn()
+                    cursor = conn.cursor()
+                    placeholders = ",".join("?" * len(valid_names))
+                    cursor.execute(
+                        f"DELETE FROM vol_cache WHERE asset NOT IN ({placeholders})",
+                        list(valid_names)
+                    )
+                    conn.commit()
+                except Exception as e:
+                    log.warning(f"[CACHE] SQLite vol_cache cleanup failed: {e}")
+
+            total_stale = len(stale_vol) + len(stale_oi)
+            if total_stale > 0:
+                log.info(
+                    f"[CACHE] Removed {len(stale_vol)} stale vol_cache + "
+                    f"{len(stale_oi)} stale OI entries. "
+                    f"Universe: {len(valid_names)} assets. "
+                    f"Stale examples: {(stale_vol + stale_oi)[:5]}"
+                )
+            else:
+                log.info(f"[CACHE] Cache is clean — {len(valid_names)} assets in universe")
+
+        except Exception as e:
+            log.warning(f"[CACHE] Stale cache cleanup failed: {e}")
+
+    async def _startup_selftest(self):
+        """Run quick self-test to verify everything works before first scan."""
+        log.info("[SELFTEST] Running startup checks...")
+        issues = []
+
+        # Test 1: Can we get mark price for BTC?
+        try:
+            btc_price = await self.hl_client.get_mark_price("BTC")
+            if btc_price <= 0:
+                issues.append("FAIL: BTC mark price = 0 (API atau ctx broken)")
+            else:
+                log.info(f"[SELFTEST] ✅ BTC price: ${btc_price:,.2f}")
+        except Exception as e:
+            issues.append(f"FAIL: BTC price fetch error: {e}")
+
+        # Test 2: Is market cache populated?
+        try:
+            cache = self.hl_client._market_cache
+            if cache and isinstance(cache, (list, tuple)) and len(cache) >= 2:
+                ctx_size = len(cache[0])
+                if ctx_size < 50:
+                    issues.append(f"FAIL: market cache hanya {ctx_size} assets (expected 100+)")
+                else:
+                    log.info(f"[SELFTEST] ✅ Market cache: {ctx_size} assets")
+            else:
+                issues.append("FAIL: market cache kosong atau format salah")
+        except Exception as e:
+            issues.append(f"FAIL: market cache check error: {e}")
+
+        # Test 3: Is API circuit breaker okay?
+        if self.hl_client._consecutive_502s > 0:
+            issues.append(
+                f"WARN: API circuit breaker has {self.hl_client._consecutive_502s} consecutive 502s"
+            )
+            # Auto-reset on startup
+            self.hl_client._consecutive_502s = 0
+            self.hl_client._api_backoff_until = 0.0
+            log.warning("[SELFTEST] ⚡ API circuit breaker auto-reset on startup")
+
+        # Test 4: Blocked hours check
+        from datetime import datetime as _dt_st, timezone as _tz_st
+        current_hour = _dt_st.now(_tz_st.utc).hour
+        if current_hour in config.BLOCKED_HOURS_UTC:
+            log.info(
+                f"[SELFTEST] ⏸️  Currently in blocked hour (UTC {current_hour:02d}). "
+                f"Scoring will return 0 until hour {max(config.BLOCKED_HOURS_UTC) + 1}."
+            )
+
+        # Report
+        if issues:
+            log.error(f"[SELFTEST] {len(issues)} issue(s) found:")
+            for issue in issues:
+                log.error(f"[SELFTEST]   • {issue}")
+            try:
+                await self.telegram.send_text(
+                    f"⚠️ KARA startup issues ({len(issues)}):\n" +
+                    "\n".join(f"• {i}" for i in issues)
+                )
+            except Exception:
+                pass  # Telegram may not be ready yet
+        else:
+            log.info("[SELFTEST] ✅ All checks passed. Ready to scan.")
 
     # ──────────────────────────────────────────
     # WEBSOCKET SETUP
@@ -626,10 +764,11 @@ class KaraBot:
             max_score = 0
             sig_count = 0
             scored_count = 0
+            blocked_count = 0  # assets blocked by schedule (BLOCKED_HOURS_UTC)
             top_scorers = []  # List of (asset, score)
 
             async def _scan_one(asset, scalper_only=False):
-                nonlocal max_score, sig_count, scored_count
+                nonlocal max_score, sig_count, scored_count, blocked_count
                 async with self.scan_sem:
                     try:
                         modes_for_asset = ["scalper"] if scalper_only else active_modes_list
@@ -641,7 +780,10 @@ class KaraBot:
                             sig_count += len(signals_dict)
                             await self._handle_signals(signals_dict)
 
-                        if asset_max_score > 0:
+                        # Sentinel -1 = blocked by BLOCKED_HOURS_UTC schedule
+                        if asset_max_score == -1:
+                            blocked_count += 1
+                        elif asset_max_score > 0:
                             scored_count += 1
                             top_scorers.append((asset, asset_max_score))
                             if asset_max_score > max_score:
@@ -674,22 +816,37 @@ class KaraBot:
 
             # ── ANOMALY DETECTION ─────────────────────────────────────────
             total_scanned = len(assets_to_scan)
+            from datetime import datetime as _dt_check, timezone as _tz_check
+            _current_utc_hour = _dt_check.now(_tz_check.utc).hour
+
             if scored_count == 0 and total_scanned > 0:
-                log.error(
-                    f"[SCAN] ANOMALY: 0/{total_scanned} assets scored in {scan_elapsed:.1f}s "
-                    f"(expected 4-8s). Cache has {cached_asset_count} assets. "
-                    f"Check [PRICE] warnings above for root cause."
-                )
+                if blocked_count >= total_scanned:
+                    # All assets blocked by schedule — this is EXPECTED, not an anomaly
+                    log.info(
+                        f"⏸️  [SCAN] All {total_scanned} assets blocked by schedule "
+                        f"(UTC hour={_current_utc_hour}, blocked={config.BLOCKED_HOURS_UTC}). "
+                        f"Waiting for trading window to open."
+                    )
+                else:
+                    # Genuine anomaly — 0 scored outside blocked hours
+                    log.error(
+                        f"[SCAN] ANOMALY: 0/{total_scanned} assets scored in {scan_elapsed:.1f}s "
+                        f"(expected 4-8s). Cache has {cached_asset_count} assets. "
+                        f"Blocked={blocked_count}. "
+                        f"Check [PRICE] warnings above for root cause."
+                    )
 
             top_scorers.sort(key=lambda x: x[1], reverse=True)
             top_str = ", ".join([f"{a}:{s}" for a, s in top_scorers[:5]])
             scalper_extra = len(scalper_only_assets)
 
+            # Include blocked info in summary when relevant
+            blocked_info = f" | Blocked: {blocked_count}" if blocked_count > 0 else ""
             log.info(
                 f" 🏁 Scan complete: {total_scanned} markets "
                 f"({len(self.watched_assets)} standard"
                 f"{f' + {scalper_extra} scalper-only' if scalper_extra else ''}). "
-                f"Signals: {sig_count} | Scored: {scored_count} | "
+                f"Signals: {sig_count} | Scored: {scored_count}{blocked_info} | "
                 f"Top: [{top_str or 'None'}] | {scan_elapsed:.1f}s"
             )
             
