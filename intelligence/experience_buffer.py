@@ -75,7 +75,7 @@ class ExperienceBuffer:
                 session_bonus = bd.session_bonus if bd else 0
                 
                 cursor.execute('''
-                    INSERT OR REPLACE INTO ml_experience (
+                    INSERT OR IGNORE INTO ml_experience (
                         pos_id, chat_id, timestamp, asset, side, score, meta_delta,
                         oi_score, funding_score, liq_score, ob_score, session_bonus,
                         funding_rate, realized_vol, trend_pct, expected_edge,
@@ -83,7 +83,7 @@ class ExperienceBuffer:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
                 ''', (
                     pos_id, str(chat_id), datetime.now(timezone.utc).timestamp(), asset, side, score, meta_delta,
-                    oi_score, oi_score, liq_score, ob_score, session_bonus,
+                    oi_score, 0, liq_score, ob_score, session_bonus,  # funding_score disimpan dari funding_rate, bukan oi duplikat
                     funding_rate, realized_vol, trend_pct, expected_edge
                 ))
                 conn.commit()

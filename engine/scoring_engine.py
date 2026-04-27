@@ -370,7 +370,7 @@ class ScoringEngine:
 
         # 4. Build signal with scalper TP/SL (now dynamic based on Volatility)
         vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
-        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol)
+        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol, trend_pct)
         signal.meta_pattern_key = pattern_key
         signal.meta_score_delta = meta_delta
         return signal, score
@@ -697,6 +697,7 @@ class ScoringEngine:
         regime: MarketRegime,
         session_bonus: int,
         realized_vol: float,
+        trend_pct: float = 0.0,
     ) -> TradeSignal:
         """Build a TradeSignal with scalper-specific dynamic TP/SL levels."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
@@ -734,9 +735,9 @@ class ScoringEngine:
                 score=score,
                 meta_delta=getattr(breakdown, 'meta_score_delta', 0),
                 bd=breakdown,
-                funding_rate=0.0,
+                funding_rate=0.0,   # scalper tidak fetch funding — pakai 0.0 konsisten
                 realized_vol=realized_vol,
-                trend_pct=0.0
+                trend_pct=trend_pct
             )
             edge = intelligence_model.predict_edge(features)
         else:
@@ -1154,7 +1155,9 @@ class ScoringEngine:
         signal = self._build_signal(
             asset, side, final_score, log_regime, breakdown, mark_price,
             realized_vol=realized_vol,
-            oi_usd=oi_usd
+            oi_usd=oi_usd,
+            funding_rate=funding.funding_rate,
+            trend_pct=trend_pct,
         )
 
         return signal, final_score
@@ -1335,6 +1338,8 @@ class ScoringEngine:
         mark_price: float,
         realized_vol: float,
         oi_usd: float = 0.0,
+        funding_rate: float = 0.0,
+        trend_pct: float = 0.0,
     ) -> TradeSignal:
         # Determine strength
         if score >= 75:
@@ -1369,9 +1374,9 @@ class ScoringEngine:
                 score=score,
                 meta_delta=getattr(breakdown, 'meta_score_delta', 0),
                 bd=breakdown,
-                funding_rate=0.0,
+                funding_rate=funding_rate,
                 realized_vol=realized_vol,
-                trend_pct=0.0
+                trend_pct=trend_pct
             )
             expected_edge = intelligence_model.predict_edge(features)
         else:

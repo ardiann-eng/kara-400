@@ -17,7 +17,9 @@ class IntelligenceModel:
     def __init__(self):
         self.model = None
         self.is_training = False
+        self._training_lock = asyncio.Lock()
         self.last_train_samples = 0
+        self.last_retrain_time = 0.0   # unix timestamp of last completed retrain
         # is_ready = True hanya setelah retrain() berhasil di session ini.
         # Model yang di-load dari disk dianggap stale sampai terbukti valid.
         self.is_ready = False
@@ -77,20 +79,26 @@ class IntelligenceModel:
     def retrain(self):
         if self.is_training:
             return
-            
+
+        # Cek interval minimum antar retrain
+        interval_hours = getattr(config, 'INTELLIGENCE_RETRAIN_INTERVAL_HOURS', 12)
+        if self.last_retrain_time and (time.time() - self.last_retrain_time) < interval_hours * 3600:
+            remaining = interval_hours * 3600 - (time.time() - self.last_retrain_time)
+            log.debug(f"🧠 Retrain skipped — interval belum lewat ({remaining/3600:.1f}h tersisa).")
+            return
+
         data = experience_buffer.get_training_data()
         min_samples = getattr(config, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 300)
         if len(data) < min_samples:
             log.debug(f"🧠 Not enough data to train. Have {len(data)}, need {min_samples}.")
             return
-            
+
         if len(data) <= self.last_train_samples + 20 and self.model is not None:
-            # Need at least 20 new samples to bother retraining
             return
-            
+
+        self.is_training = True   # set sebelum log agar thread ke-2 langsung block
         log.info(f"🧠 Retraining Intelligence model with {len(data)} samples...")
-        self.is_training = True
-        
+
         try:
             X = []
             y = []
@@ -154,18 +162,22 @@ class IntelligenceModel:
 
             self.model = new_model
             self.last_train_samples = len(data)
+            self.last_retrain_time = time.time()
             self.is_ready = True
             joblib.dump(self.model, MODEL_PATH)
-            
+
         except Exception as e:
             log.error(f"Failed to retrain ML model: {e}")
         finally:
             self.is_training = False
 
     async def retrain_async(self):
-        # Run synchronous retrain in a thread
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self.retrain)
+        # Lock mencegah dua coroutine masuk bersamaan (race condition pada is_training)
+        if self._training_lock.locked():
+            return
+        async with self._training_lock:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.retrain)
 
     def predict_edge(self, features: list) -> float:
         """Predict the expected edge (0.0 - 1.0 probability of win).

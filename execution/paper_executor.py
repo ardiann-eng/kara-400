@@ -339,7 +339,9 @@ class PaperExecutor:
         import config as _ai_cfg
         from intelligence.experience_buffer import experience_buffer
 
-        pnl_pct_final = pos.floating_pct(fill_price)
+        # Pakai pnl_realized (total PnL kumulatif) bukan floating_pct (hanya sisa size)
+        # floating_pct salah untuk trade dengan partial close karena hanya ngitung sisa, bukan total
+        pnl_pct_final = pos.pnl_realized / (pos.size_initial * pos.entry_price) if pos.size_initial > 0 and pos.entry_price > 0 else pos.floating_pct(fill_price)
         duration_sec = (pos.closed_at - pos.opened_at).total_seconds()
 
         loop = asyncio.get_event_loop()

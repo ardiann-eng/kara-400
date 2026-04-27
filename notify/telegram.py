@@ -1036,62 +1036,15 @@ class KaraTelegram:
             elif getattr(acc, "current_drawdown_pct", 0) >= 8: status_str = "🟠 WARNING: HIGH VOLATILITY"
             else: status_str = "🟢 SYSTEM NOMINAL"
 
-            # Trade stats
+            # Ambil semua trade tanpa limit untuk statistik akurat
             from core.db import user_db
-            history = user_db.get_trade_history(chat_id, limit=100)
-            
-            # Key normalizer: data disimpan dengan key "pnl" dan "reason", bukan "pnl_usd"/"close_reason"
+            history = user_db.get_trade_history(chat_id, limit=9999)
+
+            # Hanya hitung trade "close" (bukan "open")
+            history = [t for t in history if t.get("type") == "close" or "pnl" in t]
+
             def get_pnl(t): return float(t.get("pnl") or t.get("pnl_usd") or 0)
             def get_reason(t): return t.get("reason") or t.get("close_reason") or "manual"
-
-            trades = len(history)
-            wins = sum(1 for t in history if get_pnl(t) > 0)
-            win_rate = (wins / trades * 100) if trades > 0 else 0
-            total_pnl = sum(get_pnl(t) for t in history)
-
-            asset_pnl: Dict[str, float] = {}
-            exit_stats: Dict[str, Dict] = {}
-            hold_total_mins = 0.0
-            hold_count = 0
-
-            for t in history:
-                a = t.get("asset") or "Unknown"
-                p = get_pnl(t)
-                asset_pnl[a] = asset_pnl.get(a, 0) + p
-
-                ex = get_reason(t)
-                if ex not in exit_stats:
-                    exit_stats[ex] = {"trades": 0, "wins": 0}
-                exit_stats[ex]["trades"] += 1
-                if p > 0:
-                    exit_stats[ex]["wins"] += 1
-
-                # Hold time: pakai timestamp (opened_at) + closed_at jika ada, else skip
-                ts = t.get("timestamp") or t.get("opened_at")
-                closed = t.get("closed_at")
-                if ts and closed:
-                    try:
-                        def _parse_dt(v):
-                            if isinstance(v, (int, float)):
-                                return datetime.fromtimestamp(v, tz=timezone.utc)
-                            s = str(v).replace('Z', '+00:00')
-                            return datetime.fromisoformat(s)
-                        hold_total_mins += (_parse_dt(closed) - _parse_dt(ts)).total_seconds() / 60
-                        hold_count += 1
-                    except Exception:
-                        pass
-
-            avg_hold_mins = (hold_total_mins / hold_count) if hold_count > 0 else 0
-
-            best_asset = max(asset_pnl, key=asset_pnl.get) if asset_pnl else None
-            worst_asset = min(asset_pnl, key=asset_pnl.get) if asset_pnl else None
-
-            for ex in exit_stats:
-                exit_stats[ex]["wr"] = exit_stats[ex]["wins"] / exit_stats[ex]["trades"] * 100
-
-            best_exit = max(exit_stats, key=lambda x: exit_stats[x]["wr"]) if exit_stats else None
-            worst_exit = min(exit_stats, key=lambda x: exit_stats[x]["wr"]) if exit_stats else None
-
             def sign(v): return "+" if v >= 0 else ""
             def pnl_str(v): return f"{sign(v)}{format_idr(v)}"
 
@@ -1104,52 +1057,141 @@ class KaraTelegram:
 
             def fmt_exit_label(key):
                 labels = {
-                    "tp1": "Take Profit 1", "tp2": "Take Profit 2",
-                    "trailing": "Trailing Stop", "stop_loss": "Stop Loss",
-                    "manual": "Manual Close", "close_all": "Close All",
-                    "timeout": "Timeout", "sl": "Stop Loss",
+                    "tp1": "TP1", "tp2": "TP2",
+                    "trailing_stop": "Trailing", "trailing": "Trailing",
+                    "stop_loss": "Stop Loss", "sl": "Stop Loss",
+                    "time_exit": "Time Exit", "manual": "Manual",
+                    "close_all": "Close All",
                 }
                 return labels.get(key, key.replace("_", " ").title())
+
+            trades = len(history)
+            wins   = sum(1 for t in history if get_pnl(t) > 0)
+            losses = trades - wins
+            win_rate  = (wins / trades * 100) if trades > 0 else 0
+            total_pnl = sum(get_pnl(t) for t in history)
+
+            # Statistik per aset
+            asset_stats: Dict[str, Dict] = {}
+            exit_stats:  Dict[str, Dict] = {}
+            hold_total_mins = 0.0
+            hold_count = 0
+            streak_cur = 0
+            streak_max_w = 0
+            streak_max_l = 0
+            _last_sign = None
+
+            for t in history:
+                a  = t.get("asset") or "?"
+                p  = get_pnl(t)
+                ex = get_reason(t)
+
+                if a not in asset_stats:
+                    asset_stats[a] = {"trades": 0, "wins": 0, "pnl": 0.0}
+                asset_stats[a]["trades"] += 1
+                asset_stats[a]["pnl"]    += p
+                if p > 0:
+                    asset_stats[a]["wins"] += 1
+
+                if ex not in exit_stats:
+                    exit_stats[ex] = {"trades": 0, "wins": 0}
+                exit_stats[ex]["trades"] += 1
+                if p > 0:
+                    exit_stats[ex]["wins"] += 1
+
+                # Hold time
+                ts     = t.get("timestamp") or t.get("opened_at")
+                closed = t.get("closed_at")
+                if ts and closed:
+                    try:
+                        def _parse_dt(v):
+                            if isinstance(v, (int, float)):
+                                return datetime.fromtimestamp(v, tz=timezone.utc)
+                            return datetime.fromisoformat(str(v).replace('Z', '+00:00'))
+                        hold_total_mins += (_parse_dt(closed) - _parse_dt(ts)).total_seconds() / 60
+                        hold_count += 1
+                    except Exception:
+                        pass
+
+                # Streak
+                cur_sign = "W" if p > 0 else "L"
+                if cur_sign == _last_sign:
+                    streak_cur += 1
+                else:
+                    streak_cur = 1
+                    _last_sign = cur_sign
+                if cur_sign == "W":
+                    streak_max_w = max(streak_max_w, streak_cur)
+                else:
+                    streak_max_l = max(streak_max_l, streak_cur)
+
+            avg_hold_mins = (hold_total_mins / hold_count) if hold_count > 0 else 0
+            avg_win  = sum(get_pnl(t) for t in history if get_pnl(t) > 0) / max(wins, 1)
+            avg_loss = sum(get_pnl(t) for t in history if get_pnl(t) <= 0) / max(losses, 1)
+            rr_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+
+            for ex in exit_stats:
+                exit_stats[ex]["wr"] = exit_stats[ex]["wins"] / exit_stats[ex]["trades"] * 100
+
+            # Top 3 aset terbaik & terburuk
+            sorted_assets = sorted(asset_stats.items(), key=lambda x: x[1]["pnl"], reverse=True)
+            top_assets    = sorted_assets[:3]
+            bot_assets    = sorted_assets[-3:][::-1]
+
+            best_exit  = max(exit_stats, key=lambda x: exit_stats[x]["wr"]) if exit_stats else None
+            worst_exit = min(exit_stats, key=lambda x: exit_stats[x]["wr"]) if exit_stats else None
+
+            pnl_color = "🟢" if total_pnl >= 0 else "🔴"
+            wr_color  = "🟢" if win_rate >= 50 else "🔴"
+            rr_color  = "🟢" if rr_ratio >= 1.0 else "🔴"
 
             if trades == 0:
                 text = (
                     "📔 <b>Trade Journal</b>\n\n"
                     "Belum ada trade yang tercatat.\n\n"
-                    "<i>KARA akan merekam setiap trade yang ditutup secara otomatis. ✨</i>"
+                    "<i>KARA akan merekam otomatis setiap posisi yang ditutup. ✨</i>"
                 )
             else:
-                # Build insights section
-                insights_lines = []
-                if best_asset:
-                    ba_pnl = asset_pnl[best_asset]
-                    insights_lines.append(f"📈 Aset terbaik  <b>{best_asset}</b> → {pnl_str(ba_pnl)}")
-                if worst_asset and worst_asset != best_asset:
-                    wa_pnl = asset_pnl[worst_asset]
-                    insights_lines.append(f"📉 Aset terlemah  <b>{worst_asset}</b> → {pnl_str(wa_pnl)}")
-                if avg_hold_mins > 0:
-                    insights_lines.append(f"⏱ Rata-rata hold  <b>{fmt_hold(avg_hold_mins)}</b>")
-                if best_exit:
-                    be_wr = exit_stats[best_exit]["wr"]
-                    be_n = exit_stats[best_exit]["trades"]
-                    insights_lines.append(f"✅ Exit terbaik  <b>{fmt_exit_label(best_exit)}</b> — WR {be_wr:.0f}% ({be_n}x)")
-                if worst_exit and worst_exit != best_exit:
-                    we_wr = exit_stats[worst_exit]["wr"]
-                    we_n = exit_stats[worst_exit]["trades"]
-                    insights_lines.append(f"⚠️ Exit terburuk  <b>{fmt_exit_label(worst_exit)}</b> — WR {we_wr:.0f}% ({we_n}x)")
+                text = f"📔 <b>Trade Journal</b>  <code>({trades} trade)</code>\n\n"
 
-                pnl_color = "🟢" if total_pnl >= 0 else "🔴"
-                wr_color = "🟢" if win_rate >= 50 else "🔴"
-
-                text = (
-                    f"📔 <b>Trade Journal</b>\n\n"
-                    f"<b>Ringkasan Keseluruhan</b>\n"
-                    f"Total Trade   {trades}\n"
-                    f"Win Rate      {wr_color} <b>{win_rate:.1f}%</b> ({wins}W / {trades - wins}L)\n"
-                    f"Total PnL     {pnl_color} <b>{pnl_str(total_pnl)}</b>\n"
+                # ── Ringkasan ────────────────────────────────────────────
+                text += (
+                    f"<b>Ringkasan</b>\n"
+                    f"Win Rate   {wr_color} <b>{win_rate:.1f}%</b>  ({wins}W / {losses}L)\n"
+                    f"Total PnL  {pnl_color} <b>{pnl_str(total_pnl)}</b>\n"
+                    f"Risk/Reward  {rr_color} <b>{rr_ratio:.2f}x</b>  "
+                    f"(avg win {pnl_str(avg_win)} / avg loss {pnl_str(avg_loss)})\n"
                 )
-                if insights_lines:
-                    text += "\n<b>Analisis</b>\n" + "\n".join(insights_lines)
-                text += "\n\n<i>Data direkam otomatis dari setiap posisi yang ditutup. ✨</i>"
+                if avg_hold_mins > 0:
+                    text += f"Avg Hold   ⏱ <b>{fmt_hold(avg_hold_mins)}</b>\n"
+                if streak_max_w > 1 or streak_max_l > 1:
+                    text += f"Best Streak  ✅ {streak_max_w}W  /  💔 {streak_max_l}L\n"
+
+                # ── Top Aset ─────────────────────────────────────────────
+                if top_assets:
+                    text += "\n<b>Aset Terbaik</b>\n"
+                    for rank, (ast, s) in enumerate(top_assets, 1):
+                        ast_wr = s["wins"] / s["trades"] * 100
+                        text += f"  {rank}. <b>{ast}</b>  {pnl_str(s['pnl'])}  ({ast_wr:.0f}% WR, {s['trades']}x)\n"
+
+                if bot_assets and bot_assets[0][0] not in [a for a, _ in top_assets]:
+                    text += "\n<b>Aset Terlemah</b>\n"
+                    for rank, (ast, s) in enumerate(bot_assets, 1):
+                        ast_wr = s["wins"] / s["trades"] * 100
+                        text += f"  {rank}. <b>{ast}</b>  {pnl_str(s['pnl'])}  ({ast_wr:.0f}% WR, {s['trades']}x)\n"
+
+                # ── Exit Type Breakdown ──────────────────────────────────
+                if exit_stats:
+                    text += "\n<b>Exit Breakdown</b>\n"
+                    for ex, s in sorted(exit_stats.items(), key=lambda x: -x[1]["trades"]):
+                        ex_wr   = s["wr"]
+                        ex_icon = "✅" if ex_wr >= 60 else ("⚠️" if ex_wr >= 40 else "🔴")
+                        text += (
+                            f"  {ex_icon} {fmt_exit_label(ex):12}  "
+                            f"<b>{ex_wr:.0f}%</b> WR  ({s['trades']}x)\n"
+                        )
+
+                text += "\n<i>Data dari semua posisi yang ditutup. ✨</i>"
 
             await update.effective_message.reply_html(text)
         except Exception as e:

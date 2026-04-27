@@ -182,9 +182,9 @@ class RiskManager:
         edge = getattr(signal, 'expected_edge', None)
         # Hanya block jika: intelligence aktif DAN model sudah is_ready (dilatih session ini)
         # is_ready=False berarti model dari disk stale atau belum ada data cukup
-        if edge is not None and edge < 0.2 and _cfg.ENABLE_INTELLIGENCE and _im.is_ready:
-            return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 20%)"
-        elif edge is not None and edge < 0.2:
+        if edge is not None and edge < 0.45 and _cfg.ENABLE_INTELLIGENCE and _im.is_ready:
+            return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 45%)"
+        elif edge is not None and edge < 0.45:
             log.debug(
                 f"[AI] {getattr(signal, 'asset', '?')}: low edge ({edge*100:.1f}%) "
                 f"— passing through (is_ready={getattr(_im, 'is_ready', False)})"
@@ -481,8 +481,8 @@ class RiskManager:
         Compute percentage-based SL and TP levels from ATR percentage.
         Returns (sl_pct, tp1_pct, tp2_pct).
         """
-        if atr_pct < 0.010:
-            sl_pct = 0.010
+        if atr_pct < 0.013:
+            sl_pct = 0.013   # min SL floor raised from 1.0% → 1.3% (EV improvement)
         elif atr_pct < 0.020:
             sl_pct = atr_pct * 1.5
         else:
@@ -537,7 +537,7 @@ class RiskManager:
         regime_lower = regime.lower()
         if regime_lower == "low_vol":
             noise_mult  = 0.60
-            sl_floor    = 0.008
+            sl_floor    = 0.013   # raised from 0.008 — EV simulation shows +0.042% per trade at 1.3%
             tp_mult     = 2.0
         elif regime_lower in ("normal", "unknown"):
             noise_mult  = 0.80

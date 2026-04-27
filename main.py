@@ -1136,25 +1136,27 @@ class KaraBot:
             time_exit_actions = [a for a in actions if a.get("action") == "time_exit"]
             other_actions = [a for a in actions if a.get("action") != "time_exit"]
 
-            # Batch scalper max-hold notifications to avoid one-by-one spam.
+            # Kirim notifikasi personal per posisi (KARA style)
             if time_exit_actions:
-                exit_lines = []
-                total_pnl = 0.0
+                from datetime import timezone as _tz, datetime as _dt
                 for a in time_exit_actions:
                     pos = session.executor._positions.get(a.get("position_id", "")) if hasattr(session.executor, "_positions") else None
-                    asset = pos.asset if pos else "?"
-                    pnl = float(a.get("pnl", 0.0))
-                    total_pnl += pnl
-                    sign = "+" if pnl >= 0 else ""
-                    exit_lines.append(f"• {asset}: {sign}{pnl:.2f} USD")
-                total_sign = "+" if total_pnl >= 0 else ""
-                await self.telegram.send_text(
-                    "⚡ <b>Scalper max-hold batch exit</b>\n"
-                    f"Posisi ditutup: <b>{len(time_exit_actions)}</b>\n"
-                    f"Total PnL: <b>{total_sign}{total_pnl:.2f} USD</b>\n"
-                    + "\n".join(exit_lines[:8]),
-                    target_chat_id=chat_id
-                )
+                    if not pos:
+                        continue
+                    pnl      = float(a.get("pnl", 0.0))
+                    price    = float(a.get("price", pos.entry_price))
+                    pnl_pct  = pos.floating_pct(price) * 100
+                    opened   = pos.opened_at
+                    if opened.tzinfo is None:
+                        opened = opened.replace(tzinfo=_tz.utc)
+                    hold_min = int((  _dt.now(_tz.utc) - opened).total_seconds() / 60)
+                    pct_sign = "+" if pnl_pct >= 0 else ""
+                    emoji    = "✅" if pnl >= 0 else "🔴"
+                    await self.telegram.send_text(
+                        f"{emoji} <b>{pos.asset} ditutup</b>\n"
+                        f"${abs(pnl):.2f}  •  {pct_sign}{pnl_pct:.2f}%  •  {hold_min} menit",
+                        target_chat_id=chat_id
+                    )
 
             for action in other_actions:
                 await self.telegram.send_position_event(action, prices, target_chat_id=chat_id)
