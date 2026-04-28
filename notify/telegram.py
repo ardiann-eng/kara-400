@@ -1862,18 +1862,48 @@ class KaraTelegram:
             )
 
             pnl_usd = close_data.get("pnl", 0)
+            pnl_pct_val = close_data.get("pnl_pct", 0)
+            pct_display = pnl_pct_val * 100 if abs(pnl_pct_val) < 10 else pnl_pct_val
             sign = "+" if pnl_usd >= 0 else ""
             reason = close_data.get("reason", "")
-            if "tp" in reason.lower():
-                emoji = "🎯"
-            elif reason.lower() == "trailing_stop":
-                emoji = "📍"
-            else:
-                emoji = "🛑"
 
+            from utils.helpers import format_idr
+            from config import USD_TO_IDR
+
+            pnl_idr = pnl_usd * USD_TO_IDR
+            pnl_idr_str = (
+                f"+Rp{pnl_idr:,.0f}".replace(",", ".")
+                if pnl_idr >= 0
+                else f"-Rp{abs(pnl_idr):,.0f}".replace(",", ".")
+            )
+
+            reason_lower = reason.lower()
+            if reason_lower == "tp1":
+                trigger_label = "Take Profit 1 tercapai"
+                emoji = "🎯"
+            elif reason_lower == "tp2":
+                trigger_label = "Take Profit 2 tercapai"
+                emoji = "🎯"
+            elif reason_lower == "trailing_stop":
+                trigger_label = "Trailing stop diaktifkan"
+                emoji = "📍"
+            elif reason_lower == "stop_loss":
+                trigger_label = "Stop loss terpicu"
+                emoji = "🛑"
+            elif reason_lower == "time_exit":
+                trigger_label = "Batas waktu habis"
+                emoji = "⏱"
+            else:
+                trigger_label = "Ditutup manual"
+                emoji = "🔒"
+
+            outcome = "Profit" if pnl_usd >= 0 else "Loss"
             caption = (
-                f"{emoji} <b>{position.asset} {position.side.value.upper()}</b>\n"
-                f"<code>{sign}{pnl_usd:+.2f} USD</code>"
+                f"{emoji} <b>KARA menutup posisi {position.asset} {position.side.value.upper()}</b>\n"
+                f"<i>{trigger_label} — posisi ditutup otomatis oleh bot.</i>\n\n"
+                f"{'✅' if pnl_usd >= 0 else '❌'} <b>{outcome}: {sign}{pct_display:.2f}%</b>\n"
+                f"💵 <code>{sign}${abs(pnl_usd):.2f} USD</code>  •  "
+                f"🇮🇩 <code>{pnl_idr_str}</code>"
             )
 
             keyboard = InlineKeyboardMarkup([[

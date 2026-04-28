@@ -95,7 +95,29 @@ FERNET_KEY       = os.getenv("FERNET_KEY", "")
 # ──────────────────────────────────────────────
 # Use /app/storage for Railway/Linux, fallback to 'data' for Local/Windows
 STORAGE_DIR      = os.getenv("STORAGE_DIR", "/app/storage" if os.name == 'posix' else "data")
-DB_PATH          = os.getenv("DB_PATH", os.path.join(STORAGE_DIR, "kara_data.db"))
+
+# [BUG FIX 2026-04-28] DB_PATH split storage bug:
+# If DB_PATH is a relative path on Railway (posix), it resolves to /app/kara_data.db
+# which is OUTSIDE the mounted volume at /app/storage → positions/journal reset on deploy
+# while users.json (always under STORAGE_DIR) survives → causing the
+# "positions reset but balance stays" symptom.
+#
+# Fix: on posix, always force DB_PATH to be under STORAGE_DIR.
+_db_path_env = os.getenv("DB_PATH", "")
+if _db_path_env and os.name == "posix" and not os.path.isabs(_db_path_env):
+    # Relative path on Railway — redirect to STORAGE_DIR so it stays on the volume
+    print(
+        f"[CONFIG] ⚠️  DB_PATH='{_db_path_env}' is a relative path on Linux/Railway. "
+        f"Auto-redirecting to STORAGE_DIR to prevent split storage. "
+        f"Fix: set DB_PATH={os.path.join(STORAGE_DIR, 'kara_data.db')} in Railway Variables.",
+        flush=True
+    )
+    DB_PATH = os.path.join(STORAGE_DIR, os.path.basename(_db_path_env))
+elif _db_path_env:
+    DB_PATH = _db_path_env
+else:
+    DB_PATH = os.path.join(STORAGE_DIR, "kara_data.db")
+
 USER_DB_PATH     = os.path.join(STORAGE_DIR, "users.json")
 TG_STATE_PATH    = os.path.join(STORAGE_DIR, "telegram_state.json")
 REDIS_URL        = os.getenv("REDIS_URL", "")           # optional
@@ -195,9 +217,11 @@ class ScalperConfig:
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # Scalper SL/TP (Calibrated for 25x leverage)
-    sl_pct:                  float = 0.0065   # 0.65% stop loss (Breathing room)
-    tp1_pct:                 float = 0.0085   # 0.85% TP1 — close 60%
-    tp2_pct:                 float = 0.0150   # 1.50% TP2 — close 40%
+    # [SL FIX 2026-04-28] Data: scalper SL WR rendah — 0.65% kena noise sebelum bergerak.
+    # Dinaikkan ke 0.80% (+23%) supaya SL di luar zona noise 25x leverage.
+    sl_pct:                  float = 0.0080   # 0.80% stop loss (was 0.65% — terlalu sempit)
+    tp1_pct:                 float = 0.0090   # 0.90% TP1 — close 60% (was 1.00%, RR 1.125x vs SL 0.80%)
+    tp2_pct:                 float = 0.0120   # 1.20% TP2 — close 40% (was 1.60%, RR 1.5x)
     trailing_pct:            float = 0.0040   # 0.40% trailing on remainder
 
     # Timing

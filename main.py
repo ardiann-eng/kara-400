@@ -181,6 +181,11 @@ class KaraBot:
             log.error(" LIVE mode requires HL_PRIVATE_KEY in .env!")
             sys.exit(1)
 
+        # ── STORAGE PERSISTENCE CHECK (Railway Volume) ───────────────────
+        # Detects whether /app/storage is a mounted Railway Volume or
+        # ephemeral container filesystem. If ephemeral, data resets on redeploy.
+        self._check_storage_persistence()
+
         # Connect to Hyperliquid
         await self.hl_client.connect()
 
@@ -384,8 +389,82 @@ class KaraBot:
     # STARTUP HEALTH CHECKS
     # ──────────────────────────────────────────
 
+    def _check_storage_persistence(self):
+        """
+        Detect whether STORAGE_DIR is backed by a Railway persistent Volume
+        or an ephemeral container filesystem.
+
+        On Railway without a Volume:
+          - /app/storage lives inside the container overlay FS
+          - Every redeploy spawns a fresh container → all data is lost
+          - kara_data.db, users.json, telegram_state.json all reset to zero
+
+        Detection strategy:
+          1. Write a sentinel file with current timestamp on startup
+          2. Check if st_dev of STORAGE_DIR matches /tmp (same device = ephemeral)
+          3. Warn loudly if storage looks ephemeral on Railway
+
+        Fix: add a Railway Volume mounted at /app/storage via Railway dashboard
+             Settings → Volumes → Mount at /app/storage
+        """
+        import stat as _stat
+        storage_dir = config.STORAGE_DIR
+        is_railway   = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
+
+        # Ensure directory exists
+        try:
+            os.makedirs(storage_dir, exist_ok=True)
+        except Exception as e:
+            log.error(f"[STORAGE] Cannot create STORAGE_DIR={storage_dir}: {e}")
+            return
+
+        # Write sentinel to confirm writability
+        sentinel_path = os.path.join(storage_dir, ".kara_startup_sentinel")
+        try:
+            with open(sentinel_path, "w") as f:
+                import datetime as _dt_stor
+                f.write(_dt_stor.datetime.utcnow().isoformat())
+        except Exception as e:
+            log.error(f"[STORAGE] STORAGE_DIR not writable ({storage_dir}): {e}")
+            return
+
+        # On Railway, detect if volume is mounted by comparing device IDs
+        # A mounted volume has a DIFFERENT st_dev than the root overlay FS
+        is_ephemeral = False
+        if is_railway and os.name == "posix":
+            try:
+                storage_dev = os.stat(storage_dir).st_dev
+                root_dev    = os.stat("/").st_dev
+                is_ephemeral = (storage_dev == root_dev)
+            except Exception:
+                is_ephemeral = True  # assume worst case
+
+        if is_ephemeral:
+            msg = (
+                "\n" + "⚠️ " * 20 + "\n"
+                "🚨 [STORAGE] RAILWAY VOLUME NOT MOUNTED!\n"
+                f"   STORAGE_DIR={storage_dir} is on EPHEMERAL filesystem.\n"
+                "   ALL DATA (trades, users, balance, journal) will RESET on every redeploy!\n"
+                "\n"
+                "   FIX: Go to Railway Dashboard → Your Service → Settings → Volumes\n"
+                "        → Mount a new Volume at: /app/storage\n"
+                "\n"
+                "   Bot will continue running but data persistence is NOT guaranteed.\n"
+                + "⚠️ " * 20
+            )
+            print(msg, flush=True)   # Always visible in Railway Logs tab
+            log.warning(msg)
+        elif is_railway:
+            log.info(
+                f"[STORAGE] ✅ Railway Volume detected at {storage_dir} "
+                f"(persistent across deploys)"
+            )
+        else:
+            log.info(f"[STORAGE] ✅ Storage OK: {storage_dir} (local/dev mode)")
+
     async def _clean_stale_cache(self):
         """Remove vol_cache and OI snapshot entries for assets no longer in the Hyperliquid universe."""
+
         try:
             all_meta = await self.hl_client.get_all_market_data()
             if not all_meta or not isinstance(all_meta, (list, tuple)) or len(all_meta) < 2:

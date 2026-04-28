@@ -534,26 +534,29 @@ class RiskManager:
             regime = "normal"
 
         # ── Step 2: Regime-based noise multiplier & floor ────────────────
+        # [SL FIX] Data 187 trades: SL WR 3% (30/31 kena noise) = floor lama
+        # terlalu sempit. Naikkan floor +35-40% supaya SL di luar noise zone.
+        # Target: SL hit rate < 10% (dari 16.6% sekarang).
         regime_lower = regime.lower()
         if regime_lower == "low_vol":
-            noise_mult  = 0.60
-            sl_floor    = 0.013   # raised from 0.008 — EV simulation shows +0.042% per trade at 1.3%
-            tp_mult     = 2.0
+            noise_mult  = 0.75   # was 0.60
+            sl_floor    = 0.018  # was 0.013 — +38% wider
+            tp_mult     = 1.4    # was 2.0 — TP2 ~2.5%, lebih reachable
         elif regime_lower in ("normal", "unknown"):
-            noise_mult  = 0.80
-            sl_floor    = 0.012
-            tp_mult     = 2.2
+            noise_mult  = 0.95   # was 0.80
+            sl_floor    = 0.017  # was 0.012 — +42% wider
+            tp_mult     = 1.5    # was 2.2 — TP2 ~2.6%
         elif regime_lower == "high_vol":
-            noise_mult  = 1.00
-            sl_floor    = 0.018
-            tp_mult     = 2.5
+            noise_mult  = 1.15   # was 1.00
+            sl_floor    = 0.023  # was 0.018 — +28% wider
+            tp_mult     = 1.7    # was 2.5 — TP2 ~3.9%
         else:  # extreme / volatile
-            noise_mult  = 1.20
-            sl_floor    = 0.025
-            tp_mult     = 3.0
+            noise_mult  = 1.30   # was 1.20
+            sl_floor    = 0.030  # was 0.025 — +20% wider
+            tp_mult     = 2.0    # was 3.0 — TP2 ~6%, extreme asset
 
         sl_pct = max(realized_vol * noise_mult, sl_floor)
-        sl_pct = min(sl_pct, 0.035)   # hard cap 3.5%
+        sl_pct = min(sl_pct, 0.045)   # hard cap raised 3.5% → 4.5%
 
         # ── Step 3: Score-adjusted TP multiplier ─────────────────────────
         if score >= 80:

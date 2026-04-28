@@ -1,0 +1,78 @@
+# ══════════════════════════════════════════════════════
+# KARA Bot — .dockerignore
+# Prevent local data/state files from being copied into
+# the Docker image during COPY . .
+# Railway volumes are mounted AFTER image build, so any
+# local .db/.json files here would be shadowed anyway —
+# but excluding them keeps the image clean & smaller.
+# ══════════════════════════════════════════════════════
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Local database & state (persisted via Railway Volume)
+*.db
+*.sqlite
+*.sqlite3
+kara_state.json
+kara_data_backup.db
+users_backup.json
+
+# Storage directory (Railway mounts /app/storage as volume)
+storage/
+data/*.db
+data/*.json
+data/*.sqlite
+
+# Logs (ephemeral — don't ship into image)
+*.log
+kara.log
+logs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Dev tools
+.claude/
+.git/
+scratch/
+tmp/
+backtest/
+
+# Docs (tidak perlu di container)
+*.md
+!README.md
+
+# Large assets (bukan dependency runtime)
+TRADE_HISTORY.xlsx
+test_pnl_*.png
+kara.bg.png

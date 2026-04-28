@@ -1,34 +1,31 @@
 """
-KARA PnL Card Generator — V2 Redesign
-Portrait layout (800×1000) for maximum Telegram visibility.
-Inspired by Rainbow/BloFin card style: big PNL %, clean info.
-KARA character sits at bottom-left, data overlays top+right.
+KARA PnL Card Generator — V3 Landscape
+Landscape layout (900×560) — optimal for Telegram rendering.
+Telegram displays landscape images much larger than portrait.
+KARA character on right side, data on left.
 """
 
 from __future__ import annotations
 import io
 import os
-import random
 import logging
-from typing import Optional
 
 log = logging.getLogger("kara.pnl_card")
 
-# ── Canvas constants (PORTRAIT — Telegram renders these MUCH larger) ──────────
-CANVAS_W = 800
-CANVAS_H = 1000
+# ── Canvas constants (LANDSCAPE — Telegram renders at full width) ─────────────
+CANVAS_W = 900
+CANVAS_H = 560
 
 # ── Color palette ─────────────────────────────────────────────────────────────
-C_PROFIT     = (74, 222, 128)         # green
-C_LOSS       = (248, 113, 113)        # red
-C_TEXT       = (245, 244, 250)        # near-white
-C_LABEL      = (160, 155, 185)        # muted purple-grey
+C_PROFIT     = (74, 222, 128)
+C_LOSS       = (248, 113, 113)
+C_TEXT       = (245, 244, 250)
+C_LABEL      = (160, 155, 185)
 C_DIVIDER    = (180, 160, 255, 40)
 C_PILL_GREEN = (74,  222, 128)
 C_PILL_RED   = (248, 113, 113)
 C_WATERMARK  = (120, 115, 145)
 C_DARK_BG    = (8, 6, 18)
-C_CARD_BG    = (18, 14, 35)           # slightly lighter card bg
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,17 +69,16 @@ def _load_fonts():
         return ImageFont.load_default()
 
     return {
-        "brand":      _font(bold_path,    20),
-        "asset":      _font(bold_path,    42),
-        "pill":       _font(bold_path,    18),
-        "hero_pct":   _font(bold_path,    96),     # PNL % — THE HERO
-        "hero_usd":   _font(bold_path,    36),     # PNL USD
-        "label":      _font(regular_path, 18),
-        "value":      _font(bold_path,    24),
-        "small":      _font(regular_path, 16),
-        "exit_tag":   _font(bold_path,    16),
-        "watermark":  _font(regular_path, 13),
-        "equity_val": _font(bold_path,    28),
+        "brand":      _font(bold_path,    18),
+        "asset":      _font(bold_path,    32),
+        "pill":       _font(bold_path,    16),
+        "hero_pct":   _font(bold_path,    88),   # PNL % — THE HERO
+        "hero_usd":   _font(bold_path,    30),
+        "label":      _font(regular_path, 16),
+        "value":      _font(bold_path,    22),
+        "exit_tag":   _font(bold_path,    14),
+        "watermark":  _font(regular_path, 12),
+        "equity_val": _font(bold_path,    26),
     }
 
 
@@ -118,7 +114,7 @@ def _exit_reason_label(reason: str) -> str:
 
 def _exit_reason_color(reason: str) -> tuple:
     r = reason.lower()
-    if r == "trailing_stop": return (45, 212, 191)   # teal
+    if r == "trailing_stop": return (45, 212, 191)
     if r in ("tp1", "tp2"):  return C_PROFIT
     return C_LOSS
 
@@ -137,10 +133,6 @@ def _text_h(draw, text, font) -> int:
         return bb[3] - bb[1]
     except Exception:
         return 20
-
-
-def _draw_centered(draw, cx, y, text, font, color):
-    draw.text((cx - _text_w(draw, text, font) // 2, y), text, font=font, fill=color)
 
 
 def _draw_right(draw, rx, y, text, font, color):
@@ -177,10 +169,10 @@ def generate_pnl_card(
     """Returns PNG bytes ready for Telegram send_photo."""
     from PIL import Image, ImageDraw
 
-    # ── 1. Build canvas with dark background ──────────────────────────────
+    # ── 1. Dark background ────────────────────────────────────────────────
     canvas = Image.new("RGBA", (CANVAS_W, CANVAS_H), (*C_DARK_BG, 255))
 
-    # ── 2. Place KARA character at bottom-left (cropped face region) ──────
+    # ── 2. Place KARA character — RIGHT SIDE, full height ─────────────────
     for candidate in [
         bg_path,
         "notify/kara.bg.png",
@@ -197,115 +189,95 @@ def generate_pnl_card(
             bg_full = Image.open(bg_path).convert("RGBA")
             orig_w, orig_h = bg_full.size
 
-            # Crop the KARA face region (left ~60% of original, top ~85%)
-            crop_right = int(orig_w * 0.55)
-            crop_bottom = int(orig_h * 0.90)
-            face_crop = bg_full.crop((0, 0, crop_right, crop_bottom))
+            # Crop face region (left 60% of original)
+            crop_right  = int(orig_w * 0.60)
+            crop_bottom = int(orig_h * 0.92)
+            face_crop   = bg_full.crop((0, 0, crop_right, crop_bottom))
 
-            # Resize to fit bottom-left of our portrait canvas
-            kara_h = int(CANVAS_H * 0.55)
+            # Resize to fill right 45% of canvas height
+            kara_h = CANVAS_H
             kara_w = int(face_crop.width * kara_h / face_crop.height)
             face_resized = face_crop.resize((kara_w, kara_h), Image.LANCZOS)
 
-            # Apply fade overlay so KARA doesn't overpower text
+            # Left fade so text stays readable
             fade = Image.new("RGBA", face_resized.size, (0, 0, 0, 0))
             fd = ImageDraw.Draw(fade)
-
-            # Top fade (text area needs to be readable) — stronger
-            for i in range(min(250, kara_h)):
-                alpha = int(210 * (1 - i / 250))
-                fd.line([(0, i), (kara_w, i)], fill=(*C_DARK_BG, alpha))
-
-            # Right fade (smooth blend)
-            for i in range(min(200, kara_w)):
-                x = kara_w - 200 + i
-                alpha = int(180 * (i / 200))
-                fd.line([(x, 0), (x, kara_h)], fill=(*C_DARK_BG, alpha))
+            fade_width = min(280, kara_w)
+            for i in range(fade_width):
+                alpha = int(220 * (1 - i / fade_width))
+                fd.line([(i, 0), (i, kara_h)], fill=(*C_DARK_BG, alpha))
 
             face_faded = Image.alpha_composite(face_resized, fade)
 
-            # Position: bottom-left, shifted left and pushed lower
-            kara_x = -int(kara_w * 0.15)
-            kara_y = CANVAS_H - kara_h + int(kara_h * 0.12)
-            canvas.paste(face_faded, (kara_x, kara_y), face_faded)
+            # Position: right side, slight overflow right is fine
+            kara_x = CANVAS_W - kara_w + int(kara_w * 0.05)
+            canvas.paste(face_faded, (kara_x, 0), face_faded)
         except Exception as e:
             log.warning(f"[PnLCard] Failed to load KARA background: {e}")
 
     draw = ImageDraw.Draw(canvas)
 
     # ── 3. Load fonts & derive values ─────────────────────────────────────
-    fonts     = _load_fonts()
-    is_profit = pnl_usd >= 0
-    pnl_color = C_PROFIT if is_profit else C_LOSS
-    sign      = "+" if is_profit else "-"
+    fonts      = _load_fonts()
+    is_profit  = pnl_usd >= 0
+    pnl_color  = C_PROFIT if is_profit else C_LOSS
+    sign       = "+" if is_profit else "-"
     side_lower = side.lower()
 
-    MARGIN = 40
-    CX = CANVAS_W // 2  # center x
+    MARGIN  = 36
+    # Data column occupies left ~55% of canvas
+    DATA_W  = int(CANVAS_W * 0.54)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ROW 0 — Brand + Exit Reason tag (y=30)
+    # ROW 0 — Brand (top-left) + Exit reason tag (top-right of data area)
     # ═══════════════════════════════════════════════════════════════════════
-    draw.text((MARGIN, 32), "KARA", font=fonts["brand"], fill=C_LABEL)
+    draw.text((MARGIN, 22), "KARA", font=fonts["brand"], fill=C_LABEL)
 
-    # Exit reason tag — right side
     er_label = _exit_reason_label(exit_reason)
     er_color = _exit_reason_color(exit_reason)
-    er_tw = _text_w(draw, er_label, fonts["exit_tag"])
+    er_tw    = _text_w(draw, er_label, fonts["exit_tag"])
 
-    # Draw exit reason pill
     er_pill_ov = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
     er_pd = ImageDraw.Draw(er_pill_ov)
-    er_px = CANVAS_W - MARGIN - er_tw - 20
-    er_py = 28
-    _rrect(er_pd, er_px, er_py, er_px + er_tw + 20, er_py + 28, 14,
+    er_px = DATA_W - er_tw - 20
+    er_py = 18
+    _rrect(er_pd, er_px, er_py, er_px + er_tw + 20, er_py + 26, 13,
            fill=(*er_color, 40), outline=(*er_color, 120), width=1)
     canvas = Image.alpha_composite(canvas, er_pill_ov)
     draw = ImageDraw.Draw(canvas)
     draw.text((er_px + 10, er_py + 5), er_label, font=fonts["exit_tag"], fill=er_color)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ROW 1 — Side pill + Asset name (y=75)
+    # ROW 1 — Side pill + Asset name (y=58)
     # ═══════════════════════════════════════════════════════════════════════
-
-    # Side pill
     pill_txt = f"{side_lower.upper()} {leverage}x"
-    pill_tw = _text_w(draw, pill_txt, fonts["pill"])
-    pill_w = pill_tw + 24
-    pill_h = 30
-    pill_x = MARGIN
-    pill_y = 78
+    pill_tw  = _text_w(draw, pill_txt, fonts["pill"])
+    pill_w   = pill_tw + 22
+    pill_h   = 28
+    pill_x   = MARGIN
+    pill_y   = 58
 
     if side_lower == "long":
-        pbg   = (74,  222, 128, 50)
-        pbord = (74,  222, 128, 150)
-        ptc   = C_PILL_GREEN
+        pbg, pbord, ptc = (74, 222, 128, 50), (74, 222, 128, 150), C_PILL_GREEN
     else:
-        pbg   = (248, 113, 113, 50)
-        pbord = (248, 113, 113, 150)
-        ptc   = C_PILL_RED
+        pbg, pbord, ptc = (248, 113, 113, 50), (248, 113, 113, 150), C_PILL_RED
 
     pill_ov = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
     pd = ImageDraw.Draw(pill_ov)
-    _rrect(pd, pill_x, pill_y, pill_x + pill_w, pill_y + pill_h, 15,
+    _rrect(pd, pill_x, pill_y, pill_x + pill_w, pill_y + pill_h, 14,
            fill=pbg, outline=pbord, width=1)
     canvas = Image.alpha_composite(canvas, pill_ov)
     draw = ImageDraw.Draw(canvas)
+    draw.text((pill_x + (pill_w - pill_tw) // 2, pill_y + 5),
+              pill_txt, font=fonts["pill"], fill=ptc)
 
-    ptx = pill_x + (pill_w - pill_tw) // 2
-    pty = pill_y + (pill_h - 18) // 2
-    draw.text((ptx, pty), pill_txt, font=fonts["pill"], fill=ptc)
-
-    # Asset name right after pill
-    asset_text = asset.upper()
-    draw.text((pill_x + pill_w + 14, pill_y - 4), asset_text, font=fonts["asset"], fill=C_TEXT)
+    draw.text((pill_x + pill_w + 12, pill_y - 2),
+              asset.upper(), font=fonts["asset"], fill=C_TEXT)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ROW 2 — PNL % HERO (y=140) — THE BIGGEST ELEMENT
+    # ROW 2 — PNL % HERO (y=102)
     # ═══════════════════════════════════════════════════════════════════════
-    pct_val = pnl_pct * 100 if abs(pnl_pct) < 10 else pnl_pct  # handle if already %
-
-    # Format: show appropriate decimals (use abs to avoid double-negative)
+    pct_val = pnl_pct * 100 if abs(pnl_pct) < 10 else pnl_pct
     if abs(pct_val) >= 100:
         pct_text = f"{sign}{abs(pct_val):.0f}%"
     elif abs(pct_val) >= 10:
@@ -313,78 +285,70 @@ def generate_pnl_card(
     else:
         pct_text = f"{sign}{abs(pct_val):.2f}%"
 
-    # Draw PNL % — LEFT ALIGNED, HUGE
-    draw.text((MARGIN, 135), pct_text, font=fonts["hero_pct"], fill=pnl_color)
+    draw.text((MARGIN, 100), pct_text, font=fonts["hero_pct"], fill=pnl_color)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ROW 3 — PNL USD (y=245)
+    # ROW 3 — PNL USD (y=196)
     # ═══════════════════════════════════════════════════════════════════════
-    usd_text = f"{sign}${abs(pnl_usd):.2f}"
+    usd_text  = f"{sign}${abs(pnl_usd):.2f}"
     usd_color = tuple(int(c * 0.85) for c in pnl_color)
-    draw.text((MARGIN, 250), usd_text, font=fonts["hero_usd"], fill=usd_color)
+    draw.text((MARGIN, 200), usd_text, font=fonts["hero_usd"], fill=usd_color)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # Divider line (y=305)
+    # Divider (y=245)
     # ═══════════════════════════════════════════════════════════════════════
-    div_y = 310
-    draw.line([(MARGIN, div_y), (CANVAS_W - MARGIN, div_y)],
+    div_y = 248
+    draw.line([(MARGIN, div_y), (DATA_W - MARGIN // 2, div_y)],
               fill=(*C_DIVIDER[:3], 60), width=1)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ROW 4 — Stats grid 2×2 (y=330)
+    # ROW 4 — Stats 2×2 grid (y=262)
     # ═══════════════════════════════════════════════════════════════════════
-    grid_y = 330
+    grid_y = 262
     col1_x = MARGIN
-    col2_x = CANVAS_W // 2 + 20
+    col2_x = DATA_W // 2 + 10
 
-    # Entry Price
-    draw.text((col1_x, grid_y), "Entry Price", font=fonts["label"], fill=C_LABEL)
-    draw.text((col1_x, grid_y + 24), _fmt_price(entry_price), font=fonts["value"], fill=C_TEXT)
+    draw.text((col1_x, grid_y),      "Entry Price", font=fonts["label"], fill=C_LABEL)
+    draw.text((col1_x, grid_y + 22), _fmt_price(entry_price), font=fonts["value"], fill=C_TEXT)
 
-    # Exit Price
-    draw.text((col2_x, grid_y), "Exit Price", font=fonts["label"], fill=C_LABEL)
-    draw.text((col2_x, grid_y + 24), _fmt_price(exit_price), font=fonts["value"], fill=C_TEXT)
+    draw.text((col2_x, grid_y),      "Exit Price",  font=fonts["label"], fill=C_LABEL)
+    draw.text((col2_x, grid_y + 22), _fmt_price(exit_price),  font=fonts["value"], fill=C_TEXT)
 
-    # Hold Time
-    draw.text((col1_x, grid_y + 72), "Hold Time", font=fonts["label"], fill=C_LABEL)
-    draw.text((col1_x, grid_y + 96), _fmt_hold(hold_minutes), font=fonts["value"], fill=C_TEXT)
+    draw.text((col1_x, grid_y + 62), "Hold Time", font=fonts["label"], fill=C_LABEL)
+    draw.text((col1_x, grid_y + 84), _fmt_hold(hold_minutes), font=fonts["value"], fill=C_TEXT)
 
-    # Score
-    draw.text((col2_x, grid_y + 72), "Score", font=fonts["label"], fill=C_LABEL)
-    draw.text((col2_x, grid_y + 96), f"{max(0, min(score, 100))}/100", font=fonts["value"], fill=C_TEXT)
+    draw.text((col2_x, grid_y + 62), "Score",    font=fonts["label"], fill=C_LABEL)
+    draw.text((col2_x, grid_y + 84), f"{max(0, min(score, 100))}/100", font=fonts["value"], fill=C_TEXT)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # Divider line (y=470)
+    # Divider (y=388)
     # ═══════════════════════════════════════════════════════════════════════
-    div2_y = 475
-    draw.line([(MARGIN, div2_y), (CANVAS_W - MARGIN, div2_y)],
+    div2_y = 388
+    draw.line([(MARGIN, div2_y), (DATA_W - MARGIN // 2, div2_y)],
               fill=(*C_DIVIDER[:3], 60), width=1)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ROW 5 — Session PnL & Total Equity (y=490)
+    # ROW 5 — Session PnL & Total Equity (y=402)
     # ═══════════════════════════════════════════════════════════════════════
-    row5_y = 495
+    row5_y = 402
 
-    # Session PnL
-    ses_sign = "+" if session_pnl >= 0 else "-"
+    ses_sign    = "+" if session_pnl >= 0 else "-"
     ses_pct_val = abs(session_pnl_pct * 100) if abs(session_pnl_pct) < 10 else abs(session_pnl_pct)
-    ses_text = f"{ses_sign}${abs(session_pnl):.2f} ({ses_sign}{ses_pct_val:.1f}%)"
-    ses_color = C_PROFIT if session_pnl >= 0 else C_LOSS
+    ses_text    = f"{ses_sign}${abs(session_pnl):.2f} ({ses_sign}{ses_pct_val:.1f}%)"
+    ses_color   = C_PROFIT if session_pnl >= 0 else C_LOSS
 
-    draw.text((col1_x, row5_y), "Session PnL", font=fonts["label"], fill=C_LABEL)
-    draw.text((col1_x, row5_y + 24), ses_text, font=fonts["value"], fill=ses_color)
+    draw.text((col1_x, row5_y),      "Session PnL", font=fonts["label"], fill=C_LABEL)
+    draw.text((col1_x, row5_y + 22), ses_text,      font=fonts["value"], fill=ses_color)
 
-    # Total Equity
-    eq_text = f"${total_equity:,.2f}"
-    draw.text((col2_x, row5_y), "Total Equity", font=fonts["label"], fill=C_LABEL)
-    draw.text((col2_x, row5_y + 24), eq_text, font=fonts["equity_val"], fill=C_TEXT)
+    draw.text((col2_x, row5_y),      "Total Equity", font=fonts["label"], fill=C_LABEL)
+    draw.text((col2_x, row5_y + 22), f"${total_equity:,.2f}", font=fonts["equity_val"], fill=C_TEXT)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # Watermark (bottom)
+    # Watermark (bottom-left)
     # ═══════════════════════════════════════════════════════════════════════
-    _draw_centered(draw, CX, CANVAS_H - 30,
-                   "♦  KARA  ·  Hyperliquid Futures",
-                   fonts["watermark"], C_WATERMARK)
+    draw.text((MARGIN, CANVAS_H - 22),
+              "♦  KARA  ·  Hyperliquid Futures",
+              font=fonts["watermark"], fill=C_WATERMARK)
 
     # ── Export ────────────────────────────────────────────────────────────
     final = canvas.convert("RGB")
