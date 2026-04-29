@@ -35,7 +35,10 @@ C_DARK_BG    = (8, 6, 18)
 def _load_fonts():
     from PIL import ImageFont
 
+    _here = os.path.dirname(os.path.abspath(__file__))
+
     bold_paths = [
+        os.path.join(_here, "assets", "fonts", "bold.ttf"),    # bundled — always works
         "C:/Windows/Fonts/arialbd.ttf",
         "C:/Windows/Fonts/calibrib.ttf",
         "C:/Windows/Fonts/verdanab.ttf",
@@ -47,6 +50,7 @@ def _load_fonts():
         "/System/Library/Fonts/Helvetica.ttc",
     ]
     regular_paths = [
+        os.path.join(_here, "assets", "fonts", "regular.ttf"), # bundled — always works
         "C:/Windows/Fonts/arial.ttf",
         "C:/Windows/Fonts/calibri.ttf",
         "C:/Windows/Fonts/verdana.ttf",
@@ -59,6 +63,11 @@ def _load_fonts():
 
     bold_path    = next((p for p in bold_paths    if os.path.exists(p)), None)
     regular_path = next((p for p in regular_paths if os.path.exists(p)), None)
+
+    if not bold_path:
+        log.warning("[PnLCard] No bold font found — text sizes will be broken")
+    if not regular_path:
+        log.warning("[PnLCard] No regular font found — text sizes will be broken")
 
     def _font(path, size):
         if path:
