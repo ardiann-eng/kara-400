@@ -407,49 +407,15 @@ class RiskManager:
         return risk_pct * equity_mult
 
     # ──────────────────────────────────────────
-    # DYNAMIC TP & SL (Fix 10)
+    # ATR HELPER (dipakai main.py untuk localize_for_user)
     # ──────────────────────────────────────────
-
-    def calculate_tp_levels(self, asset: str, entry_price: float, side: Side, realized_vol: float) -> Tuple[float, float, float]:
-        """
-        [FIX 1 - 2026-04-22] Widen SL based on realized daily volatility.
-        
-        Root cause dari 28% WR: SL rata-rata -0.38% = di dalam market noise zone.
-        81% trades kena SL sebelum sempat bergerak.
-        Trailing stop 100% WR membuktikan sinyal benar, tapi SL terlalu sempit.
-        
-        Logika baru berdasarkan vol_cache:
-          Vol > 4%/hari  (aset volatile): SL 2.0%, TP1 3.0%, TP2 5.0%
-          Vol 2-4%/hari  (aset normal):   SL 1.5%, TP1 2.5%, TP2 4.0%
-          Vol < 2%/hari  (aset calm):     SL 1.0%, TP1 1.8%, TP2 3.0%
-        """
-        daily_vol = realized_vol
-        
-        if daily_vol > 0.04:        # volatile asset (> 4% daily)
-            sl_pct  = 0.030         # 3.0% - wide margin to survive noise
-            tp1_pct = sl_pct * 1.5  # min RR 1.5x
-            tp2_pct = sl_pct * 2.5  # min RR 2.5x
-        elif daily_vol > 0.02:      # normal asset (2-4% daily)
-            sl_pct  = 0.025         # 2.5%
-            tp1_pct = sl_pct * 1.5
-            tp2_pct = sl_pct * 2.5
-        else:                       # calm asset (< 2% daily)
-            sl_pct  = 0.020         # 2.0%
-            tp1_pct = sl_pct * 1.5
-            tp2_pct = sl_pct * 2.5
-
-        log.info(
-            f"[ATR-SL] {asset}: daily_vol={daily_vol*100:.3f}% "
-            f"sl_pct={sl_pct*100:.3f}% tp1_pct={tp1_pct*100:.3f}% tp2_pct={tp2_pct*100:.3f}%"
-        )
-        return sl_pct, tp1_pct, tp2_pct
 
     def calculate_atr(self, candles) -> float:
         """
         ATR sebagai persentase dari close price.
         Mendukung dua format candle:
-          - Dict: {'h': high, 'l': low, 'c': close}   (dari SDK/direct HTTP)
-          - List: [timestamp, open, high, low, close, volume]  (dari get_candles())
+          - Dict: {'h': high, 'l': low, 'c': close}
+          - List: [timestamp, open, high, low, close, volume]
         Returns atr_pct (misal 0.015 = 1.5%).
         """
         if not candles or len(candles) < 2:
@@ -459,7 +425,6 @@ class RiskManager:
             if isinstance(c, dict):
                 return float(c.get("h", 0)), float(c.get("l", 0)), float(c.get("c", 0))
             elif isinstance(c, (list, tuple)) and len(c) >= 5:
-                # [timestamp, open, high, low, close, ...]
                 return float(c[2]), float(c[3]), float(c[4])
             return 0.0, 0.0, 0.0
 
@@ -476,33 +441,8 @@ class RiskManager:
             return 0.0
         return sum(trs) / len(trs)
 
-    def calculate_sl_from_atr(self, asset: str, entry: float, atr_pct: float, side) -> Tuple[float, float, float]:
-        """
-        Compute percentage-based SL and TP levels from ATR percentage.
-        Returns (sl_pct, tp1_pct, tp2_pct).
-        """
-        if atr_pct < 0.013:
-            sl_pct = 0.013   # min SL floor raised from 1.0% → 1.3% (EV improvement)
-        elif atr_pct < 0.020:
-            sl_pct = atr_pct * 1.5
-        else:
-            sl_pct = atr_pct * 1.2
-
-        tp1_pct = sl_pct * 1.5
-        tp2_pct = sl_pct * 2.5
-
-        from models.schemas import Side as _Side
-        sl_price = entry * (1 - sl_pct) if side == _Side.LONG else entry * (1 + sl_pct)
-
-        log.info(
-            f"[ATR-SL] {asset}: atr_raw_pct={atr_pct*100:.3f}% "
-            f"entry={entry:.6f} sl_pct={sl_pct*100:.3f}% "
-            f"sl_price={sl_price:.6f} tp1={tp1_pct*100:.3f}% tp2={tp2_pct*100:.3f}%"
-        )
-        return sl_pct, tp1_pct, tp2_pct
-
     # ──────────────────────────────────────────
-    # VOL-AWARE LEVEL CALCULATOR  (Fix 1 + Fix 4)
+    # VOL-AWARE LEVEL CALCULATOR  (Satu-satunya fungsi SL/TP)
     # ──────────────────────────────────────────
 
     def calculate_levels(
@@ -514,76 +454,114 @@ class RiskManager:
         vol_cache: dict,
     ) -> dict:
         """
-        Calculate SL/TP levels using realized volatility from vol_cache.
-        Pure arithmetic — no I/O, no async, runs in <0.1ms.
-        Called once at signal generation time.
+        Satu-satunya fungsi SL/TP yang dipakai pipeline standard mode.
+        Dipanggil dari main.py setelah signal dibuat, meng-override SL/TP awal.
 
-        92-trade data proved fixed SL destroys profit factor (0.726).
-        Avg loss was 2.66x avg win purely because SL was inside market noise.
-        Fix: SL must be >= 1 daily-noise range so normal moves don't trigger it.
+        Prinsip utama: SL harus di luar zona noise harian aset tersebut.
+        - realized_vol dari vol_cache adalah volatilitas 1h terannualisasi per hari
+        - Untuk aset small-cap (OI < $50M) vol minimum dipaksakan ke 5% karena
+          aset ini bergerak lebih liar dari yang dilaporkan candle 1h
+        - Fallback default dinaikkan dari 2.5% ke 4.0% agar tidak ada SL < 3%
+          saat API gagal mengambil data volatilitas
+        - Session adjustment hanya memperlebar (NY +20%), tidak mempersempit di Asia
+          karena mempersempit SL di Asia terbukti meningkatkan SL kena noise
+
+        Data 800 trade: SL kena noise menyebabkan -$126.25 = 82% gross profit hilang.
+        Target: SL hit rate < 15% dari trade yang akhirnya profit.
         """
         from datetime import datetime, timezone as _tz
 
-        # ── Step 1: Get realized vol from cache ──────────────────────────
+        # ── Step 1: Ambil realized vol dari cache ────────────────────────
         cached = vol_cache.get(asset)
         if cached and len(cached) >= 3:
             _, regime_obj, realized_vol = cached[0], cached[1], cached[2]
             regime = regime_obj.value if hasattr(regime_obj, "value") else str(regime_obj)
         else:
-            realized_vol = 0.025
+            # Fallback saat vol cache kosong: pakai 4% (bukan 2.5% lama).
+            # Aset yang tidak ada di cache biasanya small-cap volatile — lebih aman
+            # memulai dari asumsi vol tinggi daripada vol rendah.
+            realized_vol = 0.040
             regime = "normal"
 
-        # ── Step 2: Regime-based noise multiplier & floor ────────────────
-        # [SL FIX] Data 187 trades: SL WR 3% (30/31 kena noise) = floor lama
-        # terlalu sempit. Naikkan floor +35-40% supaya SL di luar noise zone.
-        # Target: SL hit rate < 10% (dari 16.6% sekarang).
         regime_lower = regime.lower()
+
+        # ── Step 2: Minimum vol per aset berdasarkan OI tier ────────────
+        # Aset kecil (CHIP, MEGA, FARTCOIN, kLUNC) sering punya vol nyata
+        # jauh lebih tinggi dari yang terukur di candle 1h karena likuiditas rendah.
+        # Paksa minimum realized_vol agar SL tidak kena di gerakan biasa.
+        from data.hyperliquid_client import get_client as _get_client
+        try:
+            _client = _get_client()
+            oi_usd_est = 0.0
+            if _client._market_cache:
+                universe, _ = _client._market_cache
+                for u in universe:
+                    if isinstance(u, dict) and u.get("name") == asset:
+                        # OI dalam contracts, estimasi kasar pakai mid_price tidak tersedia di sini
+                        # Gunakan maxLeverage sebagai proxy likuiditas:
+                        # aset dengan maxLeverage rendah = lebih illiquid = vol lebih tinggi
+                        max_lev = int(u.get("maxLeverage", 50))
+                        if max_lev <= 10:
+                            realized_vol = max(realized_vol, 0.060)   # min 6%/hari untuk illiquid
+                        elif max_lev <= 20:
+                            realized_vol = max(realized_vol, 0.045)   # min 4.5%/hari
+                        break
+        except Exception:
+            pass
+
+        # Aset dengan nama yang diketahui bervolatilitas sangat tinggi
+        # (dari data 800 trade: CHIP, MEGA, FARTCOIN, kLUNC WR < 50%)
+        HIGH_VOL_ASSETS = {"CHIP", "MEGA", "FARTCOIN", "kLUNC", "VINE", "MON", "VVV",
+                           "kBONK", "PEPE", "WIF", "BONK", "REZ", "PYTH"}
+        if asset in HIGH_VOL_ASSETS:
+            realized_vol = max(realized_vol, 0.055)   # min 5.5%/hari tanpa pengecualian
+
+        # ── Step 3: Regime-based noise multiplier & floor ────────────────
         if regime_lower == "low_vol":
-            noise_mult  = 0.75   # was 0.60
-            sl_floor    = 0.018  # was 0.013 — +38% wider
-            tp_mult     = 1.4    # was 2.0 — TP2 ~2.5%, lebih reachable
+            noise_mult = 0.85
+            sl_floor   = 0.025   # minimal 2.5% bahkan di low vol
+            tp_mult    = 2.2
         elif regime_lower in ("normal", "unknown"):
-            noise_mult  = 0.95   # was 0.80
-            sl_floor    = 0.017  # was 0.012 — +42% wider
-            tp_mult     = 1.5    # was 2.2 — TP2 ~2.6%
+            noise_mult = 1.00
+            sl_floor   = 0.030   # minimal 3.0% di normal
+            tp_mult    = 2.3
         elif regime_lower == "high_vol":
-            noise_mult  = 1.15   # was 1.00
-            sl_floor    = 0.023  # was 0.018 — +28% wider
-            tp_mult     = 1.7    # was 2.5 — TP2 ~3.9%
+            noise_mult = 1.20
+            sl_floor   = 0.035   # minimal 3.5% di high vol
+            tp_mult    = 2.6
         else:  # extreme / volatile
-            noise_mult  = 1.30   # was 1.20
-            sl_floor    = 0.030  # was 0.025 — +20% wider
-            tp_mult     = 2.0    # was 3.0 — TP2 ~6%, extreme asset
+            noise_mult = 1.40
+            sl_floor   = 0.045   # minimal 4.5% di extreme
+            tp_mult    = 3.0
 
         sl_pct = max(realized_vol * noise_mult, sl_floor)
-        sl_pct = min(sl_pct, 0.045)   # hard cap raised 3.5% → 4.5%
+        sl_pct = min(sl_pct, 0.080)   # hard cap 8% — di atas ini posisi terlalu berisiko
 
-        # ── Step 3: Score-adjusted TP multiplier ─────────────────────────
+        # ── Step 4: Score-adjusted TP multiplier ─────────────────────────
         if score >= 80:
             tp_mult *= 1.30
         elif score >= 70:
             tp_mult *= 1.15
         elif score < 62:
-            tp_mult *= 0.85
-
-        # ── Step 4: Session adjustment (Fix 4) ───────────────────────────
-        hour = datetime.now(_tz.utc).hour
-        if 13 <= hour < 21:       # NY session — wider SL, bigger target
-            sl_pct  = min(sl_pct * 1.20, 0.035)
-            tp_mult *= 1.15
-        elif hour >= 22 or hour < 7:   # Asia — tighter
-            sl_pct  = max(sl_pct * 0.85, sl_floor)
             tp_mult *= 0.90
 
-        # ── Step 5: TP levels ─────────────────────────────────────────────
-        tp1_pct = sl_pct * tp_mult * 0.55   # TP1 at 55% of full target
-        tp2_pct = sl_pct * tp_mult          # TP2 at full target
+        # ── Step 5: Session adjustment — hanya perlebar, tidak persempit ─
+        # Mempersempit SL di Asia terbukti tidak membantu karena aset bergerak
+        # bebas 24 jam. Hanya tambah buffer saat NY session karena volume lebih tinggi.
+        hour = datetime.now(_tz.utc).hour
+        if 13 <= hour < 21:   # NY session — market lebih likuid, gerakan lebih besar
+            sl_pct  = min(sl_pct * 1.20, 0.060)
+            tp_mult *= 1.15
 
-        # Enforce min RR 1.2:1
-        tp2_pct = max(tp2_pct, sl_pct * 1.20)
-        tp1_pct = max(tp1_pct, sl_pct * 0.60)
+        # ── Step 6: TP levels ─────────────────────────────────────────────
+        tp1_pct = sl_pct * tp_mult * 0.55   # TP1 = 55% dari target penuh
+        tp2_pct = sl_pct * tp_mult          # TP2 = target penuh
 
-        # ── Step 6: Absolute price levels ────────────────────────────────
+        # RR minimum 1.5:1 — tidak mau trade dengan TP < 1.5× SL
+        tp2_pct = max(tp2_pct, sl_pct * 1.50)
+        tp1_pct = max(tp1_pct, sl_pct * 0.65)
+
+        # ── Step 7: Absolute price levels ────────────────────────────────
         if side == "long":
             sl_price  = round(entry_price * (1 - sl_pct),  8)
             tp1_price = round(entry_price * (1 + tp1_pct), 8)
@@ -595,7 +573,7 @@ class RiskManager:
 
         rr = tp2_pct / sl_pct
 
-        log.debug(
+        log.info(
             f"[LEVELS] {asset} {side.upper()} "
             f"vol={realized_vol*100:.2f}% regime={regime} "
             f"sl={sl_pct*100:.2f}% tp1={tp1_pct*100:.2f}% tp2={tp2_pct*100:.2f}% "
@@ -603,14 +581,14 @@ class RiskManager:
         )
 
         return {
-            "sl_pct":    sl_pct,
-            "tp1_pct":   tp1_pct,
-            "tp2_pct":   tp2_pct,
-            "sl_price":  sl_price,
-            "tp1_price": tp1_price,
-            "tp2_price": tp2_price,
-            "rr_ratio":  rr,
-            "regime":    regime,
+            "sl_pct":       sl_pct,
+            "tp1_pct":      tp1_pct,
+            "tp2_pct":      tp2_pct,
+            "sl_price":     sl_price,
+            "tp1_price":    tp1_price,
+            "tp2_price":    tp2_price,
+            "rr_ratio":     rr,
+            "regime":       regime,
             "realized_vol": realized_vol,
         }
 

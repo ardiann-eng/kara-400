@@ -183,34 +183,24 @@ class OIFundingAnalyzer:
                 f"OI dropping {oi_chg*100:.1f}% -> position unwinding"
             )
 
-        # ── 5. OI Magnitude (conviction amplifier) ────────────────────
-        # Different OI levels = different market conviction
-        # This produces DIFFERENT scores per asset even when other data is similar
+        # ── 5. OI Magnitude (tiebreaker kecil, bukan amplifier besar) ───
+        # Masalah sebelumnya: BTC selalu dapat +8 bonus hanya karena OI besar.
+        # Ini bukan sinyal — itu hanya fakta struktural yang tidak berubah.
+        # Bonus dikurangi ke maksimum +4 dan hanya dipakai saat bull == bear (tiebreaker).
         oi_usd = oi.open_interest
-        if oi_usd > 1_000_000_000:      # > $1B  (BTC, ETH level)
-            # High liquidity market — small funding differences matter more
-            magnitude_bonus = 8  # was 5
-            reasons.append(f"High conviction market (OI ${oi_usd/1e9:.1f}B)")
-        elif oi_usd > 200_000_000:       # > $200M (SOL, HYPE level)
-            magnitude_bonus = 6  # was 4
-            reasons.append(f"Mid-cap market (OI ${oi_usd/1e6:.0f}M)")
+        if oi_usd > 1_000_000_000:      # > $1B  (BTC, ETH)
+            magnitude_bonus = 4
+        elif oi_usd > 200_000_000:       # > $200M (SOL, HYPE)
+            magnitude_bonus = 3
         elif oi_usd > 50_000_000:        # > $50M
-            magnitude_bonus = 4  # was 3
-            reasons.append(f"Active market (OI ${oi_usd/1e6:.0f}M)")
+            magnitude_bonus = 2
         elif oi_usd > 10_000_000:        # > $10M
-            magnitude_bonus = 2  
-            reasons.append(f"Small-cap market (OI ${oi_usd/1e6:.0f}M)")
+            magnitude_bonus = 1
         else:
-            magnitude_bonus = 0  # was 1
-            reasons.append(f"Low OI market (${oi_usd/1e6:.1f}M) -> neutral")
+            magnitude_bonus = 0
 
-        # Magnitude amplifies the winning side
-        if bull > bear:
-            bull += magnitude_bonus
-        elif bear > bull:
-            bear += magnitude_bonus
-        else:
-            # Tied — use funding direction to break tie
+        # Hanya gunakan magnitude untuk memutus seri — jangan amplifikasi yang sudah unggul
+        if bull == bear and magnitude_bonus > 0:
             if fr > 0:
                 bear += magnitude_bonus
             elif fr < 0:
@@ -218,6 +208,8 @@ class OIFundingAnalyzer:
             else:
                 bull += magnitude_bonus // 2
                 bear += magnitude_bonus // 2
+            reasons.append(f"OI size tiebreaker (OI ${oi_usd/1e6:.0f}M)")
+        # Jika sudah ada pemenang jelas, magnitude tidak menambah apapun
 
         # ── 6. 24h OI perspective ────────────────────────────────────
         oi_24h = oi.oi_change_24h
@@ -231,33 +223,47 @@ class OIFundingAnalyzer:
             reasons.append(f"24h OI decline {oi_24h*100:.0f}% -> deleveraging")
 
         # ── 7. Spot-Perp Basis ─────────────────────────────────────────
+        # Basis dan funding menunjukkan sinyal yang sama (demand perp > spot).
+        # Jika funding sudah memberikan poin besar (>=12), basis tidak menambah apapun
+        # karena itu akan menghitung ulang sinyal yang sudah dihitung.
+        # Basis hanya berkontribusi saat funding lemah/netral (< 6 poin dari fr).
         if spot_price > 0 and mark_price > 0:
             basis = (mark_price - spot_price) / spot_price
             signal_str = "neutral"
-            
+
+            # Ukur seberapa besar funding sudah berkontribusi ke sisi yang sama
+            # agar kita tahu apakah basis masih menambah informasi baru
+            funding_bull_pts = bull  # poin bull yang sudah terkumpul sebelum basis
+            funding_bear_pts = bear
+
             if basis > 0.0015:
-                bull += 12  # increased from 8
-                signal_str = "bull (+12)"
-                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> strong bullish premium (LONG)")
+                # Kurangi poin basis jika funding bull sudah besar (>= 10 dari fr alone)
+                basis_pts = 6 if funding_bull_pts >= 10 else 10
+                bull += basis_pts
+                signal_str = f"bull (+{basis_pts})"
+                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> bullish premium (LONG)")
             elif basis > 0.0008:
-                bull += 6   # increased from 4
-                signal_str = "bull (+6)"
-                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> bullish momentum building")
+                basis_pts = 3 if funding_bull_pts >= 10 else 5
+                bull += basis_pts
+                signal_str = f"bull (+{basis_pts})"
+                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> bullish momentum")
             elif basis < -0.0015:
-                bear += 12  # increased from 8
-                signal_str = "bear (+12)"
-                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> extreme fear/discount (SHORT)")
+                basis_pts = 6 if funding_bear_pts >= 10 else 10
+                bear += basis_pts
+                signal_str = f"bear (+{basis_pts})"
+                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> fear/discount (SHORT)")
             elif basis < -0.0008:
-                bear += 6   # increased from 4
-                signal_str = "bear (+6)"
-                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> bearish momentum building")
-                
+                basis_pts = 3 if funding_bear_pts >= 10 else 5
+                bear += basis_pts
+                signal_str = f"bear (+{basis_pts})"
+                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> bearish momentum")
+
             log.debug(f"[BASIS] {asset}: spot={spot_price:.2f} perp={mark_price:.2f} basis={basis*100:.3f}% signal={signal_str}")
         else:
             log.warning(f"[{asset}] Spot/Oracle price unavailable, skipping Basis score")
 
-        # CAP max score to prevent inflation (increased for Conviction)
-        bull = min(bull, 45)  # increased from 40
-        bear = min(bear, 45)
+        # Cap dikembalikan ke 35 — sumber inflasi utama sudah dihapus
+        bull = min(bull, 35)
+        bear = min(bear, 35)
 
         return bull, bear, reasons, warnings

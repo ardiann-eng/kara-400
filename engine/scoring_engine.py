@@ -1059,9 +1059,11 @@ class ScoringEngine:
 
         raw_score += structure_delta
 
-        # Add session bonus
-        raw_score += session_bonus
-        raw_score = max(0, min(raw_score, 92))  # raised cap V2 to allow 100 final scores
+        # Session bonus TIDAK dimasukkan ke raw_score sebelum multiplier.
+        # Sebelumnya session +10 ikut dikalikan trend_multiplier 1.10x = efektif +11.
+        # Ini menyebabkan skor 75+ banyak berisi sinyal lemah yang tertiup session bonus.
+        # Session bonus ditambahkan SETELAH multiplier agar nilainya tetap flat.
+        raw_score = max(0, min(raw_score, 92))
 
         # ── Apply regime multiplier ────────────────────────────────────
         vol_multiplier = {
@@ -1071,11 +1073,14 @@ class ScoringEngine:
             MarketRegime.EXTREME:  0.70,
         }.get(vol_regime, 1.00)
 
-        # Trend multiplier - less punishing of range (0.95 instead of 0.85)
+        # Trend multiplier — hanya diperhitungkan jika trend > 1.5%
         trend_multiplier = 1.10 if abs(trend_pct) > 0.015 else 0.95
 
         final_multiplier = vol_multiplier * trend_multiplier
         final_score = int(raw_score * final_multiplier)
+
+        # Tambahkan session bonus setelah multiplier sehingga nilainya flat (tidak ikut dimultiplikasi)
+        final_score += session_bonus
         final_score = max(0, min(final_score, 100))
         
         log.debug(f"[VOL] {asset}: realized_vol={realized_vol*100:.2f}%/day regime={vol_regime.value.upper()} multiplier={vol_multiplier}x")
@@ -1349,9 +1354,12 @@ class ScoringEngine:
         else:
             strength = SignalStrength.WEAK
 
-        # ── DYNAMIC TP/SL (Fix 10) ────────────────────────────────────
-        # Get dynamic levels from RiskManager based on Volatility
-        sl_pct, tp1_pct, tp2_pct = self.risk_mgr.calculate_tp_levels(asset, mark_price, side, realized_vol)
+        # Placeholder SL/TP — akan di-override oleh calculate_levels() di main.py
+        # sebelum sinyal dieksekusi. Nilai di sini hanya untuk mengisi field TradeSignal.
+        sl_pct  = max(realized_vol * 1.00, 0.030)   # minimal 3%
+        tp1_pct = sl_pct * 0.65 * 2.3
+        tp2_pct = sl_pct * 2.3
+        sl_pct  = min(sl_pct, 0.080)
 
         if side == Side.LONG:
             stop_loss = round(mark_price * (1 - sl_pct), 8)
