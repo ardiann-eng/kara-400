@@ -1015,7 +1015,6 @@ class KaraTelegram:
         else:
             await update.effective_message.reply_html(text, reply_markup=reply_markup)
 
-
     async def cmd_journal(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Show full trade journal to the user."""
         if not self._is_authorized(update): return
@@ -1031,16 +1030,14 @@ class KaraTelegram:
         if not session: return await self.cmd_start(update, ctx)
         
         try:
-            acc = await session.get_account_state()
-            if getattr(acc, "current_drawdown_pct", 0) >= 15: status_str = "🔴 DANGER: CRITICAL DRAWDOWN"
-            elif getattr(acc, "current_drawdown_pct", 0) >= 8: status_str = "🟠 WARNING: HIGH VOLATILITY"
-            else: status_str = "🟢 SYSTEM NOMINAL"
-
             # Ambil semua trade tanpa limit untuk statistik akurat
             from core.db import user_db
             history = user_db.get_trade_history(chat_id, limit=9999)
 
-            # Hanya hitung trade "close" (bukan "open")
+            # [NEW] Sertakan posisi aktif juga di ringkasan jika ada
+            open_positions = session.executor.open_positions if session else []
+
+            # Hanya hitung trade "close" (bukan "open") untuk history
             history = [t for t in history if t.get("type") == "close" or "pnl" in t]
 
             def get_pnl(t): return float(t.get("pnl") or t.get("pnl_usd") or 0)
@@ -1071,88 +1068,103 @@ class KaraTelegram:
             win_rate  = (wins / trades * 100) if trades > 0 else 0
             total_pnl = sum(get_pnl(t) for t in history)
 
-            # Statistik per aset
-            asset_stats: Dict[str, Dict] = {}
-            exit_stats:  Dict[str, Dict] = {}
-            hold_total_mins = 0.0
-            hold_count = 0
-            streak_cur = 0
-            streak_max_w = 0
-            streak_max_l = 0
-            _last_sign = None
-
-            for t in history:
-                a  = t.get("asset") or "?"
-                p  = get_pnl(t)
-                ex = get_reason(t)
-
-                if a not in asset_stats:
-                    asset_stats[a] = {"trades": 0, "wins": 0, "pnl": 0.0}
-                asset_stats[a]["trades"] += 1
-                asset_stats[a]["pnl"]    += p
-                if p > 0:
-                    asset_stats[a]["wins"] += 1
-
-                if ex not in exit_stats:
-                    exit_stats[ex] = {"trades": 0, "wins": 0}
-                exit_stats[ex]["trades"] += 1
-                if p > 0:
-                    exit_stats[ex]["wins"] += 1
-
-                # Hold time
-                ts     = t.get("timestamp") or t.get("opened_at")
-                closed = t.get("closed_at")
-                if ts and closed:
-                    try:
-                        def _parse_dt(v):
-                            if isinstance(v, (int, float)):
-                                return datetime.fromtimestamp(v, tz=timezone.utc)
-                            return datetime.fromisoformat(str(v).replace('Z', '+00:00'))
-                        hold_total_mins += (_parse_dt(closed) - _parse_dt(ts)).total_seconds() / 60
-                        hold_count += 1
-                    except Exception:
-                        pass
-
-                # Streak
-                cur_sign = "W" if p > 0 else "L"
-                if cur_sign == _last_sign:
-                    streak_cur += 1
-                else:
-                    streak_cur = 1
-                    _last_sign = cur_sign
-                if cur_sign == "W":
-                    streak_max_w = max(streak_max_w, streak_cur)
-                else:
-                    streak_max_l = max(streak_max_l, streak_cur)
-
-            avg_hold_mins = (hold_total_mins / hold_count) if hold_count > 0 else 0
-            avg_win  = sum(get_pnl(t) for t in history if get_pnl(t) > 0) / max(wins, 1)
-            avg_loss = sum(get_pnl(t) for t in history if get_pnl(t) <= 0) / max(losses, 1)
-            rr_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
-
-            for ex in exit_stats:
-                exit_stats[ex]["wr"] = exit_stats[ex]["wins"] / exit_stats[ex]["trades"] * 100
-
-            # Top 3 aset terbaik & terburuk
-            sorted_assets = sorted(asset_stats.items(), key=lambda x: x[1]["pnl"], reverse=True)
-            top_assets    = sorted_assets[:3]
-            bot_assets    = sorted_assets[-3:][::-1]
-
-            best_exit  = max(exit_stats, key=lambda x: exit_stats[x]["wr"]) if exit_stats else None
-            worst_exit = min(exit_stats, key=lambda x: exit_stats[x]["wr"]) if exit_stats else None
-
-            pnl_color = "🟢" if total_pnl >= 0 else "🔴"
-            wr_color  = "🟢" if win_rate >= 50 else "🔴"
-            rr_color  = "🟢" if rr_ratio >= 1.0 else "🔴"
-
-            if trades == 0:
+            if trades == 0 and not open_positions:
                 text = (
                     "📔 <b>Trade Journal</b>\n\n"
                     "Belum ada trade yang tercatat.\n\n"
                     "<i>KARA akan merekam otomatis setiap posisi yang ditutup. ✨</i>"
                 )
             else:
-                text = f"📔 <b>Trade Journal</b>  <code>({trades} trade)</code>\n\n"
+                text = f"📔 <b>Trade Journal</b>  <code>({trades} closed, {len(open_positions)} active)</code>\n\n"
+                
+                # Tambahkan info posisi aktif jika ada
+                if open_positions:
+                    text += "⏳ <b>Posisi Sedang Berjalan:</b>\n"
+                    for p in open_positions:
+                        # Estimate floating PnL
+                        price = 0
+                        if self.bot_app and self.bot_app.cache:
+                            ctx = self.bot_app.cache.funding.get(p.asset)
+                            if ctx: price = float(ctx.get("markPx", 0))
+                        
+                        f_pnl = p.unrealized_pnl(price) if price > 0 else 0
+                        p_sign = "+" if f_pnl >= 0 else ""
+                        text += f"  • {p.asset} {p.side.value.upper()}: <b>{p_sign}{format_idr(f_pnl)}</b> (floating)\n"
+                    text += "\n"
+
+                # Statistik per aset
+                asset_stats: Dict[str, Dict] = {}
+                exit_stats:  Dict[str, Dict] = {}
+                hold_total_mins = 0.0
+                hold_count = 0
+                streak_cur = 0
+                streak_max_w = 0
+                streak_max_l = 0
+                _last_sign = None
+
+                for t in history:
+                    a  = t.get("asset") or "?"
+                    p  = get_pnl(t)
+                    ex = get_reason(t)
+
+                    if a not in asset_stats:
+                        asset_stats[a] = {"trades": 0, "wins": 0, "pnl": 0.0}
+                    asset_stats[a]["trades"] += 1
+                    asset_stats[a]["pnl"]    += p
+                    if p > 0:
+                        asset_stats[a]["wins"] += 1
+
+                    if ex not in exit_stats:
+                        exit_stats[ex] = {"trades": 0, "wins": 0}
+                    exit_stats[ex]["trades"] += 1
+                    if p > 0:
+                        exit_stats[ex]["wins"] += 1
+
+                    # Hold time
+                    ts     = t.get("timestamp") or t.get("opened_at")
+                    closed = t.get("closed_at")
+                    if ts and closed:
+                        try:
+                            def _parse_dt(v):
+                                if isinstance(v, (int, float)):
+                                    return datetime.fromtimestamp(v, tz=timezone.utc)
+                                return datetime.fromisoformat(str(v).replace('Z', '+00:00'))
+                            hold_total_mins += (_parse_dt(closed) - _parse_dt(ts)).total_seconds() / 60
+                            hold_count += 1
+                        except Exception:
+                            pass
+
+                    # Streak
+                    cur_sign = "W" if p > 0 else "L"
+                    if cur_sign == _last_sign:
+                        streak_cur += 1
+                    else:
+                        streak_cur = 1
+                        _last_sign = cur_sign
+                    if cur_sign == "W":
+                        streak_max_w = max(streak_max_w, streak_cur)
+                    else:
+                        streak_max_l = max(streak_max_l, streak_cur)
+
+                avg_hold_mins = (hold_total_mins / hold_count) if hold_count > 0 else 0
+                avg_win  = (sum(get_pnl(t) for t in history if get_pnl(t) > 0) / max(wins, 1)) if wins > 0 else 0
+                avg_loss = (sum(get_pnl(t) for t in history if get_pnl(t) <= 0) / max(losses, 1)) if losses > 0 else 0
+                rr_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+
+                for ex in exit_stats:
+                    exit_stats[ex]["wr"] = exit_stats[ex]["wins"] / exit_stats[ex]["trades"] * 100
+
+                # Top 3 aset terbaik & terburuk
+                sorted_assets = sorted(asset_stats.items(), key=lambda x: x[1]["pnl"], reverse=True)
+                top_assets    = sorted_assets[:3]
+                bot_assets    = sorted_assets[-3:][::-1]
+
+                best_exit  = max(exit_stats, key=lambda x: exit_stats[x]["wr"]) if exit_stats else None
+                worst_exit = min(exit_stats, key=lambda x: exit_stats[x]["wr"]) if exit_stats else None
+
+                pnl_color = "🟢" if total_pnl >= 0 else "🔴"
+                wr_color  = "🟢" if win_rate >= 50 else "🔴"
+                rr_color  = "🟢" if rr_ratio >= 1.0 else "🔴"
 
                 # ── Ringkasan ────────────────────────────────────────────
                 text += (
@@ -1195,6 +1207,7 @@ class KaraTelegram:
 
             await update.effective_message.reply_html(text)
         except Exception as e:
+            log.error(f"Journal error: {e}", exc_info=True)
             await update.effective_message.reply_html(f"❌ Journal Error: {e}")
 
     async def cmd_daily(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1243,10 +1256,6 @@ class KaraTelegram:
             footer=footer
         )
         await self.send_text(text, target_chat_id=target_chat_id)
-
-
-
-
 
     async def cmd_enable_auto(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
@@ -1355,19 +1364,45 @@ class KaraTelegram:
             from core.db import user_db
             history = user_db.get_trade_history(chat_id, limit=5000)
             
-            if not history:
+            # [NEW] Sertakan posisi aktif juga di export
+            session = await self.bot_app.get_session(chat_id) if self.bot_app else None
+            open_positions = session.executor.open_positions if session else []
+
+            if not history and not open_positions:
                 await update.effective_message.reply_html(
                     "❌ <b>Gagal:</b> Belum ada data trade untuk di-export.\n\n"
                     "<i>Tunggu sampai ada posisi yang dibuka atau ditutup ya!</i>"
                 )
                 return
 
-            # Generate individual Excel on-the-fly
-            import pandas as pd
-            import tempfile
+            # Combine history and open positions for the export
+            export_data = []
+            
+            # Add open positions first
+            for p in open_positions:
+                export_data.append({
+                    "timestamp": p.opened_at,
+                    "asset": p.asset,
+                    "side": p.side.value.upper(),
+                    "type": "OPEN",
+                    "entry_price": p.entry_price,
+                    "exit_price": None,
+                    "size": p.size_current,
+                    "notional": p.size_current * p.entry_price,
+                    "pnl": 0,
+                    "pnl_pct": 0,
+                    "score": getattr(p, 'entry_score', 0),
+                    "reason": "ACTIVE",
+                    "pos_id": p.position_id
+                })
+            
+            # Add closed history
+            export_data.extend(history)
             
             # Normalize list of dicts to flat DataFrame for Excel
-            df = pd.DataFrame(history)
+            import pandas as pd
+            import tempfile
+            df = pd.DataFrame(export_data)
             
             column_map = {
                 "timestamp": "Time (UTC)",
@@ -1400,7 +1435,7 @@ class KaraTelegram:
                         filename=f"KARA_History_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         caption=(
                             "📊 <b>KARA Trade History (Private)</b>\n\n"
-                            f"Berikut riwayat trading eksklusif kamu ({len(history)} trades).\n"
+                            f"Berikut riwayat trading eksklusif kamu ({len(export_data)} trades).\n"
                             "<i>Data ini sudah difilter dan tidak bercampur dengan user lain.</i>"
                         ),
                         parse_mode="HTML"
@@ -1451,6 +1486,36 @@ class KaraTelegram:
             await msg.reply_html(text, reply_markup=keyboard)
         else:
             log.warning("cmd_mode called but effective_message is None")
+
+    async def cmd_dbinfo(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Diagnostic command to check database and storage status."""
+        if not self._is_authorized(update): return
+        
+        import config as _cfg
+        import os
+        from core.db import user_db
+        
+        db_path = _cfg.DB_PATH
+        db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+        
+        storage_dir = _cfg.STORAGE_DIR
+        is_writable = os.access(storage_dir, os.W_OK) if os.path.exists(storage_dir) else False
+        
+        # Check for persistent volume sentinel
+        sentinel = os.path.join(storage_dir, ".kara_persistence_sentinel")
+        is_persistent = os.path.exists(sentinel)
+        
+        text = (
+            "🗄️ <b>Database Diagnostic</b>\n\n"
+            f"• <b>Path:</b> <code>{db_path}</code>\n"
+            f"• <b>Size:</b> {db_size / 1024:.1f} KB\n"
+            f"• <b>Storage:</b> <code>{storage_dir}</code>\n"
+            f"• <b>Writable:</b> {'✅ Yes' if is_writable else '❌ No'}\n"
+            f"• <b>Persistent:</b> {'✅ Yes (Volume detected)' if is_persistent else '⚠️ No (Ephemeral)'}\n\n"
+            "<i>Note: Jika 'Persistent' bertanda ⚠️, data akan hilang saat bot restart/redeploy.</i>"
+        )
+        
+        await update.effective_message.reply_html(text)
 
     async def cmd_paper(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Switch user back to paper mode and clear state."""

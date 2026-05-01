@@ -945,22 +945,18 @@ class KaraBot:
                 log.debug(f"[SCALPER] {chat_id}: no dedicated scalper signal this cycle, using standard signal as fallback.")
 
 
-            # ── Fetch Dynamic ATR (calculated once per signal if needed)
+            # ATR dihitung untuk localize_for_user saja.
+            # SL aktual diset oleh calculate_levels() di bawah — bukan dari atr_value ini.
             atr_value = 0.0
             if getattr(config, 'RISK', None) and getattr(config.RISK, 'enable_atr_sl', False):
                 try:
-                    # Fetch recent candles (1m interval) for ATR calculation
                     candles = await self.hl_client.get_candles(
                         user_signal.asset, "1m", limit=config.RISK.atr_lookback
                     )
                     if candles:
                         atr_value = session.risk_mgr.calculate_atr(candles)
-                        if atr_value > 0:
-                            log.info(f"📐 [ATR-SL] Calculated for {user_signal.asset}: daily_vol={atr_value*100:.3f}% sl_pct={max(atr_value * config.RISK.atr_multiplier, config.RISK.default_sl_pct)*100:.3f}%")
-                    else:
-                        log.warning(f"⚠️  [ATR] No candles returned for {user_signal.asset}, using fixed SL.")
                 except Exception as e:
-                    log.error(f"Failed to calculate dynamic ATR for {user_signal.asset}: {e}")
+                    log.debug(f"ATR calc skipped for {user_signal.asset}: {e}")
                 
             user_signal.localize_for_user(user_mode, atr_value=atr_value)
 

@@ -15,49 +15,49 @@ class ExperienceBuffer:
         self._init_db()
 
     def _get_conn(self):
-        return sqlite3.connect(self.db_path, check_same_thread=False)
+        # sqlite3.connect membuat file baru jika tidak ada, tapi TIDAK membuat tabel.
+        # Setelah hard reset menghapus kara_ml.db, file baru terbentuk tapi tabel kosong.
+        # Solusi: cek keberadaan tabel setiap kali connect, buat jika belum ada.
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        try:
+            conn.execute("SELECT 1 FROM ml_experience LIMIT 1")
+        except sqlite3.OperationalError:
+            # Tabel belum ada — ini terjadi setelah hard reset atau fresh deploy
+            self._create_tables(conn)
+        return conn
+
+    def _create_tables(self, conn):
+        """Buat schema tabel. Dipanggil saat file baru atau tabel tidak ada."""
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ml_experience (
+                pos_id TEXT PRIMARY KEY,
+                chat_id TEXT,
+                timestamp REAL,
+                asset TEXT,
+                side TEXT,
+                score INTEGER,
+                meta_delta INTEGER,
+                oi_score INTEGER,
+                funding_score INTEGER,
+                liq_score INTEGER,
+                ob_score INTEGER,
+                session_bonus INTEGER,
+                funding_rate REAL,
+                realized_vol REAL,
+                trend_pct REAL,
+                expected_edge REAL,
+                actual_pnl_pct REAL,
+                duration_sec REAL,
+                is_win INTEGER
+            )
+        ''')
+        conn.commit()
 
     def _init_db(self):
         with self._lock:
-            conn = self._get_conn()
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS ml_experience (
-                    pos_id TEXT PRIMARY KEY,
-                    chat_id TEXT,
-                    timestamp REAL,
-                    asset TEXT,
-                    side TEXT,
-                    score INTEGER,
-                    meta_delta INTEGER,
-                    oi_score INTEGER,
-                    funding_score INTEGER,
-                    liq_score INTEGER,
-                    ob_score INTEGER,
-                    session_bonus INTEGER,
-                    funding_rate REAL,
-                    realized_vol REAL,
-                    trend_pct REAL,
-                    expected_edge REAL,
-                    
-                    actual_pnl_pct REAL,
-                    duration_sec REAL,
-                    is_win INTEGER  -- 1 if Win, 0 if Loss, NULL if pending
-                )
-            ''')
-            
-            # Migration: Add chat_id if missing in existing database
-            try:
-                cursor.execute("PRAGMA table_info(ml_experience)")
-                cols = [c[1] for c in cursor.fetchall()]
-                if "chat_id" not in cols:
-                    log.warning("🛡️ [Migration] Adding missing chat_id column to ml_experience...")
-                    cursor.execute("ALTER TABLE ml_experience ADD COLUMN chat_id TEXT")
-                    conn.commit()
-            except Exception as e:
-                log.error(f"Failed to migrate ml_experience: {e}")
-                
-            conn.commit()
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._create_tables(conn)
             conn.close()
 
     def record_entry(self, chat_id: str, pos_id: str, asset: str, side: str, score: int, meta_delta: int, 

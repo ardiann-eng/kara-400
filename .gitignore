@@ -43,11 +43,6 @@ wheels/
 .coverage
 htmlcov/
 
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
 # Logs
 kara.log
 logs/
@@ -70,10 +65,6 @@ docker-compose.override.yml
 
 # Project Persistence (KARA)
 # Allow the folder and its code, but ignore specific database files
-data/*.json
-!data/changelog.json
-data/*.db
-data/*.sqlite
 storage/
 *.json
 !package.json
