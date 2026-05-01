@@ -93,33 +93,10 @@ FERNET_KEY       = os.getenv("FERNET_KEY", "")
 # ──────────────────────────────────────────────
 # DATABASE & PERSISTENCE
 # ──────────────────────────────────────────────
-# Use /app/storage for Railway/Linux, fallback to 'data' for Local/Windows
-STORAGE_DIR      = os.getenv("STORAGE_DIR", "/app/storage" if os.name == 'posix' else "data")
-
-# [BUG FIX 2026-04-28] DB_PATH split storage bug:
-# If DB_PATH is a relative path on Railway (posix), it resolves to /app/kara_data.db
-# which is OUTSIDE the mounted volume at /app/storage → positions/journal reset on deploy
-# while users.json (always under STORAGE_DIR) survives → causing the
-# "positions reset but balance stays" symptom.
-#
-# Fix: on posix, always force DB_PATH to be under STORAGE_DIR.
-_db_path_env = os.getenv("DB_PATH", "")
-if _db_path_env and os.name == "posix" and not os.path.isabs(_db_path_env):
-    # Relative path on Railway — redirect to STORAGE_DIR so it stays on the volume
-    print(
-        f"[CONFIG] ⚠️  DB_PATH='{_db_path_env}' is a relative path on Linux/Railway. "
-        f"Auto-redirecting to STORAGE_DIR to prevent split storage. "
-        f"Fix: set DB_PATH={os.path.join(STORAGE_DIR, 'kara_data.db')} in Railway Variables.",
-        flush=True
-    )
-    DB_PATH = os.path.join(STORAGE_DIR, os.path.basename(_db_path_env))
-elif _db_path_env:
-    DB_PATH = _db_path_env
-else:
-    DB_PATH = os.path.join(STORAGE_DIR, "kara_data.db")
-
-USER_DB_PATH     = os.path.join(STORAGE_DIR, "users.json")
-TG_STATE_PATH    = os.path.join(STORAGE_DIR, "telegram_state.json")
+DB_PATH          = os.getenv("DB_PATH", "kara_data.db")
+USER_DB_PATH     = os.path.join("data", "users.json")
+TG_STATE_PATH    = os.path.join("data", "telegram_state.json")
+STORAGE_DIR      = os.path.dirname(USER_DB_PATH)
 REDIS_URL        = os.getenv("REDIS_URL", "")           # optional
 
 # ──────────────────────────────────────────────
@@ -327,9 +304,23 @@ SIGNAL = SignalConfig()
 # Re-enable ONLY when paper trade menunjukkan SHORT WR > 50% untuk 30+ trades
 ALLOW_SHORT = True   # Re-enabled dengan 3 filter proteksi: funding >= +0.0002, anti-trend > 2%, gap >= 28
 
+# ── HARD RESET ON DEPLOY ──────────────────────────────────────────────────────
+# Set KARA_HARD_RESET=true di env variable Railway/Docker sebelum deploy.
+# Bot akan menghapus SEMUA data saat startup:
+#   - Semua posisi terbuka          (paper_positions)
+#   - Semua saldo user              (paper_state → reset ke Rp1.000.000)
+#   - Semua journal/trade history   (trade_history)
+#   - Semua sinyal history          (signals_history)
+#   - Meta learning stats           (meta_pattern_stats)
+#   - Volatility cache              (vol_cache)
+#   - Risk state per user           (risk_state)
+#   - Seluruh ML experience buffer  (kara_ml.db dihapus)
+#   - Trained Intelligence model    (kara_intelligence.pkl dihapus)
+# Yang TIDAK dihapus: konfigurasi user, wallet address, akses Telegram.
+# PENTING: Ubah kembali ke false setelah deploy agar tidak reset terus!
+HARD_RESET_ON_DEPLOY = os.getenv("KARA_HARD_RESET", "false").lower() == "true"
+
 # Intelligence ML Layer kill switch
-# Data lama (2093 trades) sudah dibersihkan — data dari ATR-SL buggy & paper sim tidak valid.
-# Mulai fresh: model akan mulai collect data bersih, retrain pertama setelah 100 trades.
 # Set env KARA_INTELLIGENCE=false untuk matikan tanpa redeploy.
 ENABLE_INTELLIGENCE = os.getenv("KARA_INTELLIGENCE", "true").lower() == "true"
 

@@ -186,45 +186,89 @@ class UserDB:
             except Exception as e:
                 log.error(f"Failed to init SQLite: {e}")
 
-    def hard_reset_all_data(self):
-        """Wipes all positions, pnl history, and resets all user balances to default."""
+    def hard_reset_all_data(self) -> dict:
+        """
+        Wipe SEMUA data trading — dipanggil saat KARA_HARD_RESET=true di env.
+        Yang dihapus:
+          - kara_data.db: semua tabel (posisi, balance, journal, sinyal, meta, dll)
+          - kara_ml.db: seluruh experience buffer ML
+          - kara_intelligence.pkl: trained model
+          - data/users.json: balance direset ke default, posisi dikosongkan
+        Yang TIDAK dihapus:
+          - Konfigurasi user (leverage, risk preference, wallet address)
+          - Akses Telegram (chat_id tetap terdaftar)
+        Returns dict dengan ringkasan apa yang dihapus.
+        """
+        summary = {}
         with self._lock:
             try:
                 conn = self._get_conn()
                 cursor = conn.cursor()
-                
-                # 1. Clear SQLite tables
-                tables_to_clear = [
+
+                # ── 1. Hapus semua tabel di kara_data.db ────────────────
+                all_tables = [
                     "paper_positions",
                     "paper_state",
-                    "daily_pnl_history",
-                    # trade_history intentionally excluded — trade records must survive resets
+                    "signals_history",
+                    "risk_state",
+                    "meta_pattern_stats",
+                    "vol_cache",
+                    "oi_snapshots",
+                    "history_snapshots",
+                    "trade_history",
                 ]
-                
-                reset_stats = {}
-                for table in tables_to_clear:
-                    cursor.execute(f"DELETE FROM {table}")
-                    reset_stats[table] = cursor.rowcount
-                
-                conn.commit()
-                log.info(f"🛡️ [KARA_RESET] SQLite wipe complete: {reset_stats}")
+                for table in all_tables:
+                    try:
+                        cursor.execute(f"DELETE FROM {table}")
+                        summary[table] = cursor.rowcount
+                    except Exception as te:
+                        # Tabel mungkin belum ada di DB lama — skip, bukan error fatal
+                        log.debug(f"[RESET] Tabel {table} tidak ada atau gagal: {te}")
+                        summary[table] = 0
 
-                # 2. Reset users.json info
+                conn.commit()
+                log.warning(f"🧹 [RESET] kara_data.db wiped: {summary}")
+
+                # ── 2. Hapus kara_ml.db (experience buffer ML) ──────────
+                ml_db_path = os.path.join(config.STORAGE_DIR, "kara_ml.db")
+                if os.path.exists(ml_db_path):
+                    os.remove(ml_db_path)
+                    summary["kara_ml.db"] = "deleted"
+                    log.warning(f"🧹 [RESET] kara_ml.db deleted")
+                else:
+                    summary["kara_ml.db"] = "not_found"
+
+                # ── 3. Hapus kara_intelligence.pkl (trained ML model) ───
+                pkl_path = os.path.join(config.STORAGE_DIR, "kara_intelligence.pkl")
+                if os.path.exists(pkl_path):
+                    os.remove(pkl_path)
+                    summary["kara_intelligence.pkl"] = "deleted"
+                    log.warning(f"🧹 [RESET] kara_intelligence.pkl deleted")
+                else:
+                    summary["kara_intelligence.pkl"] = "not_found"
+
+                # ── 4. Reset users.json — balance kembali ke default ────
                 reset_count = 0
                 for chat_id, user in self.users.items():
                     user.paper_balance_usd = config.PAPER_BALANCE_USD
-                    # We don't wipe hl_agent_address/secret so they don't have to re-setup wallets,
-                    # but we ensure the 'trading state' is fresh.
-                    user.wallet_authorized = False # Forces them to click 'Authorize' check again for safety
+                    user.wallet_authorized = False
                     reset_count += 1
-                
+
                 self.save()
-                log.info(f"🛡️ [KARA_RESET] JSON wipe complete: {reset_count} users reset to ${config.PAPER_BALANCE_USD:.2f}")
-                
-                return True
+                summary["users_reset"] = reset_count
+                log.warning(
+                    f"🧹 [RESET] users.json: {reset_count} users "
+                    f"reset ke ${config.PAPER_BALANCE_USD:.2f}"
+                )
+
+                summary["status"] = "ok"
+                return summary
+
             except Exception as e:
-                log.error(f"❌ [KARA_RESET] Hard reset failed: {e}")
-                return False
+                log.error(f"❌ [RESET] Hard reset gagal: {e}")
+                summary["status"] = "error"
+                summary["error"] = str(e)
+                return summary
 
     # ── OI SNAPSHOTS ──────────────────────────────────────────────────
 
