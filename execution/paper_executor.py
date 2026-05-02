@@ -362,19 +362,21 @@ class PaperExecutor:
                 )
 
         log_data = {
-            "type":      "close",
-            "pos_id":    position_id,
-            "asset":     pos.asset,
-            "side":      pos.side.value,
-            "reason":    reason,
-            "entry_price": pos.entry_price,
-            "exit_price": fill_price,
-            "size":      pos.size_initial,
-            "notional":  pos.size_initial * pos.entry_price,
-            "pnl":       total_pnl,
-            "pnl_pct":   pos.floating_pct(fill_price) * pos.leverage,
-            "score":     pos.entry_score,
-            "timestamp": utcnow(),
+            "type":             "close",
+            "pos_id":           position_id,
+            "asset":            pos.asset,
+            "side":             pos.side.value,
+            "reason":           reason,
+            "entry_price":      pos.entry_price,
+            "exit_price":       fill_price,
+            "size":             pos.size_initial,
+            "notional":         pos.size_initial * pos.entry_price,
+            "pnl":              total_pnl,
+            "pnl_pct":          pos.floating_pct(fill_price) * pos.leverage,
+            "score":            pos.entry_score,
+            "meta_boost":       getattr(pos, "meta_score_delta", 0),
+            "meta_pattern_key": getattr(pos, "meta_pattern_key", ""),
+            "timestamp":        utcnow(),
         }
         self._trade_log.append(log_data)
         get_excel_logger().log_trade(self.chat_id, log_data)

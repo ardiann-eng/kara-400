@@ -1157,10 +1157,12 @@ class KaraBot:
                     pct_sign = "+" if pnl_pct >= 0 else ""
                     pnl_sign = "+" if pnl >= 0 else ""
 
+                    outcome   = "✅ Profit" if pnl >= 0 else "❌ Loss"
                     await self.telegram.send_text(
                         f"⏱ <b>{pos.asset} {pos.side.value.upper()} {lev}x — Time Exit</b>\n"
                         f"<i>Batas waktu {hold_min} menit tercapai, posisi ditutup otomatis.</i>\n\n"
-                        f"<code>{pct_sign}{pnl_pct:.2f}%  |  {pnl_sign}${abs(pnl):.2f}  |  ${pos.entry_price:.5g} → ${price:.5g}</code>",
+                        f"{outcome}  <code>{pct_sign}{pnl_pct:.2f}%  |  {pnl_sign}${abs(pnl):.2f}</code>\n"
+                        f"<code>${pos.entry_price:.5g} → ${price:.5g}</code>",
                         target_chat_id=chat_id
                     )
 
