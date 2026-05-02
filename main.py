@@ -1148,16 +1148,19 @@ class KaraBot:
                         continue
                     pnl      = float(a.get("pnl", 0.0))
                     price    = float(a.get("price", pos.entry_price))
-                    pnl_pct  = pos.floating_pct(price) * 100
+                    lev      = getattr(pos, "leverage", 1) or 1
+                    pnl_pct  = pos.floating_pct(price) * lev * 100
                     opened   = pos.opened_at
                     if opened.tzinfo is None:
                         opened = opened.replace(tzinfo=_tz.utc)
-                    hold_min = int((  _dt.now(_tz.utc) - opened).total_seconds() / 60)
+                    hold_min = int((_dt.now(_tz.utc) - opened).total_seconds() / 60)
                     pct_sign = "+" if pnl_pct >= 0 else ""
-                    emoji    = "✅" if pnl >= 0 else "🔴"
+                    pnl_sign = "+" if pnl >= 0 else ""
+
                     await self.telegram.send_text(
-                        f"{emoji} <b>{pos.asset} ditutup</b>\n"
-                        f"${abs(pnl):.2f}  •  {pct_sign}{pnl_pct:.2f}%  •  {hold_min} menit",
+                        f"⏱ <b>{pos.asset} {pos.side.value.upper()} {lev}x — Time Exit</b>\n"
+                        f"<i>Batas waktu {hold_min} menit tercapai, posisi ditutup otomatis.</i>\n\n"
+                        f"<code>{pct_sign}{pnl_pct:.2f}%  |  {pnl_sign}${abs(pnl):.2f}  |  ${pos.entry_price:.5g} → ${price:.5g}</code>",
                         target_chat_id=chat_id
                     )
 
