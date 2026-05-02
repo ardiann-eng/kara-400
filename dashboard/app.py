@@ -467,6 +467,82 @@ async def set_mode(mode: str):
     return {"status": "success" if success else "no_change", "mode": _mode_manager.mode}
 
 
+# ── ML Intelligence — Meta Patterns ─────────────────────────────────────────
+
+@app.get("/api/ml_meta_patterns")
+async def get_ml_meta_patterns():
+    try:
+        import sqlite3, time
+        db_path = config.DB_PATH
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT pattern_key, winrate_ema, pnl_ema, samples, updated_at FROM meta_pattern_stats ORDER BY samples DESC LIMIT 60"
+        ).fetchall()
+        conn.close()
+
+        patterns = []
+        for r in rows:
+            key = r["pattern_key"]          # e.g. "scalper_APE_long"
+            parts = key.split("_")
+            mode  = parts[0] if len(parts) >= 3 else "?"
+            side  = parts[-1] if len(parts) >= 3 else "?"
+            asset = "_".join(parts[1:-1])   # handles multi-underscore assets
+            patterns.append({
+                "key":       key,
+                "mode":      mode,
+                "asset":     asset.upper(),
+                "side":      side.upper(),
+                "winrate":   round(r["winrate_ema"] * 100, 1),
+                "pnl_ema":   round(r["pnl_ema"], 2),
+                "samples":   r["samples"],
+                "updated_at": int(r["updated_at"] or 0),
+            })
+        return {"patterns": patterns}
+    except Exception as e:
+        log.warning(f"[ML Meta] {e}")
+        return {"patterns": []}
+
+
+@app.get("/api/ml_decision_feed")
+async def get_ml_decision_feed():
+    """Last 30 meta scoring decisions from trade history."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT asset, side, pnl_usd, pnl_pct, data, created_at FROM trade_history ORDER BY created_at DESC LIMIT 30"
+        ).fetchall()
+        conn.close()
+
+        import json as _json
+        feed = []
+        for r in rows:
+            try:
+                d = _json.loads(r["data"] or "{}")
+            except Exception:
+                d = {}
+            meta_key   = d.get("meta_pattern_key", "")
+            meta_boost = d.get("meta_boost", None)
+            score      = d.get("score", d.get("entry_score", 0))
+            feed.append({
+                "asset":      r["asset"],
+                "side":       r["side"].upper(),
+                "pnl_usd":    round(r["pnl_usd"] or 0, 2),
+                "pnl_pct":    round((r["pnl_pct"] or 0) * 100, 1),
+                "score":      score,
+                "meta_key":   meta_key,
+                "meta_boost": meta_boost,
+                "created_at": int(r["created_at"] or 0),
+                "win":        (r["pnl_usd"] or 0) > 0,
+            })
+        return {"feed": feed}
+    except Exception as e:
+        log.warning(f"[ML Feed] {e}")
+        return {"feed": []}
+
+
 # ── ML Intelligence Status ──────────────────────────────────────────────────
 
 @app.get("/api/ml_status")

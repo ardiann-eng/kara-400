@@ -1130,6 +1130,33 @@
           </div>
         </div>
 
+        <!-- Row 5: Meta Pattern Heatmap -->
+        <div class="glass p-4 md:p-5 mb-4">
+          <div class="flex items-center justify-between mb-4">
+            <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(196,181,253,.4)">Meta Pattern Heatmap</div>
+            <div class="text-xs font-mono" style="color:rgba(196,181,253,.3)">Win Rate per Pola Trading</div>
+          </div>
+          <!-- Legend -->
+          <div class="flex gap-4 mb-3 text-xs" style="color:rgba(196,181,253,.4)">
+            <span><span class="inline-block w-3 h-3 rounded mr-1" style="background:rgba(52,211,153,.7);vertical-align:middle"></span>≥70% WR</span>
+            <span><span class="inline-block w-3 h-3 rounded mr-1" style="background:rgba(250,204,21,.6);vertical-align:middle"></span>50–70%</span>
+            <span><span class="inline-block w-3 h-3 rounded mr-1" style="background:rgba(248,113,113,.6);vertical-align:middle"></span>&lt;50%</span>
+            <span style="margin-left:auto" id="meta-pattern-count" class="font-mono"></span>
+          </div>
+          <div id="meta-pattern-grid" class="flex flex-wrap gap-2"></div>
+          <div id="meta-pattern-empty" class="text-xs py-4 text-center" style="color:rgba(196,181,253,.3);display:none">Belum ada data pattern. Bot butuh beberapa trade dulu.</div>
+        </div>
+
+        <!-- Row 6: Live Decision Feed -->
+        <div class="glass p-4 md:p-5">
+          <div class="flex items-center justify-between mb-4">
+            <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(196,181,253,.4)">Live Decision Feed</div>
+            <div class="text-xs font-mono" style="color:rgba(196,181,253,.3)">30 Trade Terakhir + Meta Reasoning</div>
+          </div>
+          <div id="ml-decision-feed" class="flex flex-col gap-2"></div>
+          <div id="ml-feed-empty" class="text-xs py-4 text-center" style="color:rgba(196,181,253,.3);display:none">Belum ada trade tercatat.</div>
+        </div>
+
       </div><!-- /page-ml-intelligence -->
 
     </div><!-- /p-4 -->
@@ -1243,7 +1270,7 @@
       else if (p === 'all-users') loadUsers();
       else if (p === 'recent-trades') loadTrades();
       else if (p === 'user-settings') populateUserSelect();
-      else if (p === 'ml-intelligence') loadMlStatus();
+      else if (p === 'ml-intelligence') loadMlIntelligencePage();
     }
 
     // --- Overview Charts Logic ---
@@ -1797,9 +1824,120 @@
       }
     }
 
+    // ── Meta Pattern Heatmap ─────────────────────────────────────────────────
+    async function loadMetaPatterns() {
+      try {
+        const d = await api('/api/ml_meta_patterns');
+        const grid  = document.getElementById('meta-pattern-grid');
+        const empty = document.getElementById('meta-pattern-empty');
+        const count = document.getElementById('meta-pattern-count');
+
+        if (!d.patterns || !d.patterns.length) {
+          grid.innerHTML = '';
+          empty.style.display = 'block';
+          return;
+        }
+        empty.style.display = 'none';
+        count.textContent = `${d.patterns.length} pola`;
+
+        grid.innerHTML = d.patterns.map(p => {
+          const wr = p.winrate;
+          const bg = wr >= 70
+            ? 'rgba(52,211,153,.15)'
+            : wr >= 50
+              ? 'rgba(250,204,21,.12)'
+              : 'rgba(248,113,113,.12)';
+          const border = wr >= 70
+            ? 'rgba(52,211,153,.35)'
+            : wr >= 50
+              ? 'rgba(250,204,21,.3)'
+              : 'rgba(248,113,113,.3)';
+          const txtColor = wr >= 70 ? '#34d399' : wr >= 50 ? '#fbbf24' : '#f87171';
+          const pnlSign = p.pnl_ema >= 0 ? '+' : '';
+          const sideEmoji = p.side === 'LONG' ? '▲' : '▼';
+          const modeTag = p.mode === 'scalper' ? '⚡' : '📊';
+          return `<div title="${p.key} | ${p.samples} trades | avg PnL ${pnlSign}$${p.pnl_ema}"
+            style="
+              padding:8px 10px;border-radius:10px;min-width:100px;cursor:default;
+              background:${bg};border:1px solid ${border};
+              display:flex;flex-direction:column;gap:2px;">
+            <div style="font-size:11px;font-weight:700;color:#e2e8f0;font-family:JetBrains Mono,monospace">
+              ${modeTag} ${p.asset} ${sideEmoji}
+            </div>
+            <div style="font-size:13px;font-weight:800;color:${txtColor};font-family:JetBrains Mono,monospace">
+              ${wr}%
+            </div>
+            <div style="font-size:10px;color:rgba(196,181,253,.45)">${p.samples}x &nbsp;${pnlSign}$${p.pnl_ema}</div>
+          </div>`;
+        }).join('');
+      } catch(e) {
+        console.warn('Meta patterns error:', e);
+      }
+    }
+
+    // ── Live Decision Feed ────────────────────────────────────────────────────
+    async function loadDecisionFeed() {
+      try {
+        const d = await api('/api/ml_decision_feed');
+        const feed  = document.getElementById('ml-decision-feed');
+        const empty = document.getElementById('ml-feed-empty');
+
+        if (!d.feed || !d.feed.length) {
+          feed.innerHTML = '';
+          empty.style.display = 'block';
+          return;
+        }
+        empty.style.display = 'none';
+
+        feed.innerHTML = d.feed.map(f => {
+          const pnlColor  = f.win ? '#34d399' : '#f87171';
+          const pnlSign   = f.pnl_usd >= 0 ? '+' : '';
+          const sideColor = f.side === 'LONG' ? '#34d399' : '#f87171';
+          const sideEmoji = f.side === 'LONG' ? '▲' : '▼';
+          const ts = f.created_at ? new Date(f.created_at * 1000).toLocaleTimeString('id-ID', {hour:'2-digit',minute:'2-digit'}) : '--:--';
+
+          let metaHtml = '';
+          if (f.meta_boost !== null && f.meta_boost !== undefined) {
+            const bColor = f.meta_boost >= 0 ? '#a78bfa' : '#f87171';
+            const bSign  = f.meta_boost >= 0 ? '+' : '';
+            metaHtml = `<span style="font-size:10px;color:${bColor};margin-left:6px">Meta ${bSign}${f.meta_boost}</span>`;
+          }
+          const reasonText = f.meta_key
+            ? `Score ${f.score}/100 · ${f.meta_key}${metaHtml ? '' : ''}`
+            : `Score ${f.score}/100`;
+
+          return `<div style="
+              display:flex;align-items:center;gap-10px;padding:8px 10px;border-radius:10px;gap:10px;
+              background:rgba(196,181,253,.04);border:1px solid rgba(196,181,253,.08)">
+            <!-- Time -->
+            <div style="font-size:10px;color:rgba(196,181,253,.3);font-family:JetBrains Mono,monospace;min-width:38px">${ts}</div>
+            <!-- Asset + side -->
+            <div style="min-width:90px">
+              <span style="font-size:12px;font-weight:700;color:#e2e8f0;font-family:JetBrains Mono,monospace">${f.asset}</span>
+              <span style="font-size:11px;color:${sideColor};margin-left:4px">${sideEmoji} ${f.side}</span>
+            </div>
+            <!-- Reasoning -->
+            <div style="flex:1;font-size:11px;color:rgba(196,181,253,.5)">${reasonText}${metaHtml}</div>
+            <!-- PnL -->
+            <div style="font-size:12px;font-weight:700;color:${pnlColor};font-family:JetBrains Mono,monospace;min-width:70px;text-align:right">
+              ${pnlSign}$${Math.abs(f.pnl_usd).toFixed(2)}
+            </div>
+          </div>`;
+        }).join('');
+      } catch(e) {
+        console.warn('Decision feed error:', e);
+      }
+    }
+
+    function loadMlIntelligencePage() {
+      loadMlStatus();
+      loadMetaPatterns();
+      loadDecisionFeed();
+    }
+
     setInterval(() => {
       if (S.page === 'overview') loadOverview();
-      if (S.page === 'ml-intelligence') loadMlStatus();
+      if (S.page === 'ml-intelligence') loadMlIntelligencePage();
     }, 10000);
     loadOverview();
   </script>
