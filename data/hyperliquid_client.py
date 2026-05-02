@@ -918,6 +918,49 @@ class HyperliquidClient:
             log.error(f"place_order error: {e}")
             raise
 
+    async def place_sl_order(
+        self,
+        asset: str,
+        is_buy: bool,
+        sz: float,
+        trigger_px: float,
+    ) -> Dict[str, Any]:
+        """
+        Pasang Stop-Loss sebagai trigger order on-chain di Hyperliquid.
+        Trigger order ini aktif di exchange — tetap berlaku meski bot mati.
+
+        Cara kerja:
+          - is_buy=True  → SL untuk posisi SHORT (beli untuk tutup short)
+          - is_buy=False → SL untuk posisi LONG  (jual untuk tutup long)
+          - isMarket=True → saat trigger_px tersentuh, eksekusi IOC (market-like)
+          - tpsl="sl"    → Hyperliquid tandai sebagai stop-loss order
+          - reduce_only=True → hanya menutup posisi, tidak membuka baru
+        """
+        if not self._exchange:
+            raise RuntimeError("Exchange client not initialized - check private key")
+
+        order_type = {
+            "trigger": {
+                "triggerPx": trigger_px,
+                "isMarket": True,   # eksekusi market saat triggered, bukan limit
+                "tpsl": "sl",
+            }
+        }
+        try:
+            result = await self._run(
+                self._exchange.order,
+                asset, is_buy, sz, trigger_px, order_type,
+                reduce_only=True
+            )
+            log.info(
+                f"🛡️  SL on-chain placed: {asset} {'BUY' if is_buy else 'SELL'} "
+                f"{sz} @ trigger={trigger_px}"
+            )
+            return result
+        except Exception as e:
+            log.error(f"place_sl_order error: {e}")
+            raise
+
     async def cancel_order(self, asset: str, order_id: int) -> Dict[str, Any]:
         """Cancel an open order."""
         if not self._exchange:

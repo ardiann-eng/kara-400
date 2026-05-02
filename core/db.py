@@ -51,7 +51,11 @@ class UserDB:
         db_dir = os.path.dirname(os.path.abspath(self.db_path))
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
-        
+
+        log.warning(f"📂 [DB] users.json → {os.path.abspath(self.file_path)}")
+        log.warning(f"📂 [DB] kara_data.db → {os.path.abspath(self.db_path)}")
+        log.warning(f"📂 [DB] STORAGE_BASE env = {os.getenv('STORAGE_BASE', '(not set, using default)')}")
+
         self.load()
         self._init_sqlite()
 

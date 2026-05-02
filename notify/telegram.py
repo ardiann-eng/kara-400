@@ -953,7 +953,7 @@ class KaraTelegram:
         for pos in positions:
             current    = live_prices.get(pos.asset, pos.entry_price)
             unreal_pnl = pos.unrealized_pnl(current)
-            float_pct  = pos.floating_pct(current) * 100
+            float_pct  = pos.roe_pct(current) * 100
             pnl_sign   = "+" if float_pct >= 0 else ""
             pnl_emoji  = "🟢" if float_pct >= 0 else "🔴"
             side_str   = pos.side.value.upper()
@@ -984,7 +984,7 @@ class KaraTelegram:
 
             text += (
                 f"\n"
-                f"<b>{asset_html} {side_str} {pos.leverage}x</b>   {pnl_emoji} {pnl_sign}{float_pct:.2f}%\n"
+                f"<b>{asset_html} {side_str} {pos.leverage}x</b>   {pnl_emoji} {pnl_sign}{float_pct:.2f}% (ROE)\n"
                 f"Entry: ${format_price(pos.entry_price)} → ${format_price(current)}\n"
                 f"🛡️ SL: ${format_price(pos.stop_loss)} | 💥 Liq: ${format_price(pos.liquidation_price) if pos.liquidation_price else '?'}\n"
                 f"🎯 TP1: ${format_price(pos.tp1)}   🎯 TP2: ${format_price(pos.tp2)}   | {duration} lalu\n"
@@ -1869,8 +1869,8 @@ class KaraTelegram:
         entry   = pos.entry_price
         side_str = "LONG" if pos.side.value == "long" else "SHORT"
         
-        # Calculate PnL % based on initial size
-        pnl_pct  = (pnl / (pos.size_initial * entry)) * 100 if (entry and pos.size_initial) else 0
+        # Calculate ROE % (leverage-adjusted)
+        pnl_pct  = (pnl / (pos.size_initial * entry)) * pos.leverage * 100 if (entry and pos.size_initial) else 0
         pnl_sign = "+" if pnl >= 0 else ""
 
         if action_type == "tp1":
@@ -1949,7 +1949,7 @@ class KaraTelegram:
                     close_data_card = {
                         "exit_price": current,
                         "pnl": total_pnl_for_card,
-                        "pnl_pct": pos.floating_pct(current),
+                        "pnl_pct": pos.roe_pct(current),
                         "reason": action_type,
                         "score": getattr(pos, "entry_score", 0) or 0,
                         "duration_sec": (
@@ -2030,7 +2030,7 @@ class KaraTelegram:
 
             pnl_usd = close_data.get("pnl", 0)
             pnl_pct_val = close_data.get("pnl_pct", 0)
-            pct_display = pnl_pct_val * 100 if abs(pnl_pct_val) < 10 else pnl_pct_val
+            pct_display = pnl_pct_val * 100
             sign = "+" if pnl_usd >= 0 else ""
             reason = close_data.get("reason", "")
 
@@ -2341,7 +2341,7 @@ class KaraTelegram:
             except Exception:
                 current = pos.entry_price
                 
-            pnl_pct = pos.floating_pct(current) * 100
+            pnl_pct = pos.roe_pct(current) * 100
             pnl_val = pos.unrealized_pnl(current)
             sign = "+" if pnl_val >= 0 else ""
             

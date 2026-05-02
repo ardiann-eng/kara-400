@@ -167,12 +167,9 @@ class RiskManager:
         # ── Kill switch ───────────────────────────────────────────────
         cfg = self._cfg()
         max_dd = cfg.max_drawdown_pct if hasattr(cfg, 'max_drawdown_pct') else RISK.max_drawdown_pct
-        
-        # Auto-reset if limit was increased or drawdown improved
-        if self._kill_switch and account.current_drawdown_pct < max_dd:
-            log.info(f"🔄 [RISK] Max drawdown recovered ({account.current_drawdown_pct*100:.1f}% < {max_dd*100:.0f}%). Resetting kill switch.")
-            self._kill_switch = False
 
+        # Kill switch TIDAK pernah auto-reset — hanya admin yang bisa reset via reset_kill_switch().
+        # Auto-reset dihapus karena berbahaya: drawdown -95% → harga naik 1% → bot trading lagi dari -93%.
         if self._kill_switch or account.kill_switch_active:
             return False, "🚨 KILL SWITCH ACTIVE - trading stopped (max drawdown hit)"
             

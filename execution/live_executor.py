@@ -47,6 +47,10 @@ class LiveExecutor:
         self._positions: Dict[str, Position] = {}
         self._chain_synced: bool = False
 
+        # SL on-chain order tracking: position_id -> sl_order_id
+        # Dipakai untuk membatalkan SL order saat posisi ditutup manual/TP.
+        self._sl_order_ids: Dict[str, Optional[int]] = {}
+
         log.warning(
             " LIVE executor initialized - REAL MONEY MODE. "
             "Double-check your config before trading."
@@ -118,10 +122,13 @@ class LiveExecutor:
                     pnl_unrealized=upnl,
                 )
                 self._positions[pos.position_id] = pos
+                # Pasang on-chain SL untuk posisi yang dipulihkan setelah restart.
+                # SL default 3% ini lebih baik daripada tidak ada proteksi sama sekali.
+                await self._place_onchain_sl(pos)
                 recovered += 1
                 log.warning(
                     f"[LIVE] Recovered position from chain: {asset} {side.value.upper()} "
-                    f"size={size_abs} entry={entry_px} (SL/TP set to defaults — review manually)"
+                    f"size={size_abs} entry={entry_px} (SL/TP default — on-chain SL @ {stop_loss:.4f} dipasang)"
                 )
 
             self._chain_synced = True
@@ -232,7 +239,9 @@ class LiveExecutor:
             log.warning(" Calculated size is 0, skipping trade.")
             return None
 
-        # Set leverage first
+        # Set leverage first — WAJIB berhasil sebelum order dikirim.
+        # Jika gagal, batalkan trade agar leverage aktual di exchange tidak berbeda
+        # dari yang diharapkan (bisa menyebabkan liquidasi mendadak).
         try:
             await self.client.set_leverage(
                 signal.asset,
@@ -241,8 +250,14 @@ class LiveExecutor:
             )
             log.info(f"⚙️  Leverage set: {signal.asset} {actual_lev}x isolated (Capped)")
         except Exception as e:
-            log.error(f"Failed to set leverage: {e}")
-            # Keep going, might already be set or fail gracefully later
+            err_str = str(e).lower()
+            # Hyperliquid returns error jika leverage sudah sama — itu aman, lanjut.
+            # Error lain (network, auth, invalid leverage) = batalkan trade.
+            if "no change" in err_str or "same leverage" in err_str or "already" in err_str:
+                log.info(f"⚙️  Leverage already set at {actual_lev}x for {signal.asset}, continuing.")
+            else:
+                log.error(f"❌ [LIVE] set_leverage GAGAL untuk {signal.asset}: {e} — membatalkan order untuk keamanan.")
+                return None
 
         # Place Post-Only limit order (slightly inside spread for fill probability)
         # We use the entry_price from signal; if market has moved, order stays open
@@ -283,6 +298,11 @@ class LiveExecutor:
         )
         self._positions[pos.position_id] = pos
 
+        # Pasang SL on-chain sebagai safety net.
+        # SL ini aktif di Hyperliquid exchange — tetap berlindungi meski bot mati/API down.
+        # Bot software tetap juga monitor SL, tapi on-chain SL adalah lapisan terakhir.
+        await self._place_onchain_sl(pos)
+
         log_data = {
             "type":      "open",
             "pos_id":    pos.position_id,
@@ -302,6 +322,84 @@ class LiveExecutor:
             f"| {signal.suggested_leverage}x isolated"
         )
         return pos
+
+    # ──────────────────────────────────────────
+    # SL ON-CHAIN MANAGEMENT
+    # ──────────────────────────────────────────
+
+    async def _place_onchain_sl(self, pos: Position) -> None:
+        """
+        Pasang Stop-Loss sebagai trigger order on-chain di Hyperliquid.
+
+        Ini adalah safety net terakhir: jika bot mati, API down, atau flash crash
+        melewati software SL, order ini tetap aktif di exchange dan akan menutup
+        posisi secara otomatis.
+
+        Catatan: On-chain SL tidak bisa diupdate (hanya bisa cancel + pasang baru).
+        Saat SL software bergerak (misal ke breakeven setelah TP1), bot juga
+        harus cancel SL lama dan pasang yang baru via update_onchain_sl().
+        """
+        try:
+            sl_price = pos.stop_loss
+            if not sl_price or sl_price <= 0:
+                log.warning(f"[SL-CHAIN] {pos.asset}: stop_loss tidak valid ({sl_price}), skip on-chain SL")
+                return
+
+            # Closing a LONG = sell side; closing a SHORT = buy side
+            is_buy = pos.side == Side.SHORT
+            result = await self.client.place_sl_order(
+                asset=pos.asset,
+                is_buy=is_buy,
+                sz=pos.size_current,
+                trigger_px=sl_price,
+            )
+
+            # Simpan order ID untuk dibatalkan saat posisi tutup
+            sl_oid = None
+            try:
+                statuses = result.get("response", {}).get("data", {}).get("statuses", [{}])
+                fill_info = statuses[0] if statuses else {}
+                sl_oid = fill_info.get("resting", {}).get("oid")
+            except Exception:
+                pass
+
+            self._sl_order_ids[pos.position_id] = sl_oid
+            log.info(
+                f"🛡️  [SL-CHAIN] {pos.asset} on-chain SL @ {sl_price} "
+                f"(oid={sl_oid}, side={'BUY' if is_buy else 'SELL'})"
+            )
+        except Exception as e:
+            # On-chain SL gagal = tidak fatal, software SL masih aktif.
+            # Log sebagai warning agar bisa dipantau.
+            log.warning(
+                f"⚠️  [SL-CHAIN] Gagal pasang on-chain SL untuk {pos.asset}: {e}. "
+                f"Software SL tetap aktif."
+            )
+            self._sl_order_ids[pos.position_id] = None
+
+    async def _cancel_onchain_sl(self, pos: Position) -> None:
+        """
+        Batalkan on-chain SL order saat posisi ditutup (TP hit, trailing stop, manual close).
+        Jika tidak dibatalkan, SL order akan tetap di orderbook dan bisa membuka posisi baru
+        yang tidak diinginkan (karena reduce_only=True mencegah ini, tapi lebih bersih dibatalkan).
+        """
+        sl_oid = self._sl_order_ids.pop(pos.position_id, None)
+        if not sl_oid:
+            return
+        try:
+            await self.client.cancel_order(pos.asset, sl_oid)
+            log.info(f"✅ [SL-CHAIN] On-chain SL dibatalkan: {pos.asset} oid={sl_oid}")
+        except Exception as e:
+            log.warning(f"⚠️  [SL-CHAIN] Gagal cancel on-chain SL {pos.asset} oid={sl_oid}: {e}")
+
+    async def update_onchain_sl(self, pos: Position, new_sl_price: float) -> None:
+        """
+        Update on-chain SL ke harga baru (misal setelah TP1 hit → SL pindah ke breakeven).
+        Cara: cancel SL lama, pasang SL baru.
+        """
+        await self._cancel_onchain_sl(pos)
+        pos.stop_loss = new_sl_price
+        await self._place_onchain_sl(pos)
 
     # ──────────────────────────────────────────
     # UPDATE POSITIONS (Active Monitoring)
@@ -358,10 +456,11 @@ class LiveExecutor:
             pos.tp1_hit = True
             pos.trailing_active = True
             pos.trailing_high = current_price
-            # SL move to breakeven is usually handled by RiskManager logic itself if specified,
-            # but we update shadow SL here.
-            pos.stop_loss = pos.entry_price
-            log.info(f" [LIVE] TP1 hit on {pos.asset} - shadow SL moved to breakeven")
+            # SL pindah ke breakeven setelah TP1 — update on-chain SL juga
+            # supaya proteksi on-chain selaras dengan posisi baru.
+            breakeven = pos.entry_price
+            await self.update_onchain_sl(pos, breakeven)
+            log.info(f" [LIVE] TP1 hit on {pos.asset} - SL (software + on-chain) moved to breakeven @ {breakeven}")
         elif action["action"] == "tp2":
             pos.tp2_hit = True
             log.info(f" [LIVE] TP2 hit on {pos.asset}")
@@ -410,9 +509,13 @@ class LiveExecutor:
             if pos.size_current <= 0 or close_ratio >= 1.0:
                 pos.status   = PositionStatus.CLOSED
                 pos.closed_at= utcnow()
+                # Batalkan on-chain SL saat posisi penuh tertutup.
+                # Jika tidak dibatalkan, SL order tetap di orderbook (meski reduce_only
+                # mencegah posisi baru, lebih bersih dan menghindari confusion di UI).
+                await self._cancel_onchain_sl(pos)
 
             self.risk.record_pnl(pnl, (await self.get_account_state()).balance)
-            
+
             log_data = {
                 "type":      "close",
                 "pos_id":    position_id,
@@ -424,7 +527,7 @@ class LiveExecutor:
                 "size":      close_size,
                 "notional":  close_size * pos.entry_price,
                 "pnl":       pnl,
-                "pnl_pct":   pos.floating_pct(current_price),
+                "pnl_pct":   pos.roe_pct(current_price),
                 "score":     getattr(pos, 'entry_score', 0),
                 "timestamp": utcnow(),
             }

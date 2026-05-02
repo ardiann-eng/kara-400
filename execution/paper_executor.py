@@ -372,7 +372,7 @@ class PaperExecutor:
             "size":             pos.size_initial,
             "notional":         pos.size_initial * pos.entry_price,
             "pnl":              total_pnl,
-            "pnl_pct":          pos.floating_pct(fill_price) * pos.leverage,
+            "pnl_pct":          pos.roe_pct(fill_price),
             "score":            pos.entry_score,
             "meta_boost":       getattr(pos, "meta_score_delta", 0),
             "meta_pattern_key": getattr(pos, "meta_pattern_key", ""),

@@ -138,10 +138,12 @@ class RiskConfig:
     tp2_pct:                 float = 0.025    # +2.5% -> close 35%
     trailing_pct:            float = 0.025    # 2.5% trailing on remainder
     # Daily / drawdown guards
-    daily_loss_limit_pct:    float = 0.80     # [RELAXED] 80% daily loss -> pause
-    daily_loss_hard_pct:     float = 0.90     # [RELAXED] 90% -> full stop today
-    max_drawdown_pct:        float = 0.95     # [RELAXED] 95% total drawdown kill-switch
-    post_loss_cooldown_hrs:  float = 5.0      # [RELAXED] cooldown triggered after 50% daily loss
+    # Paper mode: longgar supaya data terkumpul cepat.
+    # Live mode: ketat — override oleh LIVE_RISK di bawah.
+    daily_loss_limit_pct:    float = 0.80     # paper: 80% daily loss -> warning
+    daily_loss_hard_pct:     float = 0.90     # paper: 90% -> full stop today
+    max_drawdown_pct:        float = 0.95     # paper: 95% total drawdown kill-switch
+    post_loss_cooldown_hrs:  float = 5.0      # cooldown triggered after 50% daily loss
 
     # Concurrent positions
     max_concurrent_positions: int  = 10       # max 10 positions
@@ -229,14 +231,32 @@ class ScalperConfig:
     pyramid_at_profit_pct:   float = 0.004   # 0.4%
 
     # Daily guard (scalper can lose fast)
-    daily_loss_hard_pct:     float = 0.90    # [RELAXED] 90% daily loss → stop
-    max_drawdown_pct:        float = 0.95    # [RELAXED] 95% total drawdown kill-switch
+    # Paper mode: longgar supaya data terkumpul cepat.
+    # Live mode: override oleh LIVE_SCALPER_RISK di bawah.
+    daily_loss_hard_pct:     float = 0.90    # paper: 90% daily loss → stop
+    max_drawdown_pct:        float = 0.95    # paper: 95% total drawdown kill-switch
 
     # MTF Score weights
     mtf_score_bonus:         int = 12        # bonus if 1m aligns with 15m trend
     mtf_score_penalty:       int = -15       # penalty if counter-trend
 
 SCALPER = ScalperConfig()
+
+# ──────────────────────────────────────────────
+# LIVE MODE RISK OVERRIDE
+# Berlaku HANYA saat TRADE_MODE=live. Paper mode pakai nilai di atas (longgar).
+# Tujuan: paper mode bisa kumpulkan data sebanyak mungkin,
+#         live mode melindungi modal nyata.
+# ──────────────────────────────────────────────
+if TRADE_MODE == "live":
+    # Standard live risk: berhenti jauh sebelum bangkrut
+    RISK.daily_loss_limit_pct  = 0.05   # 5% daily loss → warning & kurangi size
+    RISK.daily_loss_hard_pct   = 0.08   # 8% daily loss → stop trading hari ini
+    RISK.max_drawdown_pct      = 0.20   # 20% total drawdown → kill switch
+
+    # Scalper live risk: scalper bisa rugi cepat, batas lebih ketat
+    SCALPER.daily_loss_hard_pct = 0.06  # 6% daily loss → stop
+    SCALPER.max_drawdown_pct    = 0.15  # 15% total drawdown → kill switch
 
 # ──────────────────────────────────────────────
 # SIGNAL ENGINE

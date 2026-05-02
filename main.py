@@ -1149,7 +1149,7 @@ class KaraBot:
                     pnl      = float(a.get("pnl", 0.0))
                     price    = float(a.get("price", pos.entry_price))
                     lev      = getattr(pos, "leverage", 1) or 1
-                    pnl_pct  = pos.floating_pct(price) * lev * 100
+                    pnl_pct  = pos.roe_pct(price) * 100
                     opened   = pos.opened_at
                     if opened.tzinfo is None:
                         opened = opened.replace(tzinfo=_tz.utc)

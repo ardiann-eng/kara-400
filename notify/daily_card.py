@@ -207,7 +207,7 @@ def generate_daily_card(
     draw.text((MARGIN, 132), hero_text, font=fonts["hero"], fill=pnl_color)
 
     # PnL % below hero
-    pct_abs = abs(daily_pnl_pct * 100) if abs(daily_pnl_pct) < 10 else abs(daily_pnl_pct)
+    pct_abs = abs(daily_pnl_pct * 100)
     if pct_abs >= 100:
         pct_text = f"{sign}{pct_abs:.0f}%"
     elif pct_abs >= 10:

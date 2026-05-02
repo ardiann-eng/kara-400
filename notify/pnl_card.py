@@ -286,7 +286,7 @@ def generate_pnl_card(
     # ═══════════════════════════════════════════════════════════════════════
     # ROW 2 — PNL % HERO (y=102)
     # ═══════════════════════════════════════════════════════════════════════
-    pct_val = pnl_pct * 100 if abs(pnl_pct) < 10 else pnl_pct
+    pct_val = pnl_pct * 100
     if abs(pct_val) >= 100:
         pct_text = f"{sign}{abs(pct_val):.0f}%"
     elif abs(pct_val) >= 10:
@@ -342,8 +342,8 @@ def generate_pnl_card(
     row5_y = 402
 
     ses_sign    = "+" if session_pnl >= 0 else "-"
-    ses_pct_val = abs(session_pnl_pct * 100) if abs(session_pnl_pct) < 10 else abs(session_pnl_pct)
-    ses_text    = f"{ses_sign}${abs(session_pnl):.2f} ({ses_sign}{ses_pct_val:.1f}%)"
+    pct_abs     = abs(session_pnl_pct * 100)
+    ses_text    = f"{ses_sign}${abs(session_pnl):.2f} ({ses_sign}{pct_abs:.1f}%)"
     ses_color   = C_PROFIT if session_pnl >= 0 else C_LOSS
 
     draw.text((col1_x, row5_y),      "Session PnL", font=fonts["label"], fill=C_LABEL)

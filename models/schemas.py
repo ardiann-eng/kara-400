@@ -318,10 +318,15 @@ class Position(BaseModel):
         return pnl * self.size_current * self.entry_price
 
     def floating_pct(self, current_price: float) -> float:
+        """Raw price move percentage (unleveraged)."""
         if self.side == Side.LONG:
             return (current_price - self.entry_price) / self.entry_price
         else:
             return (self.entry_price - current_price) / self.entry_price
+
+    def roe_pct(self, current_price: float) -> float:
+        """Return on Equity (leverage-adjusted)."""
+        return self.floating_pct(current_price) * self.leverage
 
 
 # ──────────────────────────────────────────────
