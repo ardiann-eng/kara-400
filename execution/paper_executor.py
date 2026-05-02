@@ -372,7 +372,7 @@ class PaperExecutor:
             "size":      pos.size_initial,
             "notional":  pos.size_initial * pos.entry_price,
             "pnl":       total_pnl,
-            "pnl_pct":   pos.floating_pct(fill_price),
+            "pnl_pct":   pos.floating_pct(fill_price) * pos.leverage,
             "score":     pos.entry_score,
             "timestamp": utcnow(),
         }

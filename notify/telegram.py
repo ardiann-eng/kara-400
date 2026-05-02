@@ -827,12 +827,17 @@ class KaraTelegram:
         mode_str  = "PAPER" if acc.mode == BotMode.PAPER else "LIVE"
         # Using the user's preferred emojis from the screenshot/request
         pause_str = "⏸️ PAUSED" if acc.is_paused else "▶️ Active"
-        kill_str  = "🚨 KILL SWITCH" if acc.kill_switch_active else "Normal"
+        kill_str  = "🚨 Aktif (STOP)" if acc.kill_switch_active else "✅ Aman"
 
-        pnl_sign = "+" if acc.unrealized_pnl > 0 else ""
+        pnl_sign   = "+" if acc.unrealized_pnl > 0 else ""
         daily_sign = "+" if acc.daily_pnl > 0 else ""
-        auto_str = "🚀 Full-Auto" if config.FULL_AUTO else "🛡️ Semi-Auto"
-        pos_len = len([p for p in acc.positions if p.status.value == 'open'])
+        auto_str   = "🚀 Full-Auto" if config.FULL_AUTO else "🛡️ Semi-Auto"
+        pos_len    = len([p for p in acc.positions if p.status.value == 'open'])
+
+        # Realized daily PnL = daily_pnl - unrealized (avoid double-counting float)
+        realized_pnl     = acc.daily_pnl - acc.unrealized_pnl
+        realized_sign    = "+" if realized_pnl > 0 else ""
+        realized_pnl_pct = realized_pnl / max(acc.wallet_balance - realized_pnl, 1) * 100
 
         text = (
             f"🌸 <b>KARA System Status</b>\n\n"
@@ -841,12 +846,13 @@ class KaraTelegram:
             f"  • Status: {pause_str}\n"
             f"  • Kill-Switch: {kill_str}\n\n"
             f"📊 <b>Kondisi Dana</b>\n"
-            f"  • Ekuitas: <code>{format_idr(acc.total_equity)}</code> (NAV)\n"
+            f"  • Ekuitas: <code>{format_idr(acc.total_equity)}</code>\n"
             f"  • Saldo Dompet: <code>{format_idr(acc.wallet_balance)}</code>\n"
             f"  • Saldo Tersedia: <code>{format_idr(acc.available)}</code>\n"
-            f"  • Float PnL: <b>{pnl_sign}{format_idr(acc.unrealized_pnl)}</b>\n\n"
-            f"📈 <b>Performa Harian (Total)</b>\n"
-            f"  • Profit Hari Ini: <b>{daily_sign}{format_idr(acc.daily_pnl)}</b> ({daily_sign}{format_pct(acc.daily_pnl_pct)})\n"
+            f"  • Unrealized PnL: <b>{pnl_sign}{format_idr(acc.unrealized_pnl)}</b> (posisi terbuka)\n\n"
+            f"📈 <b>Performa Harian</b>\n"
+            f"  • Realized PnL: <b>{realized_sign}{format_idr(realized_pnl)}</b> ({realized_sign}{realized_pnl_pct:.2f}%)\n"
+            f"  • Total PnL Hari Ini: <b>{daily_sign}{format_idr(acc.daily_pnl)}</b> ({daily_sign}{format_pct(acc.daily_pnl_pct)})\n"
             f"  • Max Drawdown: <code>{format_pct(acc.current_drawdown_pct, show_sign=False)}</code>\n\n"
             f"🎯 <b>Posisi Terbuka:</b> {pos_len} aset\n"
         )
