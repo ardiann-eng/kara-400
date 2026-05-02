@@ -702,13 +702,26 @@ class ScoringEngine:
         """Build a TradeSignal with scalper-specific dynamic TP/SL levels."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
         
-        # Scalper mode pakai SL/TP dari SCALPER config — bukan dynamic vol-based levels
-        # (calculate_tp_levels() didesain untuk standard swing, SL 2-3% jauh untuk scalper)
         import config
         scfg = config.SCALPER
-        sl_pct  = scfg.sl_pct    # 0.65%
-        tp1_pct = scfg.tp1_pct   # 0.85%
-        tp2_pct = scfg.tp2_pct   # 1.50%
+
+        # Dynamic SL: scale with realized_vol, floor at config sl_pct, ceiling at 1.5%
+        # RR ratio tetap 1.125x TP1 dan 1.5x TP2 relatif terhadap SL
+        SL_FLOOR   = scfg.sl_pct          # 0.80%
+        SL_CEILING = 0.0150               # 1.50% max — beyond this scalper isn't viable
+        VOL_MULT   = 1.20                 # SL = vol * 1.2 (noise buffer)
+
+        if realized_vol > 0:
+            sl_pct = max(SL_FLOOR, min(realized_vol * VOL_MULT, SL_CEILING))
+        else:
+            sl_pct = SL_FLOOR
+
+        # TP scaled proportionally to maintain consistent RR
+        rr1 = scfg.tp1_pct / scfg.sl_pct   # ~1.125x
+        rr2 = scfg.tp2_pct / scfg.sl_pct   # ~1.5x
+        tp1_pct = sl_pct * rr1
+        tp2_pct = sl_pct * rr2
+
         leverage = min(scfg.default_leverage, scfg.max_leverage)
 
         if side == Side.LONG:
