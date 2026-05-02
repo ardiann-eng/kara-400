@@ -93,10 +93,13 @@ FERNET_KEY       = os.getenv("FERNET_KEY", "")
 # ──────────────────────────────────────────────
 # DATABASE & PERSISTENCE
 # ──────────────────────────────────────────────
-DB_PATH          = os.getenv("DB_PATH", "kara_data.db")
-USER_DB_PATH     = os.path.join("data", "users.json")
-TG_STATE_PATH    = os.path.join("data", "telegram_state.json")
-STORAGE_DIR      = os.path.dirname(USER_DB_PATH)
+# STORAGE_BASE: di Railway set ke mount point volume (/data).
+# Locally defaults ke ./data agar tidak perlu ubah apapun saat dev.
+STORAGE_BASE     = os.getenv("STORAGE_BASE", "data")
+DB_PATH          = os.getenv("DB_PATH", os.path.join(STORAGE_BASE, "kara_data.db"))
+USER_DB_PATH     = os.path.join(STORAGE_BASE, "users.json")
+TG_STATE_PATH    = os.path.join(STORAGE_BASE, "telegram_state.json")
+STORAGE_DIR      = STORAGE_BASE
 REDIS_URL        = os.getenv("REDIS_URL", "")           # optional
 
 # ──────────────────────────────────────────────

@@ -40,24 +40,26 @@ WAITING_MAIN_ADDRESS = 3
 
 DAILY_REPORT_TEMPLATE = """
 📊 <b>KARA DAILY INSIGHTS</b> 🌸
-──────────────────────────
 📅 <i>Laporan Harian: {date}</i>
 
 💰 <b>KESEHATAN PORTOFOLIO</b>
-• Ekuitas Total: <code>{total_equity}</code>
-• Saldo Dompet : <code>{wallet_balance}</code>
-• Saldo Tersedia: <code>{available}</code>
+• Ekuitas Total  : <code>{total_equity}</code>
+• Saldo Dompet   : <code>{wallet_balance}</code>
+• Saldo Tersedia : <code>{available}</code>
 
-📈 <b>PERFORMER HARI INI</b>
-• Daily PnL    : <b>{pnl_sign}{pnl_val} ({pnl_sign}{pnl_pct})</b> {pnl_emoji}
-• Posisi Aktif : <b>{pos_count} terbuka</b>
-• Max Drawdown : <b>{drawdown}</b>
+📈 <b>PERFORMA HARI INI</b>
+• Daily PnL      : <b>{pnl_sign}{pnl_val} ({pnl_sign}{pnl_pct})</b> {pnl_emoji}
+• Posisi Aktif   : <b>{pos_count} terbuka</b>
+• Max Drawdown   : <b>{drawdown}</b>
+• Win Rate Hari Ini : <b>{win_rate}</b>
+• Total Trades   : <b>{total_trades}</b>
 
 🛡️ <b>STATUS SISTEM</b>
-• Risk Mode    : {mode_icon} <b>{mode_text}</b>
-• Bot Status   : {status_icon} <b>{status_text}</b>
+• Trading Mode   : {mode_icon} <b>{mode_text}</b>
+• Eksekusi       : <b>{exec_mode}</b>
+• Bot Status     : {status_icon} <b>{status_text}</b>
+• Paused Karena  : <b>{pause_reason}</b>
 
-──────────────────────────
 <i>{footer}</i>
 """
 
@@ -1224,19 +1226,56 @@ class KaraTelegram:
 
     async def send_daily_report(self, acc: AccountState, pos_count: int, target_chat_id: str = None):
         """Send the premium daily summary report."""
+        from core.mode_manager import mode_manager as _global_mm
+        import config as _cfg
+
         pnl_sign = "+" if acc.daily_pnl >= 0 else ""
         pnl_emoji = "🟢" if acc.daily_pnl >= 0 else "🔴"
-        mode_text = "SCALPER" if self.mode_manager and self.mode_manager.is_scalper() else "STANDARD"
-        mode_icon = "⚡" if mode_text == "SCALPER" else "📊"
-        
+
+        # Use injected mode_manager if available, fall back to global singleton
+        mm = self.mode_manager or _global_mm
+        is_scalper = mm.is_scalper() if mm else False
+        mode_text = "SCALPER ⚡" if is_scalper else "STANDARD 📊"
+        mode_icon = "⚡" if is_scalper else "📊"
+
+        exec_mode = "Full-Auto 🤖" if getattr(_cfg, "FULL_AUTO", False) else "Semi-Auto 🤝"
+
         # Friendly footers based on performance
         if acc.daily_pnl >= 0:
             footer = "Kerja bagus hari ini! Mari kita jaga momentumnya~ 🌸"
         else:
             footer = "Besok kita balas dendam ke market ya! Tetap disiplin~ 🌸"
 
-        status_text = "OK" if not acc.is_paused else "PAUSED"
-        status_icon = "✅" if status_text == "OK" else "⏸️"
+        if acc.kill_switch_active:
+            status_text = "KILL SWITCH"
+            status_icon = "🚨"
+            pause_reason = "Max drawdown tercapai"
+        elif acc.is_paused:
+            status_text = "PAUSED"
+            status_icon = "⏸️"
+            pause_reason = "Daily loss limit tercapai"
+        else:
+            status_text = "AKTIF"
+            status_icon = "✅"
+            pause_reason = "-"
+
+        # Calculate today's win rate from trade history
+        try:
+            from core.db import user_db
+            chat_id_for_stats = target_chat_id
+            if chat_id_for_stats:
+                history = user_db.load_trade_history(chat_id_for_stats, limit=50)
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                today_trades = [t for t in history if str(t.get("timestamp", "")).startswith(today_str) and t.get("type") == "close"]
+                total_trades = len(today_trades)
+                wins = sum(1 for t in today_trades if (t.get("pnl") or 0) > 0)
+                win_rate = f"{wins/total_trades*100:.0f}% ({wins}/{total_trades})" if total_trades > 0 else "Belum ada trade hari ini"
+            else:
+                total_trades = 0
+                win_rate = "-"
+        except Exception:
+            total_trades = 0
+            win_rate = "-"
 
         text = DAILY_REPORT_TEMPLATE.format(
             date=datetime.now().strftime("%Y-%m-%d"),
@@ -1249,13 +1288,58 @@ class KaraTelegram:
             pnl_emoji=pnl_emoji,
             pos_count=pos_count,
             drawdown=format_pct(acc.current_drawdown_pct, show_sign=False),
+            win_rate=win_rate,
+            total_trades=total_trades,
             mode_icon=mode_icon,
             mode_text=mode_text,
+            exec_mode=exec_mode,
             status_icon=status_icon,
             status_text=status_text,
+            pause_reason=pause_reason,
             footer=footer
         )
-        await self.send_text(text, target_chat_id=target_chat_id)
+
+        # Try to send daily card image first, fall back to text-only
+        try:
+            import io as _io
+            from notify.daily_card import generate_daily_card
+
+            # Derive card stats from trade history
+            losses    = [t for t in today_trades if (t.get("pnl") or 0) < 0] if total_trades > 0 else []
+            all_pnls  = [t.get("pnl", 0) for t in today_trades] if total_trades > 0 else []
+            best_pnl  = max(all_pnls) if all_pnls else 0.0
+            worst_pnl = min(all_pnls) if all_pnls else 0.0
+
+            card_bytes = generate_daily_card(
+                date_str        = datetime.now().strftime("%d %B %Y"),
+                daily_pnl_usd   = acc.daily_pnl,
+                daily_pnl_pct   = acc.daily_pnl_pct,
+                start_balance   = acc.wallet_balance - acc.daily_pnl,
+                end_balance     = acc.wallet_balance,
+                total_trades    = total_trades,
+                win_trades      = wins,
+                loss_trades     = len(losses),
+                best_trade_pnl  = best_pnl,
+                worst_trade_pnl = worst_pnl,
+                max_drawdown_pct = acc.current_drawdown_pct,
+                trading_mode    = "SCALPER" if is_scalper else "STANDARD",
+            )
+
+            send_ids = [target_chat_id] if target_chat_id else list(self._authorized_chat_ids)
+            for cid in send_ids:
+                try:
+                    await self._app.bot.send_photo(
+                        chat_id    = cid,
+                        photo      = _io.BytesIO(card_bytes),
+                        caption    = text,
+                        parse_mode = "HTML",
+                    )
+                except Exception as e:
+                    log.error(f"[DailyCard] send_photo failed for {cid}: {e}")
+                    await self.send_text(text, target_chat_id=cid)
+        except Exception as e:
+            log.error(f"[DailyCard] Card generation failed: {e}")
+            await self.send_text(text, target_chat_id=target_chat_id)
 
     async def cmd_enable_auto(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
@@ -1422,7 +1506,19 @@ class KaraTelegram:
             # Only keep columns that exist in the data
             cols = [c for c in column_map.keys() if c in df.columns]
             df = df[cols].rename(columns=column_map)
-            
+
+            # Strip timezone info from datetime columns so Excel can write them
+            for col in df.columns:
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    df[col] = df[col].dt.tz_localize(None)
+                elif df[col].dtype == object:
+                    try:
+                        converted = pd.to_datetime(df[col], utc=True, errors='coerce')
+                        if converted.notna().any():
+                            df[col] = converted.dt.tz_localize(None)
+                    except Exception:
+                        pass
+
             with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
                 temp_name = tmp.name
             
