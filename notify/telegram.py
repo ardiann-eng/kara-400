@@ -1721,10 +1721,15 @@ class KaraTelegram:
             _im.is_ready = False
             _im.last_train_samples = 0
 
+            # 4. Reset meta pattern stats
+            from core.db import user_db as _udb
+            meta_count = _udb.clear_meta_pattern_stats()
+
             await update.effective_message.reply_html(
                 "✅ <b>ML Intelligence direset!</b>\n\n"
                 "• Database training: <b>kosong</b>\n"
                 "• Model pkl: <b>dihapus</b>\n"
+                f"• Meta patterns: <b>{meta_count} pola dihapus</b>\n"
                 "• AI ABORT: <b>nonaktif</b> sampai 300 trades terkumpul\n\n"
                 "<i>Bot akan mulai kumpulkan data bersih dari sekarang.</i>"
             )

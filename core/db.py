@@ -494,6 +494,21 @@ class UserDB:
                 log.error(f"Error loading meta pattern stats for {pattern_key}: {e}")
         return None
 
+    def clear_meta_pattern_stats(self) -> int:
+        """Hapus semua meta pattern stats. Returns jumlah row yang dihapus."""
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM meta_pattern_stats")
+                count = cursor.fetchone()[0]
+                cursor.execute("DELETE FROM meta_pattern_stats")
+                conn.commit()
+                return count
+            except Exception as e:
+                log.error(f"Error clearing meta pattern stats: {e}")
+                return 0
+
     # ── PAPER POSITIONS & STATE ───────────────────────────────────────
 
     def save_paper_position(self, chat_id: str, pos: Position):

@@ -311,7 +311,7 @@ class SignalConfig:
 
     # Meta-Scoring (Outcome-based learning)
     meta_learning_enabled:   bool = True
-    meta_min_samples:        int = 10         # min 10 trades — 3 too few, EMA unstable
+    meta_min_samples:        int = 5          # min 5 trades before trusting pattern
     meta_boost_threshold:    float = 0.68     # winrate > 68% = +8 pts (was 62%, too easy to reach by luck)
     meta_penalty_threshold:  float = 0.45     # winrate < 45% = -12 pts (was 40%, catches more losers)
     meta_max_delta:          int = 15         # absolute max cap for adj
