@@ -268,9 +268,13 @@ class MarketDataCache:
             self.liquidations.extend(data)
         elif isinstance(data, dict):
             self.liquidations.append(data)
-        self.liquidations = self.liquidations[-100:]
+        
+        # Increase cache from 100 to 1000 to cover more assets over time
+        self.liquidations = self.liquidations[-1000:]
+        
         if len(self.liquidations) > before:
-            log.debug(f"[WS] Liquidation event: +{len(self.liquidations)-before} (total={len(self.liquidations)})")
+            # Change to INFO so user can see that data is actually arriving
+            log.info(f"[WS] Liquidation event: +{len(self.liquidations)-before} (Cache: {len(self.liquidations)})")
 
 
 # Global cache singleton

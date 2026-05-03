@@ -124,12 +124,6 @@ class LiquidationAnalyzer:
         levels = liq_map.levels
         if not levels:
             # ── No liquidation data — use OI-based proxy ─────────────
-            # When WS is dead, use OI magnitude + funding to estimate liq direction.
-            log.debug(
-                f"[LIQ] {liq_map.asset}: WS cache empty, using OI proxy "
-                f"oi_usd=${oi_usd/1e6:.1f}M funding={funding_rate:.6f}"
-            )
-
             if oi_usd > 500_000_000:    # > $500M
                 base_points = 10
                 risk_label = f"Very high OI (${oi_usd/1e9:.1f}B)"
@@ -146,19 +140,23 @@ class LiquidationAnalyzer:
                 base_points = 2
                 risk_label = f"Very low OI (${oi_usd/1e6:.1f}M)"
 
-            # Funding direction: positive = longs crowded = long liq risk = SHORT squeeze
-            # Negative = shorts crowded = short liq risk = LONG squeeze
-            # Real HL rates are +-0.00001 to +-0.00003; threshold set accordingly
+            log.debug(
+                f"[LIQ] {liq_map.asset}: WS cache empty, using OI proxy "
+                f"oi_usd=${oi_usd/1e6:.1f}M funding={funding_rate:.6f} base_points={base_points}"
+            )
+
+            # Funding direction: positive = longs crowded = long liq risk = BEARISH signal
+            # Negative = shorts crowded = short liq risk = BULLISH signal
             if funding_rate > 0.000005:
                 tilt = min(int(abs(funding_rate) * 300000), base_points // 2)
                 bull_proxy = max(base_points // 2 - tilt, 0)
                 bear_proxy = base_points // 2 + tilt
-                reasons.append(f"{risk_label} + positive funding -> SHORT liq tilt (longs crowded)")
+                reasons.append(f"{risk_label} + positive funding -> BEARISH liq tilt (longs crowded)")
             elif funding_rate < -0.000005:
                 tilt = min(int(abs(funding_rate) * 300000), base_points // 2)
                 bull_proxy = base_points // 2 + tilt
                 bear_proxy = max(base_points // 2 - tilt, 0)
-                reasons.append(f"{risk_label} + negative funding -> LONG liq tilt (shorts crowded)")
+                reasons.append(f"{risk_label} + negative funding -> BULLISH liq tilt (shorts crowded)")
             else:
                 bull_proxy = base_points // 2
                 bear_proxy = base_points // 2
@@ -167,7 +165,7 @@ class LiquidationAnalyzer:
             bull += bull_proxy
             bear += bear_proxy
             log.debug(
-                f"[LIQ] {liq_map.asset}: OI proxy bull={bull_proxy} bear={bear_proxy}"
+                f"[LIQ] {liq_map.asset}: OI proxy final bull={bull} bear={bear}"
             )
             return bull, bear, reasons, warnings
 
