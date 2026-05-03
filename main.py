@@ -1166,17 +1166,14 @@ class KaraBot:
                     )
                     outcome_emoji = "✅" if pnl >= 0 else "🔻"
                     outcome = "Profit" if pnl >= 0 else "Loss"
-                    await self.telegram.send_pnl_card(
-                        pos,
-                        {
-                            "pnl":        pnl,
-                            "pnl_pct":    pnl_pct / 100,
-                            "exit_price": price,
-                            "reason":     "time_exit",
-                            "hold_minutes": hold_min,
-                            "score":      getattr(pos, "entry_score", 0),
-                        },
-                        await session.get_account_state(),
+                    await self.telegram.send_text(
+                        f"⏱ <b>Time Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>\n"
+                        f"<i>Posisi ditutup otomatis setelah {hold_min} menit~</i>\n\n"
+                        f"{outcome_emoji} <b>{outcome}    {pct_sign}{pnl_pct:.2f}%</b>\n"
+                        f"PnL    : <code>{pnl_sign}${abs(pnl):.2f}</code>  (<code>{pnl_idr_str}</code>)\n"
+                        f"Entry  : <code>${pos.entry_price:,.3f}</code>  →  Exit: <code>${price:,.3f}</code>\n"
+                        f"Durasi : {hold_min} menit",
+                        target_chat_id=chat_id
                     )
 
             for action in other_actions:

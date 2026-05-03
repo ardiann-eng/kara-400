@@ -1942,7 +1942,7 @@ class KaraTelegram:
         # PnL Card button: only for profit events (tp1, tp2, trailing_stop), inline in same message.
         # stop_loss gets no button.
         inline_markup = None
-        if action_type in ("tp1", "tp2") and pos:
+        if action_type in ("tp1", "tp2", "trailing_stop") and pos:
             try:
                 acc_state = None
                 if session:
