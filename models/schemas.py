@@ -302,13 +302,15 @@ class Position(BaseModel):
     pnl_unrealized:   float = 0.0
 
     # Meta
-    signal_id:        Optional[str] = None
-    trade_mode:       str = "standard"   # "scalper" | "standard"
-    opened_at:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    closed_at:        Optional[datetime] = None
-    is_paper:         bool = True
-    entry_score:      int = 50
-    realized_vol:     float = 0.02       # daily realized vol at entry — used for trail distance
+    signal_id:         Optional[str] = None
+    trade_mode:        str = "standard"   # "scalper" | "standard"
+    opened_at:         datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    closed_at:         Optional[datetime] = None
+    is_paper:          bool = True
+    entry_score:       int = 50
+    realized_vol:      float = 0.02       # daily realized vol at entry — used for trail distance
+    meta_score_delta:  int = 0            # meta-learning score adjustment applied at entry
+    meta_pattern_key:  Optional[str] = None  # pattern bucket for meta outcome tracking
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:

@@ -177,6 +177,8 @@ class PaperExecutor:
             is_paper=True,
             entry_score=signal.score,
             realized_vol=getattr(signal, 'realized_vol', 0.02),
+            meta_score_delta=getattr(signal, 'meta_score_delta', 0),
+            meta_pattern_key=getattr(signal, 'meta_pattern_key', None),
         )
 
         # Update balances

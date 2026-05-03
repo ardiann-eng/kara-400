@@ -512,7 +512,10 @@ async def get_ml_decision_feed():
         conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT asset, side, pnl_usd, pnl_pct, data, created_at FROM trade_history ORDER BY created_at DESC LIMIT 30"
+            "SELECT asset, side, pnl_usd, pnl_pct, data, created_at FROM trade_history "
+            "WHERE json_extract(data, '$.type') = 'close' "
+            "GROUP BY json_extract(data, '$.pos_id') "
+            "ORDER BY created_at DESC LIMIT 30"
         ).fetchall()
         conn.close()
 
