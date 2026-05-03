@@ -1232,15 +1232,18 @@ class KaraTelegram:
 
     async def send_daily_report(self, acc: AccountState, pos_count: int, target_chat_id: str = None):
         """Send the premium daily summary report."""
-        from core.mode_manager import mode_manager as _global_mm
         import config as _cfg
 
         pnl_sign = "+" if acc.daily_pnl >= 0 else ""
         pnl_emoji = "🟢" if acc.daily_pnl >= 0 else "🔴"
 
-        # Use injected mode_manager if available, fall back to global singleton
-        mm = self.mode_manager or _global_mm
-        is_scalper = mm.is_scalper() if mm else False
+        # Use per-user mode from DB so multi-user reports show correct mode each user
+        try:
+            from core.db import user_db as _udb
+            _u = _udb.get_user(target_chat_id) if target_chat_id else None
+            is_scalper = (_u.config.trading_mode == "scalper") if _u else False
+        except Exception:
+            is_scalper = False
         mode_text = "SCALPER ⚡" if is_scalper else "STANDARD 📊"
         mode_icon = "⚡" if is_scalper else "📊"
 
@@ -1266,22 +1269,21 @@ class KaraTelegram:
             pause_reason = "-"
 
         # Calculate today's win rate from trade history
+        today_trades: list = []
+        wins = 0
+        total_trades = 0
+        win_rate = "-"
         try:
             from core.db import user_db
-            chat_id_for_stats = target_chat_id
-            if chat_id_for_stats:
-                history = user_db.load_trade_history(chat_id_for_stats, limit=50)
+            if target_chat_id:
+                history = user_db.load_trade_history(target_chat_id, limit=200)
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 today_trades = [t for t in history if str(t.get("timestamp", "")).startswith(today_str) and t.get("type") == "close"]
                 total_trades = len(today_trades)
                 wins = sum(1 for t in today_trades if (t.get("pnl") or 0) > 0)
                 win_rate = f"{wins/total_trades*100:.0f}% ({wins}/{total_trades})" if total_trades > 0 else "Belum ada trade hari ini"
-            else:
-                total_trades = 0
-                win_rate = "-"
-        except Exception:
-            total_trades = 0
-            win_rate = "-"
+        except Exception as e:
+            log.warning(f"[DailyReport] Failed to load trade history: {e}")
 
         text = DAILY_REPORT_TEMPLATE.format(
             date=datetime.now().strftime("%Y-%m-%d"),
@@ -1344,7 +1346,8 @@ class KaraTelegram:
                     log.error(f"[DailyCard] send_photo failed for {cid}: {e}")
                     await self.send_text(text, target_chat_id=cid)
         except Exception as e:
-            log.error(f"[DailyCard] Card generation failed: {e}")
+            import traceback
+            log.error(f"[DailyCard] Card generation failed: {e}\n{traceback.format_exc()}")
             await self.send_text(text, target_chat_id=target_chat_id)
 
     async def cmd_enable_auto(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2045,33 +2048,48 @@ class KaraTelegram:
             )
 
             reason_lower = reason.lower()
-            if reason_lower == "tp1":
-                trigger_label = "Take Profit 1 tercapai"
-                emoji = "🎯"
-            elif reason_lower == "tp2":
-                trigger_label = "Take Profit 2 tercapai"
-                emoji = "🎯"
-            elif reason_lower == "trailing_stop":
-                trigger_label = "Trailing stop diaktifkan"
-                emoji = "📍"
-            elif reason_lower == "stop_loss":
-                trigger_label = "Stop loss terpicu"
-                emoji = "🛑"
-            elif reason_lower == "time_exit":
-                trigger_label = "Batas waktu habis"
-                emoji = "⏱"
-            else:
-                trigger_label = "Ditutup manual"
-                emoji = "🔒"
-
+            leverage = getattr(position, "leverage", 1)
+            asset = position.asset
+            side = position.side.value.upper()
+            entry_price = position.entry_price
+            exit_price = close_data.get("exit_price", entry_price)
             outcome = "Profit" if pnl_usd >= 0 else "Loss"
-            caption = (
-                f"{emoji} <b>KARA menutup posisi {position.asset} {position.side.value.upper()}</b>\n"
-                f"<i>{trigger_label} — posisi ditutup otomatis oleh bot.</i>\n\n"
-                f"{'✅' if pnl_usd >= 0 else '❌'} <b>{outcome}: {sign}{pct_display:.2f}%</b>\n"
-                f"💵 <code>{sign}${abs(pnl_usd):.2f} USD</code>  •  "
-                f"🇮🇩 <code>{pnl_idr_str}</code>"
-            )
+            hold_min = int(round(hold_minutes))
+
+            if reason_lower in ("tp1", "tp2"):
+                # TP format unchanged (original style)
+                trigger_label = "Take Profit 1 tercapai" if reason_lower == "tp1" else "Take Profit 2 tercapai"
+                caption = (
+                    f"🎯 <b>KARA menutup posisi {asset} {side}</b>\n"
+                    f"<i>{trigger_label} — posisi ditutup otomatis oleh bot.</i>\n\n"
+                    f"{'✅' if pnl_usd >= 0 else '❌'} <b>{outcome}: {sign}{pct_display:.2f}%</b>\n"
+                    f"💵 <code>{sign}${abs(pnl_usd):.2f} USD</code>  •  "
+                    f"🇮🇩 <code>{pnl_idr_str}</code>"
+                )
+            else:
+                # New format for SL, time exit, trailing, manual
+                if reason_lower == "trailing_stop":
+                    header_emoji, header_label = "📍", "Trailing Stop"
+                    sub = f"Trailing stop terpicu setelah {hold_min} menit~"
+                elif reason_lower == "stop_loss":
+                    header_emoji, header_label = "🛑", "Stop Loss"
+                    sub = f"Stop loss terpicu setelah {hold_min} menit~"
+                elif reason_lower == "time_exit":
+                    header_emoji, header_label = "⏱", "Time Exit"
+                    sub = f"Posisi ditutup otomatis setelah {hold_min} menit~"
+                else:
+                    header_emoji, header_label = "🔒", "Manual Close"
+                    sub = f"Posisi ditutup manual setelah {hold_min} menit~"
+
+                outcome_emoji = "✅" if pnl_usd >= 0 else "🔻"
+                caption = (
+                    f"{header_emoji} <b>{header_label}  •  {asset} {side} {leverage}x</b>\n"
+                    f"<i>{sub}</i>\n\n"
+                    f"{outcome_emoji} <b>{outcome}    {sign}{pct_display:.2f}%</b>\n"
+                    f"PnL    : <code>{sign}${abs(pnl_usd):.2f}</code>  (<code>{pnl_idr_str}</code>)\n"
+                    f"Entry  : <code>${entry_price:,.3f}</code>  →  Exit: <code>${exit_price:,.3f}</code>\n"
+                    f"Durasi : {hold_min} menit"
+                )
 
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("📊 Detail Posisi", callback_data=f"card_detail:{position.position_id}"),
