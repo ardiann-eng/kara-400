@@ -436,7 +436,7 @@ class UserDB:
                 log.error(f"Error loading signal by id {signal_id}: {e}")
         return None
 
-    def update_meta_pattern_outcome(self, pattern_key: str, pnl_usd: float, alpha: float = 0.20):
+    def update_meta_pattern_outcome(self, pattern_key: str, pnl_usd: float, alpha: float = 0.10):
         """
         Rolling pattern outcome stats:
         - winrate_ema in [0,1]
