@@ -354,7 +354,16 @@ class ScoringEngine:
 
         # 3c. Apply session bonus/penalty so adaptive threshold can use it.
         session_bonus, session_reasons = self._get_session_bonus()
-        score = max(0, min(score + session_bonus, 100))
+        if session_bonus > 0:
+            if score >= 72:
+                effective_session = int(session_bonus * 0.30)
+            elif score >= 62:
+                effective_session = int(session_bonus * 0.60)
+            else:
+                effective_session = session_bonus
+        else:
+            effective_session = session_bonus
+        score = max(0, min(score + effective_session, 100))
         reasons.extend(session_reasons)
 
         if score < config.SCALPER.min_score_to_enter:
@@ -1092,8 +1101,20 @@ class ScoringEngine:
         final_multiplier = vol_multiplier * trend_multiplier
         final_score = int(raw_score * final_multiplier)
 
-        # Tambahkan session bonus setelah multiplier sehingga nilainya flat (tidak ikut dimultiplikasi)
-        final_score += session_bonus
+        # Session bonus dengan diminishing returns di score tinggi.
+        # Skor sudah tinggi (≥72) berarti sinyal genuinely kuat — session bonus
+        # tidak perlu mendorong lebih jauh dan justru menciptakan false 80+.
+        # Taper: <62 → full bonus, 62-71 → 60%, ≥72 → 30%
+        if session_bonus > 0:
+            if final_score >= 72:
+                effective_session = int(session_bonus * 0.30)
+            elif final_score >= 62:
+                effective_session = int(session_bonus * 0.60)
+            else:
+                effective_session = session_bonus
+        else:
+            effective_session = session_bonus  # penalty tetap penuh
+        final_score += effective_session
         final_score = max(0, min(final_score, 100))
         
         log.debug(f"[VOL] {asset}: realized_vol={realized_vol*100:.2f}%/day regime={vol_regime.value.upper()} multiplier={vol_multiplier}x")
