@@ -1157,13 +1157,26 @@ class KaraBot:
                     pct_sign = "+" if pnl_pct >= 0 else ""
                     pnl_sign = "+" if pnl >= 0 else ""
 
-                    outcome   = "✅ Profit" if pnl >= 0 else "❌ Loss"
-                    await self.telegram.send_text(
-                        f"⏱ <b>{pos.asset} {pos.side.value.upper()} {lev}x — Time Exit</b>\n"
-                        f"<i>Batas waktu {hold_min} menit tercapai, posisi ditutup otomatis.</i>\n\n"
-                        f"{outcome}  <code>{pct_sign}{pnl_pct:.2f}%  |  {pnl_sign}${abs(pnl):.2f}</code>\n"
-                        f"<code>${pos.entry_price:.5g} → ${price:.5g}</code>",
-                        target_chat_id=chat_id
+                    from config import USD_TO_IDR
+                    pnl_idr = pnl * USD_TO_IDR
+                    pnl_idr_str = (
+                        f"+Rp{pnl_idr:,.0f}".replace(",", ".")
+                        if pnl_idr >= 0
+                        else f"-Rp{abs(pnl_idr):,.0f}".replace(",", ".")
+                    )
+                    outcome_emoji = "✅" if pnl >= 0 else "🔻"
+                    outcome = "Profit" if pnl >= 0 else "Loss"
+                    await self.telegram.send_pnl_card(
+                        pos,
+                        {
+                            "pnl":        pnl,
+                            "pnl_pct":    pnl_pct / 100,
+                            "exit_price": price,
+                            "reason":     "time_exit",
+                            "hold_minutes": hold_min,
+                            "score":      getattr(pos, "entry_score", 0),
+                        },
+                        await session.get_account_state(),
                     )
 
             for action in other_actions:
