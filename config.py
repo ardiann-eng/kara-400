@@ -169,9 +169,9 @@ class RiskConfig:
     atr_lookback:            int   = 14       # candles for calculation
 
     # Momentum-based time exit thresholds (Fix 6)
-    time_exit_pullback_pct:  float = 0.20     # if price retraces 20% of TP1 distance, exit
-    time_exit_flatline_pct:  float = 0.0015   # < 0.15% move in 30min = dead market
-    time_exit_flatline_mins: int   = 30       # window for flatline check
+    time_exit_pullback_pct:  float = 0.15     # if price retraces 15% of TP1 distance, exit (was 20%)
+    time_exit_flatline_pct:  float = 0.0015   # < 0.15% move in 45min = dead market
+    time_exit_flatline_mins: int   = 45       # window for flatline check (was 30)
     time_exit_hard_hours:    float = 6.0      # safety net: force-exit after 6h below TP1
 
     # remaining 37.5% uses trailing stop
@@ -207,8 +207,8 @@ class ScalperConfig:
     trailing_pct:            float = 0.0040   # 0.40% trailing on remainder
 
     # Timing
-    max_hold_minutes:        float = 12.0     # force close after 12min if no TP hit
-    max_hold_grace_minutes:  float = 6.0      # extra grace if still in deeper loss
+    max_hold_minutes:        float = 20.0     # force close after 20min if no TP hit (was 12)
+    max_hold_grace_minutes:  float = 8.0      # extra grace if still in deeper loss (was 6)
     max_hold_soft_floor_pct: float = -0.0015  # allow delay if loss worse than -0.15%
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
