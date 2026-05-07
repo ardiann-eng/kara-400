@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>KARA Terminal</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --teal:     #00e5b0;
+      --teal-2:   #00c49a;
+      --mag:      #b44ef0;
+      --bg:       #04080f;
+      --text:     #ceeee6;
+      --mute:     rgba(190,240,225,0.38);
+    }
+
+    html, body {
+      width: 100%; height: 100%;
+    }
+
+    body {
+      background: var(--bg);
+      font-family: 'DM Sans', sans-serif;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Layered background ── */
+    .bg-layer {
+      position: fixed; inset: 0; z-index: 0;
+      pointer-events: none;
+    }
+
+    /* Deep radial glows */
+    .bg-layer::before {
+      content: '';
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(ellipse 55% 45% at 12% 18%, rgba(0,229,176,0.13) 0%, transparent 65%),
+        radial-gradient(ellipse 40% 35% at 88% 82%, rgba(180,78,240,0.11) 0%, transparent 60%),
+        radial-gradient(ellipse 30% 25% at 70% 10%, rgba(0,196,154,0.06) 0%, transparent 55%);
+    }
+
+    /* Noise texture */
+    .bg-layer::after {
+      content: '';
+      position: absolute; inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+      background-size: 200px 200px;
+      opacity: 0.6;
+    }
+
+    /* Scanlines */
+    .scanlines {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 3px,
+        rgba(0,229,176,0.008) 3px,
+        rgba(0,229,176,0.008) 4px
+      );
+    }
+
+    /* Animated grid */
+    .grid-bg {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background-image:
+        linear-gradient(rgba(0,229,176,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,229,176,0.04) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(ellipse 70% 70% at 50% 50%, black 30%, transparent 80%);
+      -webkit-mask-image: radial-gradient(ellipse 70% 70% at 50% 50%, black 30%, transparent 80%);
+    }
+
+    /* ── Main content ── */
+    .wrap {
+      position: relative; z-index: 1;
+      width: 100%; max-width: 420px;
+      padding: 24px 16px;
+      display: flex; flex-direction: column; align-items: center;
+    }
+
+    /* ── Logo ── */
+    .logo-block {
+      text-align: center;
+      margin-bottom: 36px;
+    }
+
+    .logo-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 52px; height: 52px;
+      border-radius: 14px;
+      border: 1px solid rgba(0,229,176,0.25);
+      background: rgba(0,229,176,0.06);
+      box-shadow: 0 0 24px rgba(0,229,176,0.18), inset 0 1px 0 rgba(0,229,176,0.12);
+      margin-bottom: 16px;
+      font-size: 1.5rem;
+      color: var(--teal);
+    }
+
+    .logo-name {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.35rem;
+      font-weight: 600;
+      letter-spacing: 0.22em;
+      color: var(--text);
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .logo-sub {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.18em;
+      color: var(--teal);
+      opacity: 0.65;
+      text-transform: uppercase;
+    }
+
+    /* ── Card ── */
+    .card {
+      width: 100%;
+      background: rgba(4,14,24,0.7);
+      border: 1px solid rgba(0,229,176,0.14);
+      border-radius: 16px;
+      padding: 32px 28px;
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      box-shadow:
+        0 0 0 1px rgba(0,229,176,0.04) inset,
+        0 32px 64px rgba(0,0,0,0.5),
+        0 0 80px rgba(0,229,176,0.04);
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Top edge glow on card */
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 20%; right: 20%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,229,176,0.5), transparent);
+    }
+
+    .card-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--text);
+      text-align: center;
+      margin-bottom: 6px;
+      letter-spacing: -0.01em;
+    }
+
+    .card-sub {
+      font-size: 0.80rem;
+      color: var(--mute);
+      text-align: center;
+      margin-bottom: 26px;
+      line-height: 1.5;
+    }
+
+    /* ── Divider ── */
+    .divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,229,176,0.15), transparent);
+      margin: 22px 0;
+    }
+
+    /* ── Widget area ── */
+    #tg-wrap {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 52px;
+    }
+
+    .tg-loading {
+      display: flex; align-items: center; gap: 10px;
+      color: rgba(0,229,176,0.45);
+      font-size: 0.80rem;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .ring {
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      border: 2px solid rgba(0,229,176,0.15);
+      border-top-color: var(--teal);
+      animation: spin 0.75s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .tg-unavailable {
+      display: flex; align-items: center; gap: 8px;
+      background: rgba(240,64,90,0.08);
+      border: 1px solid rgba(240,64,90,0.2);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.78rem;
+      color: rgba(240,100,120,0.85);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ── Error ── */
+    #error-box {
+      display: none;
+      background: rgba(240,64,90,0.07);
+      border: 1px solid rgba(240,64,90,0.22);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.78rem;
+      color: rgba(240,100,120,0.9);
+      margin-top: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Footer note ── */
+    .card-note {
+      font-size: 0.73rem;
+      color: rgba(190,240,225,0.22);
+      text-align: center;
+      line-height: 1.65;
+    }
+
+    .card-note span {
+      color: rgba(0,229,176,0.35);
+    }
+
+    /* ── Bottom label ── */
+    .footer-label {
+      margin-top: 24px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.65rem;
+      letter-spacing: 0.12em;
+      color: rgba(0,229,176,0.18);
+      text-align: center;
+    }
+
+    /* ── Status pills (top-right of card) ── */
+    .status-pills {
+      position: absolute;
+      top: 14px; right: 16px;
+      display: flex; gap: 5px;
+    }
+    .pill {
+      width: 6px; height: 6px; border-radius: 50%;
+    }
+    .pill-r { background: rgba(240,64,90,0.5); }
+    .pill-y { background: rgba(245,158,11,0.5); }
+    .pill-g {
+      background: var(--teal);
+      box-shadow: 0 0 6px var(--teal);
+      animation: blink 2.4s ease-in-out infinite;
+    }
+    @keyframes blink {
+      0%,100% { opacity: 1; } 50% { opacity: 0.4; }
+    }
+
+    /* ── Floating particles ── */
+    .particles {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      overflow: hidden;
+    }
+    .particle {
+      position: absolute;
+      width: 1.5px; height: 1.5px;
+      border-radius: 50%;
+      background: var(--teal);
+      opacity: 0;
+      animation: float-up linear infinite;
+    }
+    @keyframes float-up {
+      0%   { transform: translateY(0) translateX(0); opacity: 0; }
+      10%  { opacity: 0.4; }
+      90%  { opacity: 0.1; }
+      100% { transform: translateY(-100vh) translateX(30px); opacity: 0; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="bg-layer"></div>
+  <div class="grid-bg"></div>
+  <div class="scanlines"></div>
+  <div class="particles" id="particles"></div>
+
+  <div class="wrap">
+
+    <!-- Logo -->
+    <div class="logo-block">
+      <div class="logo-icon">◈</div>
+      <span class="logo-name">KARA</span>
+      <span class="logo-sub">AI Trading Terminal</span>
+    </div>
+
+    <!-- Card -->
+    <div class="card">
+
+      <!-- Window dots -->
+      <div class="status-pills">
+        <div class="pill pill-r"></div>
+        <div class="pill pill-y"></div>
+        <div class="pill pill-g"></div>
+      </div>
+
+      <div class="card-title">Access your terminal</div>
+      <div class="card-sub">Authenticate with your Telegram account to continue</div>
+
+      <div class="divider"></div>
+
+      <!-- Telegram widget -->
+      <div id="tg-wrap">
+        <div class="tg-loading" id="tg-loading">
+          <div class="ring"></div>
+          <span>Initializing…</span>
+        </div>
+      </div>
+
+      <!-- Error -->
+      <div id="error-box"></div>
+
+      <div class="divider"></div>
+
+      <p class="card-note">
+        Only users registered via the Telegram bot can access this terminal.<br />
+        <span>Start the bot → complete onboarding → return here.</span>
+      </p>
+
+    </div>
+
+    <div class="footer-label">KARA v2.0 &nbsp;·&nbsp; Powered by Hyperliquid</div>
+
+  </div>
+
+  <script>
+    // ── Floating particles ─────────────────────────────────────────────────
+    (function() {
+      const container = document.getElementById('particles');
+      for (let i = 0; i < 18; i++) {
+        const p = document.createElement('div');
+        p.className = 'particle';
+        p.style.left  = Math.random() * 100 + 'vw';
+        p.style.bottom = '-10px';
+        p.style.animationDuration  = (12 + Math.random() * 20) + 's';
+        p.style.animationDelay     = (Math.random() * 15) + 's';
+        p.style.opacity = 0;
+        // alternating teal / magenta
+        if (i % 4 === 0) p.style.background = '#b44ef0';
+        container.appendChild(p);
+      }
+    })();
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+    function showError(msg) {
+      const b = document.getElementById('error-box');
+      b.textContent = '⚠ ' + msg;
+      b.style.display = 'block';
+    }
+
+    function hideLoading() {
+      const el = document.getElementById('tg-loading');
+      if (el) el.remove();
+    }
+
+    // ── Telegram auth callback ─────────────────────────────────────────────
+    function onTelegramAuth(user) {
+      fetch('/auth/telegram', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(user),
+        credentials: 'include',
+      })
+      .then(async r => {
+        const data = await r.json();
+        if (!r.ok) { showError(data.detail || 'Authentication failed.'); return; }
+        localStorage.setItem('kara_token',    data.token);
+        localStorage.setItem('kara_username', data.username);
+        localStorage.setItem('kara_chat_id',  data.chat_id);
+        localStorage.setItem('kara_is_admin', data.is_admin ? '1' : '0');
+        window.location.href = data.is_admin ? '/' : '/terminal';
+      })
+      .catch(() => showError('Network error. Please try again.'));
+    }
+    window.onTelegramAuth = onTelegramAuth;
+
+    // ── Already logged in? ─────────────────────────────────────────────────
+    const existing = localStorage.getItem('kara_token');
+    if (existing) {
+      fetch('/api/me', { headers: { Authorization: 'Bearer ' + existing } })
+        .then(r => {
+          if (r.ok) {
+            const isAdmin = localStorage.getItem('kara_is_admin') === '1';
+            window.location.href = isAdmin ? '/' : '/terminal';
+          }
+        })
+        .catch(() => {});
+    }
+
+    // ── Inject Telegram widget ─────────────────────────────────────────────
+    async function initWidget() {
+      let username = null;
+      try {
+        const r = await fetch('/api/health');
+        if (r.ok) { const d = await r.json(); username = d.bot_username || null; }
+      } catch {}
+
+      hideLoading();
+      const wrap = document.getElementById('tg-wrap');
+
+      if (!username) {
+        wrap.innerHTML = `
+          <div class="tg-unavailable">
+            <span>⚡</span>
+            <span>Telegram login unavailable — bot not configured</span>
+          </div>`;
+        return;
+      }
+
+      const script = document.createElement('script');
+      script.async = true;
+      script.src   = 'https://telegram.org/js/telegram-widget.js?22';
+      script.setAttribute('data-telegram-login',  username);
+      script.setAttribute('data-size',            'large');
+      script.setAttribute('data-radius',          '10');
+      script.setAttribute('data-onauth',          'onTelegramAuth(user)');
+      script.setAttribute('data-request-access',  'write');
+      wrap.appendChild(script);
+    }
+
+    initWidget();
+  </script>
+</body>
+</html>

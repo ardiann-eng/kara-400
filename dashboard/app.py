@@ -11,13 +11,18 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import HTTPBearer
 import uvicorn
 
 import config
 from models.schemas import AccountState, TradeSignal
+from dashboard.auth import (
+    verify_telegram_login, create_jwt, decode_jwt,
+    get_current_user, get_admin_user,
+)
 
 log = logging.getLogger("kara.dashboard")
 
@@ -50,6 +55,372 @@ def get_active_session(chat_id: str = None):
     return None
 
 
+# ── Auth ─────────────────────────────────────────────────────────────────────
+
+@app.post("/auth/telegram")
+async def auth_telegram(payload: dict = Body(...)):
+    """Verify Telegram Login Widget data and return JWT."""
+    from core.db import user_db
+
+    if not verify_telegram_login(payload):
+        raise HTTPException(status_code=401, detail="Telegram verification failed")
+
+    chat_id  = str(payload.get("id", ""))
+    username = payload.get("username") or payload.get("first_name") or f"user_{chat_id[-4:]}"
+
+    user = user_db.get_user(chat_id)
+    if not user:
+        raise HTTPException(status_code=403, detail="User not registered. Start the bot on Telegram first.")
+    if not user.is_authorized:
+        raise HTTPException(status_code=403, detail="User not authorized. Complete onboarding via Telegram.")
+
+    is_admin = (chat_id == str(config.TELEGRAM_CHAT_ID)) if config.TELEGRAM_CHAT_ID else False
+    token    = create_jwt(chat_id, username)
+    response = JSONResponse({"token": token, "username": username, "chat_id": chat_id, "is_admin": is_admin})
+    response.set_cookie(
+        "kara_token", token,
+        httponly=True, samesite="lax",
+        max_age=7 * 24 * 3600,
+    )
+    return response
+
+
+# ── Pages ─────────────────────────────────────────────────────────────────────
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page():
+    path = os.path.join(DASHBOARD_DIR, "templates", "login.html")
+    if not os.path.exists(path):
+        return HTMLResponse("<h1>login.html not found</h1>", status_code=404)
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+
+@app.get("/terminal", response_class=HTMLResponse)
+async def terminal_page():
+    path = os.path.join(DASHBOARD_DIR, "templates", "terminal.html")
+    if not os.path.exists(path):
+        return HTMLResponse("<h1>terminal.html not found</h1>", status_code=404)
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+
+# ── API: /api/me — per-user (JWT required) ────────────────────────────────────
+
+@app.get("/api/me")
+async def me(user: dict = Depends(get_current_user)):
+    from core.db import user_db
+    u = user_db.get_user(user["sub"])
+    if not u:
+        raise HTTPException(404, "User not found")
+    return {
+        "chat_id":      u.chat_id,
+        "username":     u.username or user.get("username"),
+        "bot_mode":     u.config.bot_mode.value,
+        "trading_mode": u.config.trading_mode,
+        "is_active":    u.is_active,
+    }
+
+
+@app.get("/api/me/overview")
+async def me_overview(user: dict = Depends(get_current_user)):
+    from core.db import user_db
+    chat_id = user["sub"]
+    session = _sessions.get(chat_id) if _sessions else None
+
+    acc_data = {}
+    open_count = 0
+    if session:
+        try:
+            acc = await session.get_account_state()
+            open_count = len(session.executor.open_positions)
+            acc_data = {
+                "total_equity":      round(acc.total_equity, 2),
+                "wallet_balance":    round(acc.wallet_balance, 2),
+                "available":         round(acc.available, 2),
+                "used_margin":       round(acc.used_margin, 2),
+                "unrealized_pnl":    round(acc.unrealized_pnl, 2),
+                "daily_pnl":         round(acc.daily_pnl, 2),
+                "daily_pnl_pct":     round(acc.daily_pnl_pct * 100, 2),
+                "current_drawdown":  round(getattr(acc, "current_drawdown_pct", 0) * 100, 2),
+                "peak_balance":      round(getattr(acc, "peak_balance", acc.total_equity), 2),
+                "is_paused":         acc.is_paused,
+                "kill_switch":       getattr(acc, "kill_switch_active", False),
+                "mode":              acc.mode.value if hasattr(acc.mode, "value") else str(acc.mode),
+            }
+        except Exception as e:
+            log.warning(f"[me/overview] {chat_id}: {e}")
+
+    # Risk stats from risk manager
+    risk_data = {}
+    if session and hasattr(session, "risk_mgr"):
+        try:
+            rs = session.risk_mgr.status
+            risk_data = {
+                "daily_loss_used_pct": round(rs.get("daily_loss_pct", 0) * 100, 2),
+                "daily_loss_limit_pct": round(rs.get("daily_loss_limit_pct", 3) * 100, 2),
+                "max_drawdown_pct": round(rs.get("max_drawdown_pct", 6) * 100, 2),
+            }
+        except Exception:
+            pass
+
+    # Win rate from closed trades
+    win_rate = 0.0
+    total_trades = 0
+    try:
+        from core.db import user_db as _db
+        conn = _db._get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) as total, SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins "
+            "FROM paper_positions WHERE chat_id = ? AND status = 'CLOSED'",
+            (chat_id,)
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            total_trades = row[0]
+            wins         = row[1] or 0
+            win_rate     = round(wins / total_trades * 100, 1) if total_trades else 0.0
+    except Exception:
+        pass
+
+    return {
+        "account":       acc_data,
+        "risk":          risk_data,
+        "open_positions": open_count,
+        "win_rate":      win_rate,
+        "total_trades":  total_trades,
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/me/positions")
+async def me_positions(user: dict = Depends(get_current_user)):
+    chat_id = user["sub"]
+    session = _sessions.get(chat_id) if _sessions else None
+    if not session:
+        return {"positions": []}
+    try:
+        data = []
+        for p in session.executor.open_positions:
+            pd = p.dict()
+            for dt_key in ("opened_at", "closed_at"):
+                if pd.get(dt_key):
+                    pd[dt_key] = pd[dt_key].isoformat() if hasattr(pd[dt_key], "isoformat") else str(pd[dt_key])
+            data.append(pd)
+        return {"positions": data}
+    except Exception as e:
+        log.error(f"[me/positions] {e}")
+        return {"positions": []}
+
+
+@app.get("/api/me/trades")
+async def me_trades(
+    user:   dict = Depends(get_current_user),
+    limit:  int  = 50,
+    offset: int  = 0,
+    asset:  str  = None,
+    side:   str  = None,
+    result: str  = None,   # "win" | "loss"
+):
+    chat_id = user["sub"]
+    try:
+        from core.db import user_db as _db
+        conn = _db._get_conn()
+        conn.row_factory = __import__("sqlite3").Row
+        cur  = conn.cursor()
+
+        where  = ["chat_id = ?", "status = 'CLOSED'"]
+        params = [chat_id]
+        if asset:
+            where.append("asset = ?");  params.append(asset.upper())
+        if side:
+            where.append("side = ?");   params.append(side.upper())
+        if result == "win":
+            where.append("pnl_usd > 0")
+        elif result == "loss":
+            where.append("pnl_usd <= 0")
+
+        where_sql = " AND ".join(where)
+        cur.execute(
+            f"SELECT * FROM paper_positions WHERE {where_sql} "
+            f"ORDER BY closed_at DESC LIMIT ? OFFSET ?",
+            params + [limit, offset]
+        )
+        rows = cur.fetchall()
+
+        # Total count for pagination
+        cur.execute(f"SELECT COUNT(*) FROM paper_positions WHERE {where_sql}", params)
+        total = cur.fetchone()[0]
+
+        trades = []
+        for r in rows:
+            trades.append({
+                "position_id":   r["position_id"],
+                "asset":         r["asset"],
+                "side":          r["side"],
+                "entry_price":   r["entry_price"],
+                "exit_price":    r["exit_price"] if "exit_price" in r.keys() else None,
+                "size_initial":  r["size_initial"],
+                "leverage":      r["leverage"],
+                "pnl_usd":       round(r["pnl_usd"] or 0, 2),
+                "pnl_pct":       round((r["pnl_pct"] or 0) * 100, 2),
+                "exit_reason":   r["exit_reason"] if "exit_reason" in r.keys() else None,
+                "opened_at":     r["opened_at"],
+                "closed_at":     r["closed_at"],
+                "entry_score":   r["entry_score"] if "entry_score" in r.keys() else None,
+            })
+        return {"trades": trades, "total": total, "limit": limit, "offset": offset}
+    except Exception as e:
+        log.error(f"[me/trades] {e}")
+        return {"trades": [], "total": 0}
+
+
+@app.get("/api/me/equity_history")
+async def me_equity_history(user: dict = Depends(get_current_user), days: int = 7):
+    """Equity curve data for chart — one point per closed trade."""
+    chat_id = user["sub"]
+    try:
+        from core.db import user_db as _db
+        conn = _db._get_conn()
+        conn.row_factory = __import__("sqlite3").Row
+        cur  = conn.cursor()
+        cutoff = int(datetime.now(timezone.utc).timestamp()) - days * 86400
+        cur.execute(
+            "SELECT closed_at, pnl_usd FROM paper_positions "
+            "WHERE chat_id = ? AND status = 'CLOSED' AND closed_at >= ? "
+            "ORDER BY closed_at ASC",
+            (chat_id, cutoff)
+        )
+        rows = cur.fetchone and cur.fetchall() or []
+
+        # Get starting balance
+        u_row = __import__("core.db", fromlist=["user_db"]).user_db.get_user(chat_id)
+        balance = float(getattr(getattr(u_row, "config", None), "paper_balance_usd", 1000) if u_row else 1000)
+
+        points = []
+        running = balance
+        for r in rows:
+            running += float(r["pnl_usd"] or 0)
+            points.append({"time": int(r["closed_at"]), "value": round(running, 2)})
+
+        if not points:
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            points = [{"time": now_ts, "value": round(balance, 2)}]
+
+        return {"equity_history": points}
+    except Exception as e:
+        log.error(f"[me/equity_history] {e}")
+        return {"equity_history": []}
+
+
+@app.get("/api/me/signals")
+async def me_signals(user: dict = Depends(get_current_user), limit: int = 20):
+    """Active/recent signals (global — signals are not per-user in current arch)."""
+    from core.db import user_db
+    try:
+        signals = user_db.load_signals(limit=limit)
+        result  = []
+        for s in signals:
+            d = s.dict()
+            for k, v in d.items():
+                if hasattr(v, "isoformat"):
+                    d[k] = v.isoformat()
+                elif hasattr(v, "value"):
+                    d[k] = v.value
+            result.append(d)
+        return {"signals": result}
+    except Exception as e:
+        log.error(f"[me/signals] {e}")
+        return {"signals": []}
+
+
+@app.get("/api/me/candles/{asset}")
+async def me_candles(asset: str, user: dict = Depends(get_current_user), interval: str = "5m", limit: int = 100):
+    """OHLCV candles for a given asset — forwarded from HL client."""
+    chat_id = user["sub"]
+    session = _sessions.get(chat_id) if _sessions else None
+    hl_client = getattr(session, "hl_client", None) if session else None
+
+    if not hl_client:
+        # Try shared global client
+        from data.hyperliquid_client import HyperliquidClient
+        try:
+            hl_client = HyperliquidClient()
+        except Exception:
+            return {"candles": []}
+
+    try:
+        candles = await hl_client.get_candles(asset.upper(), interval=interval, limit=limit)
+        # Format for TradingView: {time, open, high, low, close, volume}
+        result = []
+        for c in (candles or []):
+            result.append({
+                "time":   int(c[0] / 1000) if c[0] > 1e10 else int(c[0]),
+                "open":   float(c[1]),
+                "high":   float(c[2]),
+                "low":    float(c[3]),
+                "close":  float(c[4]),
+                "volume": float(c[5]) if len(c) > 5 else 0,
+            })
+        return {"candles": result, "asset": asset.upper(), "interval": interval}
+    except Exception as e:
+        log.error(f"[me/candles] {asset}: {e}")
+        return {"candles": []}
+
+
+@app.get("/api/me/risk")
+async def me_risk(user: dict = Depends(get_current_user)):
+    chat_id = user["sub"]
+    session = _sessions.get(chat_id) if _sessions else None
+    if not session or not hasattr(session, "risk_mgr"):
+        return {}
+    return session.risk_mgr.status
+
+
+# ── Per-user WebSocket ────────────────────────────────────────────────────────
+
+_user_ws_clients: Dict[str, List[WebSocket]] = {}   # chat_id -> [ws, ...]
+
+
+@app.websocket("/ws/me")
+async def ws_user(websocket: WebSocket, token: str = None):
+    """Per-user WebSocket. Token passed as query param: /ws/me?token=<jwt>"""
+    chat_id = None
+    if token:
+        try:
+            payload = decode_jwt(token)
+            chat_id = payload["sub"]
+        except Exception:
+            await websocket.close(code=4001)
+            return
+
+    await websocket.accept()
+    if chat_id:
+        _user_ws_clients.setdefault(chat_id, []).append(websocket)
+
+    try:
+        while True:
+            await websocket.receive_text()
+    except Exception:
+        pass
+    finally:
+        if chat_id and websocket in _user_ws_clients.get(chat_id, []):
+            _user_ws_clients[chat_id].remove(websocket)
+
+
+async def broadcast_to_user(chat_id: str, data: dict):
+    """Push realtime update to a specific user's WS connections."""
+    dead = []
+    for ws in list(_user_ws_clients.get(chat_id, [])):
+        try:
+            await ws.send_json(data)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _user_ws_clients.get(chat_id, []).remove(ws)
+
+
 # ── API: Core ────────────────────────────────────────────────────────────────
 
 @app.get("/api/ping")
@@ -59,11 +430,20 @@ async def ping():
 
 @app.get("/api/health")
 async def health():
+    # Derive bot username from token (format: 123456:ABCDEF...)
+    bot_username = None
+    if _telegram and hasattr(_telegram, "_application"):
+        try:
+            bot = _telegram._application.bot
+            bot_username = (await bot.get_me()).username
+        except Exception:
+            pass
     return {
-        "status": "ok",
-        "mode": config.MODE,
+        "status":       "ok",
+        "mode":         config.MODE,
         "trading_mode": _mode_manager.mode if _mode_manager else "scalper",
-        "time": datetime.now(timezone.utc).isoformat(),
+        "bot_username": bot_username,
+        "time":         datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -147,7 +527,7 @@ async def get_history(days: int = 7):
 # ── API: Users ───────────────────────────────────────────────────────────────
 
 @app.get("/api/users")
-async def get_all_users():
+async def get_all_users(_admin: dict = Depends(get_admin_user)):
     """Return all registered users with summary stats."""
     from core.db import user_db
 
@@ -204,7 +584,7 @@ async def get_all_users():
 
 
 @app.get("/api/users/{chat_id}")
-async def get_user_detail(chat_id: str):
+async def get_user_detail(chat_id: str, _admin: dict = Depends(get_admin_user)):
     """Return detailed info for a single user."""
     from core.db import user_db
 
@@ -272,7 +652,7 @@ async def get_user_detail(chat_id: str):
 
 
 @app.post("/api/users/{chat_id}/config")
-async def update_user_config(chat_id: str, payload: dict = Body(...)):
+async def update_user_config(chat_id: str, payload: dict = Body(...), _admin: dict = Depends(get_admin_user)):
     """Update a user's config settings."""
     from core.db import user_db
 

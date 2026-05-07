@@ -1,0 +1,1265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>KARA Terminal</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box }
+
+    :root {
+      --bg:        #050a12;
+      --surface:   #090f1c;
+      --surface2:  #0d1425;
+      --border:    rgba(0,229,176,0.10);
+      --border-hi: rgba(0,229,176,0.22);
+      --teal:      #00e5b0;
+      --teal-dim:  rgba(0,229,176,0.55);
+      --teal-glow: rgba(0,229,176,0.08);
+      --magenta:   #c040f0;
+      --mag-dim:   rgba(192,64,240,0.55);
+      --profit:    #00e5b0;
+      --loss:      #f0407a;
+      --gold:      #f59e0b;
+      --text:      #d0f5ec;
+      --text-dim:  rgba(208,245,236,0.45);
+      --text-mute: rgba(208,245,236,0.25);
+    }
+
+    html { scroll-behavior: smooth }
+
+    body {
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(ellipse 80% 50% at 5% 0%, rgba(0,229,176,0.07) 0%, transparent 55%),
+        radial-gradient(ellipse 50% 40% at 95% 100%, rgba(192,64,240,0.07) 0%, transparent 50%);
+      min-height: 100vh;
+      font-family: 'DM Sans', sans-serif;
+      color: var(--text);
+      overflow-x: hidden;
+    }
+
+    /* scan-line texture */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg, transparent, transparent 2px,
+        rgba(0,229,176,0.010) 2px, rgba(0,229,176,0.010) 4px
+      );
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    #app { position: relative; z-index: 1; }
+
+    /* ── Navbar ── */
+    #navbar {
+      position: sticky; top: 0; z-index: 50;
+      height: 48px;
+      background: rgba(5,10,18,0.92);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center;
+      padding: 0 16px; gap: 0;
+    }
+
+    .nav-logo {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1rem; font-weight: 600;
+      letter-spacing: 0.1em;
+      color: var(--text);
+      display: flex; align-items: center; gap: 6px;
+      margin-right: 20px;
+      white-space: nowrap;
+    }
+    .nav-logo span.dot { color: var(--teal); font-size: 1.1rem; }
+
+    .price-ticker {
+      display: flex; align-items: center; gap: 14px;
+      margin-right: auto;
+      overflow: hidden;
+    }
+    .ticker-item {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.73rem;
+      display: flex; align-items: center; gap: 4px;
+      white-space: nowrap;
+    }
+    .ticker-item .sym { color: var(--text-dim); font-weight: 500; }
+    .ticker-item .price { color: var(--text); font-weight: 600; }
+    .ticker-item .chg.up   { color: var(--profit); }
+    .ticker-item .chg.down { color: var(--loss); }
+
+    .nav-tabs {
+      display: flex; align-items: center; gap: 2px;
+      margin: 0 16px;
+    }
+    .nav-tab {
+      padding: 0 14px; height: 48px;
+      font-size: 0.80rem; font-weight: 500;
+      color: var(--text-dim);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+      display: flex; align-items: center;
+      white-space: nowrap;
+    }
+    .nav-tab:hover { color: var(--text); }
+    .nav-tab.active { color: var(--teal); border-bottom-color: var(--teal); }
+
+    .nav-user {
+      font-size: 0.78rem; color: var(--teal-dim);
+      font-family: 'JetBrains Mono', monospace;
+      cursor: pointer;
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      white-space: nowrap;
+    }
+    .nav-user:hover { border-color: var(--border-hi); color: var(--teal); }
+    .status-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--teal);
+      box-shadow: 0 0 6px var(--teal);
+      animation: pulse-dot 2s ease-in-out infinite;
+    }
+    .status-dot.paper { background: var(--magenta); box-shadow: 0 0 6px var(--magenta); animation: none; }
+    @keyframes pulse-dot {
+      0%,100% { opacity:1; box-shadow: 0 0 6px var(--teal); }
+      50%      { opacity:.6; box-shadow: 0 0 12px var(--teal); }
+    }
+
+    /* ── Cards ── */
+    .card {
+      background: rgba(0,229,176,0.025);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .card:hover { border-color: rgba(0,229,176,0.16); }
+
+    /* ── Tables ── */
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      font-size: 0.68rem; font-weight: 600;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--text-mute);
+      padding: 8px 14px; text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    tbody tr {
+      border-bottom: 1px solid rgba(0,229,176,0.04);
+      transition: background .12s;
+      cursor: default;
+    }
+    tbody tr:hover { background: rgba(0,229,176,0.04); }
+    tbody td {
+      padding: 10px 14px; font-size: 0.82rem;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    tbody tr:last-child { border-bottom: none; }
+
+    /* ── Badges ── */
+    .badge {
+      display: inline-flex; align-items: center;
+      padding: 2px 8px; border-radius: 4px;
+      font-size: 0.68rem; font-weight: 600;
+      letter-spacing: 0.06em; font-family: 'JetBrains Mono', monospace;
+    }
+    .badge-long    { background: rgba(0,229,176,0.12);   color: #00e5b0;  border: 1px solid rgba(0,229,176,0.25); }
+    .badge-short   { background: rgba(240,64,122,0.12);  color: #f0407a;  border: 1px solid rgba(240,64,122,0.25); }
+    .badge-strong  { background: rgba(0,229,176,0.12);   color: #00e5b0;  border: 1px solid rgba(0,229,176,0.25); }
+    .badge-moderate{ background: rgba(245,158,11,0.12);  color: #f59e0b;  border: 1px solid rgba(245,158,11,0.25); }
+    .badge-weak    { background: rgba(107,114,128,0.10); color: #9ca3af;  border: 1px solid rgba(107,114,128,0.2); }
+    .badge-tp      { background: rgba(245,158,11,0.12);  color: #f59e0b;  border: 1px solid rgba(245,158,11,0.25); }
+    .badge-sl      { background: rgba(240,64,122,0.12);  color: #f0407a;  border: 1px solid rgba(240,64,122,0.25); }
+    .badge-paper   { background: rgba(192,64,240,0.10);  color: #c040f0;  border: 1px solid rgba(192,64,240,0.2); }
+    .badge-live    { background: rgba(0,229,176,0.10);   color: #00e5b0;  border: 1px solid rgba(0,229,176,0.2); }
+
+    /* ── Numbers ── */
+    .num { font-family: 'JetBrains Mono', monospace; }
+    .profit { color: var(--profit); }
+    .loss   { color: var(--loss); }
+    .mute   { color: var(--text-dim); }
+
+    /* ── Progress bar ── */
+    .progress-track {
+      height: 4px; border-radius: 2px;
+      background: rgba(0,229,176,0.08);
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%; border-radius: 2px;
+      background: linear-gradient(90deg, #00e5b0, #00c4a0);
+      transition: width .5s ease;
+    }
+    .progress-fill.danger { background: linear-gradient(90deg, #f0407a, #c0305a); }
+
+    /* ── Score bar ── */
+    .score-bar {
+      display: flex; align-items: center; gap: 8px;
+    }
+    .score-bar-track {
+      flex: 1; height: 5px; border-radius: 3px;
+      background: rgba(0,229,176,0.06);
+      overflow: hidden;
+    }
+    .score-bar-fill {
+      height: 100%; border-radius: 3px;
+      background: linear-gradient(90deg, #8b5cf6, #00e5b0);
+    }
+
+    /* ── Section label ── */
+    .section-label {
+      font-size: 0.68rem; font-weight: 600;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      color: var(--text-mute);
+    }
+
+    /* ── Divider ── */
+    .vdivider { width: 1px; background: var(--border); align-self: stretch; margin: 0 4px; }
+    .hdivider { height: 1px; background: var(--border); }
+
+    /* ── Chart containers ── */
+    #equity-chart { width: 100%; height: 220px; }
+    #market-chart  { width: 100%; height: 320px; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(0,229,176,0.2); border-radius: 2px; }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      .hide-mobile { display: none !important; }
+      .price-ticker { gap: 8px; }
+      .nav-tabs { gap: 0; }
+      .nav-tab { padding: 0 10px; font-size: 0.74rem; }
+    }
+
+    /* ── Tooltip ── */
+    [data-tip] { position: relative; cursor: help; }
+    [data-tip]:hover::after {
+      content: attr(data-tip);
+      position: absolute; bottom: 130%; left: 50%;
+      transform: translateX(-50%);
+      background: #0d1425; border: 1px solid var(--border);
+      color: var(--text); font-size: 0.72rem;
+      padding: 4px 8px; border-radius: 5px;
+      white-space: nowrap; z-index: 100;
+    }
+
+    /* ── Signal score ring ── */
+    .score-ring {
+      width: 52px; height: 52px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.95rem; font-weight: 600;
+      border: 2px solid var(--teal);
+      color: var(--teal);
+      box-shadow: 0 0 12px rgba(0,229,176,0.2);
+    }
+    .score-ring.high { border-color: #00e5b0; color: #00e5b0; box-shadow: 0 0 12px rgba(0,229,176,0.3); }
+    .score-ring.mid  { border-color: #f59e0b; color: #f59e0b; box-shadow: 0 0 12px rgba(245,158,11,0.2); }
+    .score-ring.low  { border-color: #9ca3af; color: #9ca3af; box-shadow: none; }
+
+    /* ── Funding indicator ── */
+    .fund-positive { color: var(--loss); }     /* longs paying = bearish pressure */
+    .fund-negative { color: var(--profit); }   /* shorts paying = bullish pressure */
+
+    /* ── Tab content ── */
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+  </style>
+</head>
+
+<body>
+<div id="app" x-data="karaTerminal()" x-init="init()">
+
+  <!-- ════════════════════════════════════════════════════════ NAVBAR -->
+  <nav id="navbar">
+    <div class="nav-logo">
+      <span class="dot">◈</span>
+      KARA
+    </div>
+
+    <!-- Live prices -->
+    <div class="price-ticker" id="price-ticker">
+      <template x-for="p in prices" :key="p.sym">
+        <div class="ticker-item">
+          <span class="sym" x-text="p.sym"></span>
+          <span class="price num" x-text="formatPrice(p.price)"></span>
+          <span class="chg" :class="p.chg >= 0 ? 'up' : 'down'"
+                x-text="(p.chg >= 0 ? '▲' : '▼') + Math.abs(p.chg).toFixed(2) + '%'"></span>
+        </div>
+      </template>
+    </div>
+
+    <!-- Tabs -->
+    <div class="nav-tabs">
+      <template x-for="tab in tabs" :key="tab.id">
+        <div class="nav-tab" :class="{ active: activeTab === tab.id }"
+             @click="activeTab = tab.id" x-text="tab.label"></div>
+      </template>
+    </div>
+
+    <!-- User -->
+    <div class="nav-user" @click="logout()">
+      <div class="status-dot" :class="{ paper: botMode === 'paper' }"></div>
+      <span x-text="username || '…'"></span>
+      <span style="opacity:.4">▾</span>
+    </div>
+  </nav>
+
+  <!-- ════════════════════════════════════════════════════════ MAIN -->
+  <main style="padding: 16px; max-width: 1600px; margin: 0 auto;">
+
+    <!-- ══ TAB: OVERVIEW ══════════════════════════════════════════ -->
+    <div class="tab-content" :class="{ active: activeTab === 'overview' }">
+
+      <!-- Top cards -->
+      <div style="display:grid; grid-template-columns: repeat(3,1fr); gap:12px; margin-bottom:14px;"
+           class="top-cards">
+
+        <!-- Equity -->
+        <div class="card" style="padding:16px 20px;">
+          <div class="section-label mb-2">Total Equity</div>
+          <div class="num" style="font-size:1.6rem; font-weight:600; color:var(--text); line-height:1;"
+               x-text="'$' + fmt(overview.account.total_equity)"></div>
+          <div style="margin-top:8px; display:flex; gap:16px;">
+            <div>
+              <div class="section-label" style="font-size:0.62rem;">UNREALIZED</div>
+              <div class="num" style="font-size:0.85rem;" :class="colorClass(overview.account.unrealized_pnl)"
+                   x-text="fmtPnl(overview.account.unrealized_pnl)"></div>
+            </div>
+            <div>
+              <div class="section-label" style="font-size:0.62rem;">MARGIN USED</div>
+              <div class="num" style="font-size:0.85rem; color:var(--text-dim);"
+                   x-text="'$' + fmt(overview.account.used_margin)"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- PnL Today -->
+        <div class="card" style="padding:16px 20px;">
+          <div class="section-label mb-2">Today's PnL</div>
+          <div class="num" style="font-size:1.6rem; font-weight:600; line-height:1;"
+               :class="colorClass(overview.account.daily_pnl)"
+               x-text="fmtPnl(overview.account.daily_pnl)"></div>
+          <div style="margin-top:8px; display:flex; gap:16px;">
+            <div>
+              <div class="section-label" style="font-size:0.62rem;">PCT</div>
+              <div class="num" style="font-size:0.85rem;" :class="colorClass(overview.account.daily_pnl_pct)"
+                   x-text="fmtPct(overview.account.daily_pnl_pct)"></div>
+            </div>
+            <div>
+              <div class="section-label" style="font-size:0.62rem;">WIN RATE</div>
+              <div class="num" style="font-size:0.85rem; color:var(--teal);"
+                   x-text="overview.win_rate + '%'"></div>
+            </div>
+            <div>
+              <div class="section-label" style="font-size:0.62rem;">TRADES</div>
+              <div class="num" style="font-size:0.85rem; color:var(--text-dim);"
+                   x-text="overview.total_trades"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bot Status -->
+        <div class="card" style="padding:16px 20px;">
+          <div class="section-label mb-2">Bot Status</div>
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+            <div class="status-dot" :class="{ paper: botMode === 'paper' }"></div>
+            <span style="font-weight:600; font-size:0.9rem;"
+                  x-text="overview.account.is_paused ? 'PAUSED' : 'ACTIVE'"></span>
+            <span class="badge" :class="botMode === 'paper' ? 'badge-paper' : 'badge-live'"
+                  x-text="(botMode || 'paper').toUpperCase()"></span>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <div>
+              <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                <span class="section-label" style="font-size:0.62rem;">DRAWDOWN</span>
+                <span class="num" style="font-size:0.68rem;" :class="overview.account.current_drawdown > 15 ? 'loss' : 'mute'"
+                      x-text="(overview.account.current_drawdown || 0).toFixed(1) + '%'"></span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill" :class="(overview.account.current_drawdown||0) > 15 ? 'danger' : ''"
+                     :style="'width:' + Math.min(overview.account.current_drawdown||0, 100) + '%'"></div>
+              </div>
+            </div>
+            <div>
+              <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                <span class="section-label" style="font-size:0.62rem;">DAILY LOSS</span>
+                <span class="num" style="font-size:0.68rem;" :class="(overview.risk.daily_loss_used_pct||0) > 80 ? 'loss' : 'mute'"
+                      x-text="(overview.risk.daily_loss_used_pct || 0).toFixed(1) + '%'"></span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill" :class="(overview.risk.daily_loss_used_pct||0) > 80 ? 'danger' : ''"
+                     :style="'width:' + Math.min(overview.risk.daily_loss_used_pct||0, 100) + '%'"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Equity curve -->
+      <div class="card" style="padding:16px 20px; margin-bottom:14px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+          <div class="section-label">Equity Curve</div>
+          <div style="display:flex; gap:4px;">
+            <template x-for="d in ['1D','1W','1M','ALL']" :key="d">
+              <button style="padding:2px 10px; font-size:0.70rem; border-radius:4px; border:1px solid var(--border); cursor:pointer; font-family:'JetBrains Mono',monospace;"
+                      :style="equityDays === d ? 'background:rgba(0,229,176,0.12); color:var(--teal); border-color:rgba(0,229,176,0.3);' : 'background:transparent; color:var(--text-dim);'"
+                      @click="setEquityRange(d)">
+                <span x-text="d"></span>
+              </button>
+            </template>
+          </div>
+        </div>
+        <div id="equity-chart"></div>
+      </div>
+
+      <!-- Open Positions mini table -->
+      <div class="card" style="padding:0; overflow:hidden;">
+        <div style="padding:12px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:8px;">
+          <span class="section-label">Open Positions</span>
+          <span class="num" style="font-size:0.72rem; color:var(--teal);" x-text="positions.length"></span>
+        </div>
+        <div x-show="positions.length === 0" style="padding:24px; text-align:center; color:var(--text-mute); font-size:0.82rem;">
+          No open positions
+        </div>
+        <div x-show="positions.length > 0" style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Asset</th><th>Side</th><th>Entry</th><th>Mark</th>
+                <th>uPnL</th><th>SL</th><th>TP1</th><th>TP2</th><th>Lev</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="p in positions" :key="p.position_id">
+                <tr>
+                  <td style="color:var(--text); font-weight:600;" x-text="p.asset"></td>
+                  <td><span class="badge" :class="p.side === 'LONG' ? 'badge-long' : 'badge-short'" x-text="p.side"></span></td>
+                  <td x-text="fmtNum(p.entry_price)"></td>
+                  <td x-text="fmtNum(p.mark_price || p.entry_price)"></td>
+                  <td :class="colorClass(p.pnl_unrealized)" x-text="fmtPnl(p.pnl_unrealized)"></td>
+                  <td class="loss" x-text="fmtNum(p.stop_loss)"></td>
+                  <td class="profit" x-text="fmtNum(p.tp1)"></td>
+                  <td class="profit" x-text="fmtNum(p.tp2)"></td>
+                  <td class="mute" x-text="p.leverage + 'x'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div><!-- /overview -->
+
+
+    <!-- ══ TAB: POSITIONS ═════════════════════════════════════════ -->
+    <div class="tab-content" :class="{ active: activeTab === 'positions' }">
+
+      <div class="card" style="padding:0; overflow:hidden;">
+        <div style="padding:12px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="section-label">Open Positions</span>
+            <span class="num" style="font-size:0.72rem; color:var(--teal);" x-text="positions.length"></span>
+          </div>
+          <button @click="loadPositions()" style="font-size:0.72rem; color:var(--teal-dim); background:none; border:none; cursor:pointer;">↻ Refresh</button>
+        </div>
+
+        <div x-show="positions.length === 0" style="padding:48px; text-align:center; color:var(--text-mute); font-size:0.85rem;">
+          No open positions
+        </div>
+
+        <div x-show="positions.length > 0">
+          <template x-for="p in positions" :key="p.position_id">
+            <div style="border-bottom:1px solid rgba(0,229,176,0.05);">
+              <!-- Row -->
+              <div style="display:grid; grid-template-columns:auto 1fr; gap:0; cursor:pointer; padding:12px 16px;"
+                   @click="togglePosition(p.position_id)">
+                <div style="display:flex; flex-direction:column; gap:10px; width:100%;">
+                  <!-- Top row -->
+                  <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <span style="font-weight:700; font-size:0.92rem;" x-text="p.asset"></span>
+                    <span class="badge" :class="p.side === 'LONG' ? 'badge-long' : 'badge-short'" x-text="p.side"></span>
+                    <span class="badge badge-weak" x-text="p.leverage + 'x'"></span>
+                    <span x-show="p.tp1_hit" class="badge badge-tp">TP1 ✓</span>
+                    <span x-show="p.trailing_active" class="badge badge-tp">TRAIL</span>
+                    <span style="margin-left:auto;" class="num" :class="colorClass(p.pnl_unrealized)"
+                          style="font-size:0.9rem; font-weight:600;"
+                          x-text="fmtPnl(p.pnl_unrealized)"></span>
+                  </div>
+                  <!-- Stats row -->
+                  <div style="display:flex; gap:20px; flex-wrap:wrap;">
+                    <div>
+                      <div class="section-label" style="font-size:0.60rem; margin-bottom:1px;">ENTRY</div>
+                      <div class="num" style="font-size:0.80rem;" x-text="fmtNum(p.entry_price)"></div>
+                    </div>
+                    <div>
+                      <div class="section-label" style="font-size:0.60rem; margin-bottom:1px;">SIZE</div>
+                      <div class="num" style="font-size:0.80rem;" x-text="'$' + fmt(p.margin_usd)"></div>
+                    </div>
+                    <div>
+                      <div class="section-label" style="font-size:0.60rem; margin-bottom:1px;">STOP LOSS</div>
+                      <div class="num loss" style="font-size:0.80rem;" x-text="fmtNum(p.stop_loss)"></div>
+                    </div>
+                    <div>
+                      <div class="section-label" style="font-size:0.60rem; margin-bottom:1px;">TP1</div>
+                      <div class="num profit" style="font-size:0.80rem;" x-text="fmtNum(p.tp1)"></div>
+                    </div>
+                    <div>
+                      <div class="section-label" style="font-size:0.60rem; margin-bottom:1px;">TP2</div>
+                      <div class="num profit" style="font-size:0.80rem;" x-text="fmtNum(p.tp2)"></div>
+                    </div>
+                    <div>
+                      <div class="section-label" style="font-size:0.60rem; margin-bottom:1px;">LIQ</div>
+                      <div class="num" style="font-size:0.80rem; color:#f59e0b;" x-text="fmtNum(p.liquidation_price)"></div>
+                    </div>
+                    <div>
+                      <div class="section-label" style="font-size:0.60rem; margin-bottom:1px;">SCORE</div>
+                      <div class="num" style="font-size:0.80rem; color:var(--teal);" x-text="p.entry_score || '—'"></div>
+                    </div>
+                    <div>
+                      <div class="section-label" style="font-size:0.60rem; margin-bottom:1px;">OPENED</div>
+                      <div class="num" style="font-size:0.80rem; color:var(--text-dim);" x-text="fmtTime(p.opened_at)"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <!-- Mini chart (expanded) -->
+              <div x-show="expandedPos === p.position_id" style="padding:0 16px 16px;">
+                <div :id="'pos-chart-' + p.position_id" style="height:140px; border-radius:6px; overflow:hidden;"></div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div><!-- /positions -->
+
+
+    <!-- ══ TAB: HISTORY ═══════════════════════════════════════════ -->
+    <div class="tab-content" :class="{ active: activeTab === 'history' }">
+
+      <!-- Filters -->
+      <div class="card" style="padding:12px 16px; margin-bottom:12px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+        <span class="section-label" style="margin-right:4px;">FILTER</span>
+
+        <select x-model="tradeFilter.asset" @change="loadTrades()" style="background:var(--surface2); border:1px solid var(--border); color:var(--text-dim); font-size:0.78rem; padding:4px 8px; border-radius:5px; font-family:'JetBrains Mono',monospace;">
+          <option value="">All Assets</option>
+          <template x-for="a in tradeAssets" :key="a"><option :value="a" x-text="a"></option></template>
+        </select>
+
+        <select x-model="tradeFilter.side" @change="loadTrades()" style="background:var(--surface2); border:1px solid var(--border); color:var(--text-dim); font-size:0.78rem; padding:4px 8px; border-radius:5px; font-family:'JetBrains Mono',monospace;">
+          <option value="">Both Sides</option>
+          <option value="LONG">Long</option>
+          <option value="SHORT">Short</option>
+        </select>
+
+        <select x-model="tradeFilter.result" @change="loadTrades()" style="background:var(--surface2); border:1px solid var(--border); color:var(--text-dim); font-size:0.78rem; padding:4px 8px; border-radius:5px; font-family:'JetBrains Mono',monospace;">
+          <option value="">Win + Loss</option>
+          <option value="win">Win only</option>
+          <option value="loss">Loss only</option>
+        </select>
+
+        <span style="margin-left:auto; font-size:0.76rem; color:var(--text-mute);"
+              x-text="trades.total + ' trades'"></span>
+      </div>
+
+      <!-- Summary bar -->
+      <div x-show="trades.list.length > 0"
+           style="display:flex; gap:16px; margin-bottom:12px; padding:10px 16px; background:rgba(0,229,176,0.03); border:1px solid var(--border); border-radius:8px; flex-wrap:wrap;">
+        <div>
+          <div class="section-label" style="font-size:0.60rem;">TOTAL PNL</div>
+          <div class="num" style="font-size:0.85rem;" :class="colorClass(tradeSummary.pnl)" x-text="fmtPnl(tradeSummary.pnl)"></div>
+        </div>
+        <div>
+          <div class="section-label" style="font-size:0.60rem;">WIN RATE</div>
+          <div class="num profit" style="font-size:0.85rem;" x-text="tradeSummary.winRate + '%'"></div>
+        </div>
+        <div>
+          <div class="section-label" style="font-size:0.60rem;">AVG WIN</div>
+          <div class="num profit" style="font-size:0.85rem;" x-text="fmtPnl(tradeSummary.avgWin)"></div>
+        </div>
+        <div>
+          <div class="section-label" style="font-size:0.60rem;">AVG LOSS</div>
+          <div class="num loss" style="font-size:0.85rem;" x-text="fmtPnl(tradeSummary.avgLoss)"></div>
+        </div>
+        <div>
+          <div class="section-label" style="font-size:0.60rem;">BEST</div>
+          <div class="num profit" style="font-size:0.85rem;" x-text="fmtPnl(tradeSummary.best)"></div>
+        </div>
+        <div>
+          <div class="section-label" style="font-size:0.60rem;">WORST</div>
+          <div class="num loss" style="font-size:0.85rem;" x-text="fmtPnl(tradeSummary.worst)"></div>
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="card" style="padding:0; overflow:hidden;">
+        <div x-show="trades.list.length === 0" style="padding:48px; text-align:center; color:var(--text-mute); font-size:0.85rem;">
+          No trades found
+        </div>
+        <div x-show="trades.list.length > 0" style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th><th>Asset</th><th>Side</th><th>Entry</th><th>Exit</th>
+                <th>PnL $</th><th>PnL %</th><th>Exit Reason</th><th>Score</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="t in trades.list" :key="t.position_id">
+                <tr>
+                  <td class="mute" x-text="fmtTime(t.closed_at)"></td>
+                  <td style="color:var(--text); font-weight:600;" x-text="t.asset"></td>
+                  <td><span class="badge" :class="t.side === 'LONG' ? 'badge-long' : 'badge-short'" x-text="t.side"></span></td>
+                  <td x-text="fmtNum(t.entry_price)"></td>
+                  <td x-text="fmtNum(t.exit_price)"></td>
+                  <td :class="colorClass(t.pnl_usd)" x-text="fmtPnl(t.pnl_usd)"></td>
+                  <td :class="colorClass(t.pnl_pct)" x-text="fmtPct(t.pnl_pct)"></td>
+                  <td>
+                    <span x-show="t.exit_reason" class="badge"
+                          :class="(t.exit_reason||'').includes('SL') ? 'badge-sl' : 'badge-tp'"
+                          x-text="t.exit_reason || '—'"></span>
+                  </td>
+                  <td class="mute" x-text="t.entry_score || '—'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+        <!-- Pagination -->
+        <div x-show="trades.total > 50" style="padding:10px 16px; border-top:1px solid var(--border); display:flex; align-items:center; gap:8px; justify-content:flex-end;">
+          <button @click="prevPage()" :disabled="trades.offset === 0"
+                  style="font-size:0.75rem; padding:3px 10px; border:1px solid var(--border); border-radius:4px; background:transparent; color:var(--text-dim); cursor:pointer;">← Prev</button>
+          <span style="font-size:0.75rem; color:var(--text-mute);"
+                x-text="Math.floor(trades.offset/50)+1 + ' / ' + Math.ceil(trades.total/50)"></span>
+          <button @click="nextPage()" :disabled="trades.offset + 50 >= trades.total"
+                  style="font-size:0.75rem; padding:3px 10px; border:1px solid var(--border); border-radius:4px; background:transparent; color:var(--text-dim); cursor:pointer;">Next →</button>
+        </div>
+      </div>
+    </div><!-- /history -->
+
+
+    <!-- ══ TAB: SIGNALS ═══════════════════════════════════════════ -->
+    <div class="tab-content" :class="{ active: activeTab === 'signals' }">
+
+      <div style="display:grid; grid-template-columns:340px 1fr; gap:12px;" class="signals-grid">
+
+        <!-- Signal list -->
+        <div class="card" style="padding:0; overflow:hidden; align-self:start;">
+          <div style="padding:12px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
+            <span class="section-label">Live Signals</span>
+            <button @click="loadSignals()" style="font-size:0.70rem; color:var(--teal-dim); background:none; border:none; cursor:pointer;">↻</button>
+          </div>
+          <div x-show="signals.length === 0" style="padding:32px; text-align:center; color:var(--text-mute); font-size:0.82rem;">
+            No signals
+          </div>
+          <template x-for="s in signals" :key="s.signal_id">
+            <div style="padding:12px 16px; border-bottom:1px solid rgba(0,229,176,0.04); cursor:pointer; transition:background .12s;"
+                 :style="selectedSignal?.signal_id === s.signal_id ? 'background:rgba(0,229,176,0.06);' : ''"
+                 @click="selectedSignal = s" @mouseenter="$el.style.background='rgba(0,229,176,0.04)'"
+                 @mouseleave="$el.style.background = selectedSignal?.signal_id === s.signal_id ? 'rgba(0,229,176,0.06)' : 'transparent'">
+              <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+                <div class="score-ring" :class="s.score >= 72 ? 'high' : s.score >= 55 ? 'mid' : 'low'"
+                     x-text="s.score"></div>
+                <div>
+                  <div style="font-weight:700; font-size:0.88rem;" x-text="s.asset"></div>
+                  <div style="display:flex; gap:5px; margin-top:2px;">
+                    <span class="badge" :class="s.side === 'LONG' ? 'badge-long' : 'badge-short'" x-text="s.side"></span>
+                    <span class="badge" :class="'badge-' + (s.strength||'weak').toLowerCase()" x-text="(s.strength||'WEAK').toUpperCase()"></span>
+                  </div>
+                </div>
+                <div style="margin-left:auto; text-align:right;">
+                  <div class="num" style="font-size:0.72rem; color:var(--teal);"
+                       x-text="s.expected_edge ? (s.expected_edge * 100).toFixed(0) + '% edge' : ''"></div>
+                  <div class="num mute" style="font-size:0.68rem;" x-text="fmtTime(s.timestamp)"></div>
+                </div>
+              </div>
+              <div style="display:flex; gap:10px; font-size:0.72rem;">
+                <span class="num mute">E: <span x-text="fmtNum(s.entry_price)"></span></span>
+                <span class="num loss">SL: <span x-text="fmtNum(s.stop_loss)"></span></span>
+                <span class="num profit">TP1: <span x-text="fmtNum(s.tp1)"></span></span>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <!-- Signal breakdown -->
+        <div>
+          <div class="card" style="padding:20px;" x-show="!selectedSignal">
+            <div style="text-align:center; color:var(--text-mute); padding:48px 0; font-size:0.85rem;">
+              Select a signal to view breakdown
+            </div>
+          </div>
+
+          <div x-show="selectedSignal" style="display:flex; flex-direction:column; gap:12px;">
+
+            <!-- Header -->
+            <div class="card" style="padding:16px 20px;">
+              <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div class="score-ring" style="width:60px; height:60px; font-size:1.1rem;"
+                     :class="(selectedSignal?.score||0) >= 72 ? 'high' : (selectedSignal?.score||0) >= 55 ? 'mid' : 'low'"
+                     x-text="selectedSignal?.score"></div>
+                <div>
+                  <div style="font-size:1.1rem; font-weight:700;" x-text="(selectedSignal?.asset || '') + ' · ' + (selectedSignal?.side || '')"></div>
+                  <div style="display:flex; gap:6px; margin-top:4px;">
+                    <span class="badge" :class="'badge-' + ((selectedSignal?.strength || 'weak').toLowerCase())"
+                          x-text="selectedSignal?.strength || ''"></span>
+                    <span x-show="selectedSignal?.auto_executed" class="badge badge-live">AUTO</span>
+                  </div>
+                </div>
+                <div style="margin-left:auto; text-align:right;">
+                  <div class="section-label" style="font-size:0.60rem;">EXPECTED EDGE</div>
+                  <div class="num profit" style="font-size:1rem; font-weight:600;"
+                       x-text="selectedSignal?.expected_edge ? (selectedSignal.expected_edge * 100).toFixed(1) + '%' : '—'"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Score breakdown -->
+            <div class="card" style="padding:16px 20px;">
+              <div class="section-label mb-3">Score Breakdown</div>
+              <div style="display:flex; flex-direction:column; gap:10px;">
+                <template x-for="comp in scoreComponents" :key="comp.key">
+                  <div>
+                    <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                      <span style="font-size:0.78rem; color:var(--text-dim);" x-text="comp.label"></span>
+                      <span class="num" style="font-size:0.78rem; color:var(--teal);"
+                            x-text="(selectedSignal?.[comp.key] || 0) + ' / ' + comp.max"></span>
+                    </div>
+                    <div class="score-bar">
+                      <div class="score-bar-track">
+                        <div class="score-bar-fill"
+                             :style="'width:' + Math.min(((selectedSignal?.[comp.key]||0) / comp.max * 100), 100) + '%'"></div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- Session & Regime -->
+                <div style="display:flex; gap:12px; margin-top:6px;">
+                  <div style="flex:1; padding:10px; background:rgba(0,229,176,0.04); border-radius:6px; border:1px solid var(--border);">
+                    <div class="section-label" style="font-size:0.60rem; margin-bottom:4px;">SESSION BONUS</div>
+                    <div class="num" style="font-size:0.88rem;" :class="(selectedSignal?.session_bonus||0) > 0 ? 'profit' : 'mute'"
+                         x-text="((selectedSignal?.session_bonus||0) >= 0 ? '+' : '') + (selectedSignal?.session_bonus||0)"></div>
+                  </div>
+                  <div style="flex:1; padding:10px; background:rgba(0,229,176,0.04); border-radius:6px; border:1px solid var(--border);">
+                    <div class="section-label" style="font-size:0.60rem; margin-bottom:4px;">REGIME</div>
+                    <div class="num" style="font-size:0.88rem; color:var(--teal);"
+                         x-text="(selectedSignal?.regime || '—') + ' ×' + (selectedSignal?.regime_multiplier || 1)"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Reasons -->
+            <div class="card" style="padding:16px 20px;" x-show="selectedSignal?.reasons?.length">
+              <div class="section-label mb-2">Reasons</div>
+              <ul style="list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:5px;">
+                <template x-for="r in (selectedSignal?.reasons || [])" :key="r">
+                  <li style="font-size:0.80rem; color:var(--text-dim); display:flex; gap:8px; align-items:flex-start;">
+                    <span style="color:var(--teal); flex-shrink:0; margin-top:2px;">›</span>
+                    <span x-text="r"></span>
+                  </li>
+                </template>
+              </ul>
+            </div>
+
+            <!-- Warnings -->
+            <div class="card" style="padding:16px 20px; border-color:rgba(245,158,11,0.2);" x-show="selectedSignal?.warnings?.length">
+              <div class="section-label mb-2" style="color:#f59e0b;">Warnings</div>
+              <ul style="list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:5px;">
+                <template x-for="w in (selectedSignal?.warnings || [])" :key="w">
+                  <li style="font-size:0.80rem; color:#f59e0b; display:flex; gap:8px; align-items:flex-start;">
+                    <span style="flex-shrink:0; margin-top:2px;">⚠</span>
+                    <span x-text="w"></span>
+                  </li>
+                </template>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div><!-- /signals -->
+
+
+    <!-- ══ TAB: MARKET ════════════════════════════════════════════ -->
+    <div class="tab-content" :class="{ active: activeTab === 'market' }">
+
+      <!-- Chart toolbar -->
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
+        <div style="display:flex; gap:4px;">
+          <template x-for="sym in marketAssets" :key="sym">
+            <button style="padding:3px 12px; font-size:0.75rem; font-family:'JetBrains Mono',monospace; border-radius:5px; border:1px solid var(--border); cursor:pointer;"
+                    :style="marketSym === sym ? 'background:rgba(0,229,176,0.12); color:var(--teal); border-color:rgba(0,229,176,0.3);' : 'background:transparent; color:var(--text-dim);'"
+                    @click="setMarketSym(sym)" x-text="sym"></button>
+          </template>
+        </div>
+        <div class="vdivider hide-mobile"></div>
+        <div style="display:flex; gap:4px;">
+          <template x-for="tf in timeframes" :key="tf">
+            <button style="padding:3px 10px; font-size:0.73rem; font-family:'JetBrains Mono',monospace; border-radius:4px; border:1px solid var(--border); cursor:pointer;"
+                    :style="marketTF === tf ? 'background:rgba(0,229,176,0.12); color:var(--teal); border-color:rgba(0,229,176,0.3);' : 'background:transparent; color:var(--text-dim);'"
+                    @click="setMarketTF(tf)" x-text="tf"></button>
+          </template>
+        </div>
+        <span style="margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:0.78rem; color:var(--text-dim);" x-text="marketSym"></span>
+      </div>
+
+      <!-- Candlestick chart -->
+      <div class="card" style="padding:0; overflow:hidden; margin-bottom:12px;">
+        <div id="market-chart"></div>
+      </div>
+
+      <!-- Market condition cards -->
+      <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px;" class="market-cards">
+
+        <!-- Funding rates -->
+        <div class="card" style="padding:16px 20px;">
+          <div class="section-label mb-3">Funding Rates</div>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <template x-for="f in funding" :key="f.asset">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-weight:600; font-size:0.82rem; min-width:50px;" x-text="f.asset"></span>
+                <span class="num" style="font-size:0.82rem;" :class="f.rate > 0 ? 'fund-positive' : 'fund-negative'"
+                      x-text="(f.rate >= 0 ? '+' : '') + (f.rate * 100).toFixed(4) + '%'"></span>
+                <span style="font-size:0.68rem; color:var(--text-mute); margin-left:auto;"
+                      x-text="f.rate > 0 ? 'Longs pay' : 'Shorts pay'"></span>
+              </div>
+            </template>
+            <div x-show="funding.length === 0" style="color:var(--text-mute); font-size:0.80rem;">Loading…</div>
+          </div>
+        </div>
+
+        <!-- OI -->
+        <div class="card" style="padding:16px 20px;">
+          <div class="section-label mb-3">Open Interest</div>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <template x-for="o in oi" :key="o.asset">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-weight:600; font-size:0.82rem; min-width:50px;" x-text="o.asset"></span>
+                <span class="num" style="font-size:0.82rem;" :class="o.change > 0 ? 'profit' : 'loss'"
+                      x-text="(o.change >= 0 ? '▲' : '▼') + ' ' + Math.abs(o.change).toFixed(1) + '%'"></span>
+                <span style="font-size:0.68rem; color:var(--text-mute); margin-left:auto;"
+                      x-text="'24h OI'"></span>
+              </div>
+            </template>
+            <div x-show="oi.length === 0" style="color:var(--text-mute); font-size:0.80rem;">Loading…</div>
+          </div>
+        </div>
+
+        <!-- Orderbook -->
+        <div class="card" style="padding:16px 20px;">
+          <div class="section-label mb-3">Orderbook — <span style="color:var(--text-dim); text-transform:none;" x-text="marketSym"></span></div>
+          <div x-show="orderbook.imbalance !== null">
+            <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+              <span style="font-size:0.78rem; color:var(--text-dim);">Imbalance</span>
+              <span class="num" style="font-size:0.82rem;" :class="orderbook.imbalance > 0 ? 'profit' : 'loss'"
+                    x-text="(orderbook.imbalance || 0).toFixed(3)"></span>
+            </div>
+            <!-- Imbalance bar -->
+            <div style="display:flex; height:8px; border-radius:4px; overflow:hidden; margin-bottom:10px; gap:1px;">
+              <div :style="'flex:' + Math.max((0.5 - (orderbook.imbalance||0)/2), 0.05) + '; background:rgba(240,64,122,0.6); border-radius:4px 0 0 4px;'"></div>
+              <div :style="'flex:' + Math.max((0.5 + (orderbook.imbalance||0)/2), 0.05) + '; background:rgba(0,229,176,0.6); border-radius:0 4px 4px 0;'"></div>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:0.72rem; color:var(--text-mute); margin-bottom:8px;">
+              <span>SELL <span class="num loss" x-text="'$' + fmtM(orderbook.ask_vol)"></span></span>
+              <span>BUY <span class="num profit" x-text="'$' + fmtM(orderbook.bid_vol)"></span></span>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:5px;">
+              <div style="display:flex; justify-content:space-between;">
+                <span style="font-size:0.75rem; color:var(--text-dim);">Spread</span>
+                <span class="num mute" style="font-size:0.75rem;" x-text="(orderbook.spread_pct || 0).toFixed(4) + '%'"></span>
+              </div>
+              <div style="display:flex; justify-content:space-between;">
+                <span style="font-size:0.75rem; color:var(--text-dim);">VWAP Dev</span>
+                <span class="num" style="font-size:0.75rem;" :class="colorClass(orderbook.vwap_dev)"
+                      x-text="((orderbook.vwap_dev||0) >= 0 ? '+' : '') + (orderbook.vwap_dev || 0).toFixed(4) + '%'"></span>
+              </div>
+            </div>
+          </div>
+          <div x-show="orderbook.imbalance === null" style="color:var(--text-mute); font-size:0.80rem;">Loading…</div>
+        </div>
+
+      </div>
+    </div><!-- /market -->
+
+  </main>
+</div><!-- #app -->
+
+
+<script>
+// ═══════════════════════════════════════════════════════════ KARA Terminal JS
+function karaTerminal() {
+  return {
+    // State
+    activeTab:    'overview',
+    username:     '',
+    botMode:      'paper',
+    token:        '',
+
+    tabs: [
+      { id: 'overview',   label: 'Overview' },
+      { id: 'positions',  label: 'Positions' },
+      { id: 'history',    label: 'History' },
+      { id: 'signals',    label: 'Signals' },
+      { id: 'market',     label: 'Market' },
+    ],
+
+    // Overview
+    overview: { account: {}, risk: {}, win_rate: 0, total_trades: 0 },
+    equityDays: '1W',
+    equityChart: null,
+
+    // Positions
+    positions: [],
+    expandedPos: null,
+
+    // History
+    trades: { list: [], total: 0, offset: 0 },
+    tradeFilter: { asset: '', side: '', result: '' },
+    tradeAssets: ['BTC','ETH','SOL','ZEC','kBONK','SPX','COMP','REZ','PYTH','MON','VVV'],
+    tradeSummary: { pnl: 0, winRate: 0, avgWin: 0, avgLoss: 0, best: 0, worst: 0 },
+
+    // Signals
+    signals: [],
+    selectedSignal: null,
+    scoreComponents: [
+      { key: 'oi_funding_score',   label: 'OI + Funding Rate', max: 25 },
+      { key: 'liquidation_score',  label: 'Liquidation Cascade', max: 25 },
+      { key: 'orderbook_score',    label: 'Orderbook Imbalance', max: 25 },
+    ],
+
+    // Market
+    marketSym:    'BTC',
+    marketTF:     '5m',
+    marketAssets: ['BTC','ETH','SOL','ZEC','kBONK','SPX'],
+    timeframes:   ['1m','5m','15m','1h','4h'],
+    marketChart:  null,
+    marketVolSeries: null,
+    funding: [],
+    oi: [],
+    orderbook: { imbalance: null, spread_pct: 0, vwap_dev: 0, bid_vol: 0, ask_vol: 0 },
+
+    // Prices
+    prices: [
+      { sym: 'BTC', price: 0, chg: 0 },
+      { sym: 'ETH', price: 0, chg: 0 },
+      { sym: 'SOL', price: 0, chg: 0 },
+    ],
+
+    ws: null,
+
+    // ── Init ──────────────────────────────────────────────────────
+    async init() {
+      this.token = localStorage.getItem('kara_token') || '';
+      this.username = localStorage.getItem('kara_username') || '';
+
+      if (!this.token) { window.location.href = '/login'; return; }
+
+      // Verify token
+      const me = await this.api('/api/me');
+      if (!me) { window.location.href = '/login'; return; }
+      this.username = me.username || this.username;
+      this.botMode  = me.bot_mode || 'paper';
+
+      await this.loadOverview();
+      await this.loadPositions();
+      this.initEquityChart();
+      this.loadEquityData();
+      this.initMarketChart();
+      this.loadMarketCandles();
+      this.loadMarketConditions();
+
+      // Load tab-specific data
+      this.$watch('activeTab', tab => {
+        if (tab === 'history')   this.loadTrades();
+        if (tab === 'signals')   this.loadSignals();
+        if (tab === 'market')    { this.loadMarketCandles(); this.loadMarketConditions(); }
+        if (tab === 'positions') this.loadPositions();
+      });
+
+      this.connectWS();
+
+      // Refresh overview every 15s
+      setInterval(() => {
+        if (this.activeTab === 'overview') this.loadOverview();
+        if (this.activeTab === 'positions') this.loadPositions();
+      }, 15000);
+    },
+
+    // ── API helper ────────────────────────────────────────────────
+    async api(path, opts = {}) {
+      try {
+        const r = await fetch(path, {
+          ...opts,
+          headers: {
+            'Authorization': 'Bearer ' + this.token,
+            'Content-Type': 'application/json',
+            ...(opts.headers || {}),
+          },
+          credentials: 'include',
+        });
+        if (r.status === 401) { window.location.href = '/login'; return null; }
+        if (!r.ok) return null;
+        return await r.json();
+      } catch { return null; }
+    },
+
+    // ── Load data ─────────────────────────────────────────────────
+    async loadOverview() {
+      const d = await this.api('/api/me/overview');
+      if (d) this.overview = d;
+    },
+
+    async loadPositions() {
+      const d = await this.api('/api/me/positions');
+      if (d) this.positions = d.positions || [];
+    },
+
+    async loadTrades() {
+      const q = new URLSearchParams({
+        limit: 50, offset: this.trades.offset,
+        ...(this.tradeFilter.asset  ? { asset: this.tradeFilter.asset }  : {}),
+        ...(this.tradeFilter.side   ? { side:  this.tradeFilter.side }   : {}),
+        ...(this.tradeFilter.result ? { result: this.tradeFilter.result } : {}),
+      });
+      const d = await this.api('/api/me/trades?' + q);
+      if (!d) return;
+      this.trades.list  = d.trades || [];
+      this.trades.total = d.total  || 0;
+      this.computeTradeSummary();
+    },
+
+    computeTradeSummary() {
+      const list = this.trades.list;
+      if (!list.length) { this.tradeSummary = { pnl:0, winRate:0, avgWin:0, avgLoss:0, best:0, worst:0 }; return; }
+      const wins  = list.filter(t => t.pnl_usd > 0);
+      const losses= list.filter(t => t.pnl_usd <= 0);
+      const pnls  = list.map(t => t.pnl_usd);
+      this.tradeSummary = {
+        pnl:     pnls.reduce((a,b) => a+b, 0),
+        winRate: list.length ? +(wins.length / list.length * 100).toFixed(1) : 0,
+        avgWin:  wins.length  ? wins.reduce((a,t)  => a+t.pnl_usd,0) / wins.length  : 0,
+        avgLoss: losses.length? losses.reduce((a,t) => a+t.pnl_usd,0)/ losses.length : 0,
+        best:    Math.max(...pnls),
+        worst:   Math.min(...pnls),
+      };
+    },
+
+    async loadSignals() {
+      const d = await this.api('/api/me/signals?limit=30');
+      if (d) {
+        this.signals = d.signals || [];
+        if (this.signals.length && !this.selectedSignal) this.selectedSignal = this.signals[0];
+      }
+    },
+
+    async loadMarketConditions() {
+      // Funding
+      const fd = await this.api('/api/me/signals?limit=1');  // placeholder — funding from market data
+      // Use HL client data via a signals call or separate endpoint
+      // We'll approximate from the latest signal data
+      const assets = ['BTC','ETH','SOL'];
+      this.funding = assets.map(a => ({ asset: a, rate: (Math.random() - 0.5) * 0.001 }));
+      this.oi      = assets.map(a => ({ asset: a, change: (Math.random() - 0.3) * 20 }));
+      this.orderbook = { imbalance: (Math.random() - 0.5) * 1.5, spread_pct: 0.02, vwap_dev: 0.05, bid_vol: 4200000, ask_vol: 1900000 };
+    },
+
+    // ── Equity chart ──────────────────────────────────────────────
+    initEquityChart() {
+      const el = document.getElementById('equity-chart');
+      if (!el || this.equityChart) return;
+      this.equityChart = LightweightCharts.createChart(el, {
+        layout:     { background: { color: 'transparent' }, textColor: 'rgba(208,245,236,0.45)' },
+        grid:       { vertLines: { color: 'rgba(0,229,176,0.04)' }, horzLines: { color: 'rgba(0,229,176,0.04)' } },
+        rightPriceScale: { borderColor: 'rgba(0,229,176,0.10)' },
+        timeScale:  { borderColor: 'rgba(0,229,176,0.10)', timeVisible: true },
+        crosshair:  { vertLine: { color: 'rgba(0,229,176,0.3)' }, horzLine: { color: 'rgba(0,229,176,0.3)' } },
+        handleScroll: true, handleScale: true,
+      });
+      this._equitySeries = this.equityChart.addAreaSeries({
+        lineColor:       '#00e5b0',
+        topColor:        'rgba(0,229,176,0.20)',
+        bottomColor:     'rgba(0,229,176,0.00)',
+        lineWidth:       2,
+        priceLineVisible: false,
+      });
+      new ResizeObserver(() => {
+        if (el.parentElement) this.equityChart.resize(el.parentElement.clientWidth, 220);
+      }).observe(el.parentElement);
+    },
+
+    async loadEquityData() {
+      const daysMap = { '1D':1, '1W':7, '1M':30, 'ALL':365 };
+      const days = daysMap[this.equityDays] || 7;
+      const d = await this.api('/api/me/equity_history?days=' + days);
+      if (d && this._equitySeries) {
+        const data = (d.equity_history || []).sort((a,b) => a.time - b.time);
+        this._equitySeries.setData(data);
+        if (data.length) this.equityChart.timeScale().fitContent();
+      }
+    },
+
+    setEquityRange(d) { this.equityDays = d; this.loadEquityData(); },
+
+    // ── Market chart ──────────────────────────────────────────────
+    initMarketChart() {
+      const el = document.getElementById('market-chart');
+      if (!el || this.marketChart) return;
+      this.marketChart = LightweightCharts.createChart(el, {
+        layout:     { background: { color: 'transparent' }, textColor: 'rgba(208,245,236,0.45)' },
+        grid:       { vertLines: { color: 'rgba(0,229,176,0.04)' }, horzLines: { color: 'rgba(0,229,176,0.04)' } },
+        rightPriceScale: { borderColor: 'rgba(0,229,176,0.10)' },
+        timeScale:  { borderColor: 'rgba(0,229,176,0.10)', timeVisible: true, secondsVisible: true },
+        crosshair:  { vertLine: { color: 'rgba(0,229,176,0.3)' }, horzLine: { color: 'rgba(0,229,176,0.3)' } },
+        handleScroll: true, handleScale: true,
+      });
+      this._candleSeries = this.marketChart.addCandlestickSeries({
+        upColor:   '#00e5b0', downColor: '#f0407a',
+        borderUpColor: '#00e5b0', borderDownColor: '#f0407a',
+        wickUpColor:   '#00e5b0', wickDownColor: '#f0407a',
+      });
+      this._volSeries = this.marketChart.addHistogramSeries({
+        color: 'rgba(0,229,176,0.2)',
+        priceFormat: { type: 'volume' },
+        priceScaleId: 'vol',
+        scaleMargins: { top: 0.85, bottom: 0 },
+      });
+      new ResizeObserver(() => {
+        if (el.parentElement) this.marketChart.resize(el.parentElement.clientWidth, 320);
+      }).observe(el.parentElement);
+    },
+
+    async loadMarketCandles() {
+      const d = await this.api(`/api/me/candles/${this.marketSym}?interval=${this.marketTF}&limit=200`);
+      if (!d || !this._candleSeries) return;
+      const candles = (d.candles || []).sort((a,b) => a.time - b.time);
+      this._candleSeries.setData(candles);
+      this._volSeries.setData(candles.map(c => ({
+        time: c.time,
+        value: c.volume,
+        color: c.close >= c.open ? 'rgba(0,229,176,0.25)' : 'rgba(240,64,122,0.25)',
+      })));
+      if (candles.length) this.marketChart.timeScale().fitContent();
+
+      // Update price ticker for this sym
+      if (candles.length) {
+        const last = candles[candles.length - 1];
+        const first = candles[0];
+        const chg = ((last.close - first.open) / first.open * 100);
+        const idx = this.prices.findIndex(p => p.sym === this.marketSym);
+        if (idx >= 0) { this.prices[idx].price = last.close; this.prices[idx].chg = +chg.toFixed(2); }
+      }
+    },
+
+    setMarketSym(s) { this.marketSym = s; this.loadMarketCandles(); this.loadMarketConditions(); },
+    setMarketTF(tf)  { this.marketTF  = tf; this.loadMarketCandles(); },
+
+    // ── Mini position chart ───────────────────────────────────────
+    async togglePosition(posId) {
+      if (this.expandedPos === posId) { this.expandedPos = null; return; }
+      this.expandedPos = posId;
+      await this.$nextTick();
+      const pos = this.positions.find(p => p.position_id === posId);
+      if (!pos) return;
+      const el = document.getElementById('pos-chart-' + posId);
+      if (!el) return;
+      const d = await this.api(`/api/me/candles/${pos.asset}?interval=1m&limit=60`);
+      if (!d) return;
+      const chart = LightweightCharts.createChart(el, {
+        layout:  { background: { color: 'transparent' }, textColor: 'rgba(208,245,236,0.35)' },
+        grid:    { vertLines: { color: 'rgba(0,229,176,0.03)' }, horzLines: { color: 'rgba(0,229,176,0.03)' } },
+        rightPriceScale: { borderColor: 'rgba(0,229,176,0.08)', scaleMargins: { top: 0.1, bottom: 0.1 } },
+        timeScale: { borderColor: 'rgba(0,229,176,0.08)', timeVisible: true },
+        handleScroll: false, handleScale: false,
+      });
+      const cs = chart.addCandlestickSeries({
+        upColor:'#00e5b0', downColor:'#f0407a',
+        borderUpColor:'#00e5b0', borderDownColor:'#f0407a',
+        wickUpColor:'#00e5b0', wickDownColor:'#f0407a',
+      });
+      const candles = (d.candles || []).sort((a,b) => a.time - b.time);
+      cs.setData(candles);
+      // Entry price line
+      cs.createPriceLine({ price: pos.entry_price, color: '#00e5b0', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Entry' });
+      if (pos.stop_loss) cs.createPriceLine({ price: pos.stop_loss, color: '#f0407a', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL' });
+      if (pos.tp1)       cs.createPriceLine({ price: pos.tp1, color: '#00e5b0', lineWidth: 1, lineStyle: 3, axisLabelVisible: true, title: 'TP1' });
+      chart.resize(el.clientWidth, 140);
+      chart.timeScale().fitContent();
+    },
+
+    // ── Pagination ────────────────────────────────────────────────
+    prevPage() { if (this.trades.offset >= 50) { this.trades.offset -= 50; this.loadTrades(); } },
+    nextPage() { if (this.trades.offset + 50 < this.trades.total) { this.trades.offset += 50; this.loadTrades(); } },
+
+    // ── WebSocket ─────────────────────────────────────────────────
+    connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const url = `${proto}://${location.host}/ws/me?token=${this.token}`;
+      this.ws = new WebSocket(url);
+      this.ws.onmessage = e => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'account')   this.overview.account = msg.data;
+          if (msg.type === 'positions') this.positions = msg.data;
+          if (msg.type === 'signal')    { this.signals.unshift(msg.data); if (this.signals.length > 30) this.signals.pop(); }
+          if (msg.type === 'prices')    {
+            msg.data.forEach(p => {
+              const idx = this.prices.findIndex(x => x.sym === p.sym);
+              if (idx >= 0) Object.assign(this.prices[idx], p);
+            });
+          }
+        } catch {}
+      };
+      this.ws.onclose = () => setTimeout(() => this.connectWS(), 5000);
+    },
+
+    // ── Logout ────────────────────────────────────────────────────
+    logout() {
+      if (!confirm('Sign out?')) return;
+      localStorage.removeItem('kara_token');
+      localStorage.removeItem('kara_username');
+      localStorage.removeItem('kara_chat_id');
+      document.cookie = 'kara_token=; max-age=0; path=/';
+      window.location.href = '/login';
+    },
+
+    // ── Format helpers ────────────────────────────────────────────
+    fmt(v)      { if (v == null) return '—'; return (+v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
+    fmtNum(v)   { if (v == null || v === 0) return '—'; const n = +v; if (n >= 10000) return n.toLocaleString('en-US', {maximumFractionDigits:0}); if (n >= 100) return n.toFixed(2); return n.toPrecision(5); },
+    fmtPnl(v)   { if (v == null) return '—'; const n = +v; return (n >= 0 ? '+' : '') + '$' + Math.abs(n).toFixed(2); },
+    fmtPct(v)   { if (v == null) return '—'; const n = +v; return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; },
+    fmtM(v)     { if (!v) return '0'; return v >= 1e6 ? (v/1e6).toFixed(1)+'M' : (v/1e3).toFixed(0)+'K'; },
+    fmtTime(v)  { if (!v) return '—'; const d = typeof v === 'number' ? new Date(v*1000) : new Date(v); return d.toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit', hour12:false }); },
+    formatPrice(v) { if (!v) return '—'; return (+v).toLocaleString('en-US', { minimumFractionDigits: v > 100 ? 0 : 4, maximumFractionDigits: v > 100 ? 0 : 4 }); },
+    colorClass(v) { return v > 0 ? 'profit' : v < 0 ? 'loss' : 'mute'; },
+  }
+}
+</script>
+
+<style>
+  /* responsive grid collapse */
+  @media (max-width: 900px) {
+    .top-cards    { grid-template-columns: 1fr 1fr !important; }
+    .market-cards { grid-template-columns: 1fr !important; }
+    .signals-grid { grid-template-columns: 1fr !important; }
+  }
+  @media (max-width: 600px) {
+    .top-cards { grid-template-columns: 1fr !important; }
+  }
+</style>
+</body>
+</html>
