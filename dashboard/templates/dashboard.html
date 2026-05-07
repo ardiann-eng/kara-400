@@ -1465,6 +1465,13 @@
     const sdot = s => s === 'online' ? 'dot-green' : s === 'waiting' || s === 'initializing' ? 'dot-amber' : 'dot-gray';
     const setDot = (id, cls) => { const e = document.getElementById(id); if (e) e.className = 'dot ' + cls };
 
+    // ── Auth guard: admin only ────────────────────────────────────────────
+    (function() {
+      const tok     = localStorage.getItem('kara_token');
+      const isAdmin = localStorage.getItem('kara_is_admin') === '1';
+      if (!tok || !isAdmin) { window.location.replace('/login'); }
+    })();
+
     const _tok = () => localStorage.getItem('kara_token') || '';
     const _authHdr = () => ({ 'Authorization': 'Bearer ' + _tok(), 'Content-Type': 'application/json' });
     async function api(p) { const r = await fetch(p, { headers: _authHdr(), credentials: 'include' }); if (r.status === 401) { location.href = '/login'; throw new Error('401'); } if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() }

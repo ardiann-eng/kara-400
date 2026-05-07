@@ -455,11 +455,20 @@ async def health():
                 bot_username = r.json().get("result", {}).get("username")
         except Exception:
             pass
+    # Derive bot_id from token (format: "123456789:ABCdef...")
+    bot_id = None
+    if config.TELEGRAM_TOKEN and not config.TELEGRAM_TOKEN.startswith("CHANGE"):
+        try:
+            bot_id = int(config.TELEGRAM_TOKEN.split(":")[0])
+        except Exception:
+            pass
+
     return {
         "status":       "ok",
         "mode":         config.MODE,
         "trading_mode": _mode_manager.mode if _mode_manager else "scalper",
         "bot_username": bot_username,
+        "bot_id":       bot_id,
         "time":         datetime.now(timezone.utc).isoformat(),
     }
 
