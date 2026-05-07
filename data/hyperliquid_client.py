@@ -198,14 +198,6 @@ class HyperliquidClient:
         if now_mono < self._api_backoff_until:
             wait = self._api_backoff_until - now_mono
             raise RuntimeError(f"API in backoff for {wait:.0f}s (too many 502s)")
-        elif self._consecutive_502s > 0 and now_mono >= self._api_backoff_until:
-            # Backoff window expired — auto-reset so API calls can resume
-            log.info(
-                f"[API] Circuit breaker auto-reset after backoff "
-                f"(was {self._consecutive_502s} consecutive 502s)"
-            )
-            self._consecutive_502s = 0
-            self._api_backoff_until = 0.0
 
         try:
             log.debug(f"[API] POST /info - type={request_type} throttled={throttled}")
