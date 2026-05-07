@@ -42,10 +42,13 @@ class UserSession:
             self.executor = PaperExecutor(self.risk_mgr, initial_balance=self.user.paper_balance_usd, chat_id=self.user.chat_id)
             
     async def initialize(self):
-        """Perform async tasks like connecting the HL client."""
+        """Perform async tasks like connecting the HL client and syncing chain state."""
         if hasattr(self, 'user_client') and self.user_client:
             await self.user_client.connect()
             log.info(f"✓ UserSession {self.user.chat_id}: Live client connected.")
+            # Reconcile any positions opened before this restart
+            if hasattr(self.executor, 'sync_positions_from_chain'):
+                await self.executor.sync_positions_from_chain()
 
     async def get_account_state(self):
         return await self.executor.get_account_state()

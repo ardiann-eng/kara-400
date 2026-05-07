@@ -111,17 +111,17 @@ class KaraBot:
         for u in user_db.get_all_users():
             cfg = u.config
             dirty = False
-            if cfg.std_min_score_to_signal != 55:
-                cfg.std_min_score_to_signal = 55
+            if cfg.std_min_score_to_signal != 45:
+                cfg.std_min_score_to_signal = 45
                 dirty = True
-            if cfg.std_min_score_to_auto_trade != 60:
-                cfg.std_min_score_to_auto_trade = 60
+            if cfg.std_min_score_to_auto_trade != 52:
+                cfg.std_min_score_to_auto_trade = 52
                 dirty = True
-            if cfg.scl_min_score_to_signal != 50:
-                cfg.scl_min_score_to_signal = 50
+            if cfg.scl_min_score_to_signal != 45:
+                cfg.scl_min_score_to_signal = 45
                 dirty = True
-            if cfg.scl_min_score_to_auto_trade != 60:
-                cfg.scl_min_score_to_auto_trade = 60
+            if cfg.scl_min_score_to_auto_trade != 52:
+                cfg.scl_min_score_to_auto_trade = 52
                 dirty = True
             if dirty:
                 user_db.update_user(u)
@@ -273,14 +273,26 @@ class KaraBot:
             session = UserSession(u, mode_manager=self.mode_mgr, hl_client=self.hl_client)
             if hasattr(session.executor, 'load_from_db'):
                 session.executor.load_from_db(u.chat_id)
-            # Live mode: sync open positions from chain to prevent orphaned positions after crash
-            if hasattr(session.executor, 'load_from_chain'):
-                try:
-                    await session.executor.load_from_chain()
-                except Exception as e:
-                    log.error(f"[LIVE] Chain sync failed for {u.chat_id}: {e}")
+            # Fix #1: connect live client + reconcile chain positions for live users
+            await session.initialize()
             self.sessions[u.chat_id] = session
         log.info(f"Loaded {len(self.sessions)} user sessions.")
+
+        # Fix #4: Warn if live users exist but server is not in live mode
+        from models.schemas import BotMode
+        live_users = [u for u in user_db.get_all_users() if u.config.bot_mode == BotMode.LIVE]
+        if live_users and config.TRADE_MODE != "live":
+            log.critical(
+                f"🚨 DANGER: {len(live_users)} user(s) set to LIVE mode but "
+                f"KARA_TRADE_MODE='{config.TRADE_MODE}'. "
+                "Their orders will be routed to TESTNET, not mainnet! "
+                "Set KARA_TRADE_MODE=live in .env to fix this."
+            )
+        if config.TRADE_MODE == "live" and config.SECRET_KEY == "CHANGEME":
+            log.critical(
+                "🚨 SECURITY: SECRET_KEY is still 'CHANGEME'! "
+                "Dashboard is insecure. Set SECRET_KEY in .env immediately."
+            )
 
         # Inject into dashboard (passing sessions registry for multi-user support)
         init_dashboard(self.sessions, self.telegram, self.mode_mgr)
@@ -525,6 +537,21 @@ class KaraBot:
         # Also handle user events
         if config.WALLET_ADDRESS:
             self.ws_client.on("user_events", self._on_user_event)
+
+        # Fix #9: Register dead callback — notify admin via Telegram instead of dying silently
+        async def _on_ws_dead():
+            admin_id = config.TELEGRAM_CHAT_ID
+            if admin_id and self.telegram and self.telegram._bot_started:
+                await self.telegram.send_text(
+                    "🚨 <b>KARA WebSocket terputus permanen!</b>\n"
+                    "Market data stream mati setelah max retry.\n"
+                    "Bot masih berjalan dalam slow-retry mode (60s interval).\n"
+                    "<i>Silakan cek koneksi atau restart bot jika perlu.</i>",
+                    target_chat_id=admin_id,
+                )
+            log.critical("WS dead callback fired — bot in slow-retry mode")
+
+        self.ws_client.add_dead_callback(_on_ws_dead)
 
         await self.ws_client.start()
 

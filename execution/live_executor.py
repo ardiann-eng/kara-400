@@ -239,24 +239,20 @@ class LiveExecutor:
             log.warning(" Calculated size is 0, skipping trade.")
             return None
 
-        # Set leverage first — WAJIB berhasil sebelum order dikirim.
-        # Jika gagal, batalkan trade agar leverage aktual di exchange tidak berbeda
-        # dari yang diharapkan (bisa menyebabkan liquidasi mendadak).
+        # Set leverage first — abort trade if this fails to avoid wrong leverage
         try:
             await self.client.set_leverage(
                 signal.asset,
                 actual_lev,
                 is_cross=False   # isolated
             )
-            log.info(f"⚙️  Leverage set: {signal.asset} {actual_lev}x isolated (Capped)")
+            log.info(f"⚙️  Leverage set: {signal.asset} {actual_lev}x isolated")
         except Exception as e:
             err_str = str(e).lower()
-            # Hyperliquid returns error jika leverage sudah sama — itu aman, lanjut.
-            # Error lain (network, auth, invalid leverage) = batalkan trade.
             if "no change" in err_str or "same leverage" in err_str or "already" in err_str:
                 log.info(f"⚙️  Leverage already set at {actual_lev}x for {signal.asset}, continuing.")
             else:
-                log.error(f"❌ [LIVE] set_leverage GAGAL untuk {signal.asset}: {e} — membatalkan order untuk keamanan.")
+                log.error(f"❌ [LIVE] set_leverage failed for {signal.asset}: {e} — aborting trade.")
                 return None
 
         # Place Post-Only limit order (slightly inside spread for fill probability)
@@ -298,9 +294,7 @@ class LiveExecutor:
         )
         self._positions[pos.position_id] = pos
 
-        # Pasang SL on-chain sebagai safety net.
-        # SL ini aktif di Hyperliquid exchange — tetap berlindungi meski bot mati/API down.
-        # Bot software tetap juga monitor SL, tapi on-chain SL adalah lapisan terakhir.
+        # Place on-chain SL as safety net — active on exchange even if bot crashes
         await self._place_onchain_sl(pos)
 
         log_data = {
@@ -328,24 +322,13 @@ class LiveExecutor:
     # ──────────────────────────────────────────
 
     async def _place_onchain_sl(self, pos: Position) -> None:
-        """
-        Pasang Stop-Loss sebagai trigger order on-chain di Hyperliquid.
-
-        Ini adalah safety net terakhir: jika bot mati, API down, atau flash crash
-        melewati software SL, order ini tetap aktif di exchange dan akan menutup
-        posisi secara otomatis.
-
-        Catatan: On-chain SL tidak bisa diupdate (hanya bisa cancel + pasang baru).
-        Saat SL software bergerak (misal ke breakeven setelah TP1), bot juga
-        harus cancel SL lama dan pasang yang baru via update_onchain_sl().
-        """
+        """Place on-chain stop-loss trigger order. Safety net active even if bot crashes."""
         try:
             sl_price = pos.stop_loss
             if not sl_price or sl_price <= 0:
-                log.warning(f"[SL-CHAIN] {pos.asset}: stop_loss tidak valid ({sl_price}), skip on-chain SL")
+                log.warning(f"[SL-CHAIN] {pos.asset}: invalid stop_loss ({sl_price}), skip")
                 return
 
-            # Closing a LONG = sell side; closing a SHORT = buy side
             is_buy = pos.side == Side.SHORT
             result = await self.client.place_sl_order(
                 asset=pos.asset,
@@ -354,7 +337,6 @@ class LiveExecutor:
                 trigger_px=sl_price,
             )
 
-            # Simpan order ID untuk dibatalkan saat posisi tutup
             sl_oid = None
             try:
                 statuses = result.get("response", {}).get("data", {}).get("statuses", [{}])
@@ -369,37 +351,33 @@ class LiveExecutor:
                 f"(oid={sl_oid}, side={'BUY' if is_buy else 'SELL'})"
             )
         except Exception as e:
-            # On-chain SL gagal = tidak fatal, software SL masih aktif.
-            # Log sebagai warning agar bisa dipantau.
-            log.warning(
-                f"⚠️  [SL-CHAIN] Gagal pasang on-chain SL untuk {pos.asset}: {e}. "
-                f"Software SL tetap aktif."
-            )
+            log.warning(f"⚠️  [SL-CHAIN] Failed to place on-chain SL for {pos.asset}: {e}. Software SL still active.")
             self._sl_order_ids[pos.position_id] = None
 
     async def _cancel_onchain_sl(self, pos: Position) -> None:
-        """
-        Batalkan on-chain SL order saat posisi ditutup (TP hit, trailing stop, manual close).
-        Jika tidak dibatalkan, SL order akan tetap di orderbook dan bisa membuka posisi baru
-        yang tidak diinginkan (karena reduce_only=True mencegah ini, tapi lebih bersih dibatalkan).
-        """
+        """Cancel on-chain SL when position closes (TP/trailing/manual)."""
         sl_oid = self._sl_order_ids.pop(pos.position_id, None)
         if not sl_oid:
             return
         try:
             await self.client.cancel_order(pos.asset, sl_oid)
-            log.info(f"✅ [SL-CHAIN] On-chain SL dibatalkan: {pos.asset} oid={sl_oid}")
+            log.info(f"✅ [SL-CHAIN] On-chain SL cancelled: {pos.asset} oid={sl_oid}")
         except Exception as e:
-            log.warning(f"⚠️  [SL-CHAIN] Gagal cancel on-chain SL {pos.asset} oid={sl_oid}: {e}")
+            log.warning(f"⚠️  [SL-CHAIN] Failed to cancel on-chain SL {pos.asset} oid={sl_oid}: {e}")
 
     async def update_onchain_sl(self, pos: Position, new_sl_price: float) -> None:
-        """
-        Update on-chain SL ke harga baru (misal setelah TP1 hit → SL pindah ke breakeven).
-        Cara: cancel SL lama, pasang SL baru.
-        """
+        """Move on-chain SL to new price (e.g. after TP1 hit → breakeven)."""
         await self._cancel_onchain_sl(pos)
         pos.stop_loss = new_sl_price
         await self._place_onchain_sl(pos)
+
+    # ──────────────────────────────────────────
+    # POSITION RECONCILIATION (startup sync)
+    # ──────────────────────────────────────────
+
+    async def sync_positions_from_chain(self):
+        """Alias for load_from_chain — called by session.initialize() on startup."""
+        await self.load_from_chain()
 
     # ──────────────────────────────────────────
     # UPDATE POSITIONS (Active Monitoring)
@@ -672,7 +650,7 @@ class LiveExecutor:
         return order, False
 
     async def _wait_for_fill(self, order: Order, timeout: int) -> bool:
-        """Poll for fill status. In production, use WS user events instead."""
+        """Poll for fill status. Verifies actual fill size from chain, not assumed."""
         start = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start < timeout:
             await asyncio.sleep(2.0)
@@ -682,7 +660,32 @@ class LiveExecutor:
                 for o in open_orders
             )
             if not is_still_open:
-                order.status      = OrderStatus.FILLED
-                order.filled_size = order.size
-                return True
+                # Order left the book — verify actual fill from chain position state
+                try:
+                    user_state = await self.client.get_user_state()
+                    asset_positions = user_state.get("assetPositions", [])
+                    for ap in asset_positions:
+                        pos_data = ap.get("position", {})
+                        if pos_data.get("coin") == order.asset:
+                            actual_sz = abs(float(pos_data.get("szi", 0)))
+                            if actual_sz > 0:
+                                order.status        = OrderStatus.FILLED
+                                order.filled_size   = actual_sz
+                                order.avg_fill_price = float(
+                                    pos_data.get("entryPx", order.price)
+                                )
+                                log.info(
+                                    f"✅ Fill verified from chain: {order.asset} "
+                                    f"{actual_sz} @ {order.avg_fill_price}"
+                                )
+                                return True
+                except Exception as verify_err:
+                    log.warning(f"Could not verify fill from chain: {verify_err}")
+
+                # Fallback: order gone but chain pos not found — assume unfilled/cancelled
+                log.warning(
+                    f"Order {order.order_id} left book but no chain position found "
+                    f"for {order.asset}. Treating as unfilled."
+                )
+                return False
         return False

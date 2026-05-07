@@ -373,15 +373,16 @@ class UserConfig(BaseModel):
     bot_mode:      BotMode = BotMode.PAPER # paper | live
     risk_pct:      float = 0.02            # 2% of equity
     
-    # Threshold: signal=55, auto_trade=60
-    std_min_score_to_signal:     int = 55   # minimum score to emit signal
-    std_min_score_to_auto_trade: int = 60   # minimum score to auto-execute
+    # ── Standard Mode Settings ────────────────
+    # Recalibrated: session bonus and OI magnitude removed from score (~13-15 pts lower).
+    std_min_score_to_signal:     int = 45   # was 58, recalibrated after score inflation removed
+    std_min_score_to_auto_trade: int = 52   # was 65; threshold 52 filters worst trades (WR 44.4%)
     std_max_leverage:            int = 10
     std_max_concurrent_positions: int = 10
 
     # ── Scalper Mode Settings ─────────────────
-    scl_min_score_to_signal:     int = 50
-    scl_min_score_to_auto_trade: int = 60   # was 57
+    scl_min_score_to_signal:     int = 45   # was 50, recalibrated after session removal
+    scl_min_score_to_auto_trade: int = 52   # was 57, recalibrated
     scl_max_leverage:            int = 20
     scl_max_concurrent_positions: int = 5
 

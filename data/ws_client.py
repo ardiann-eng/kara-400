@@ -47,6 +47,11 @@ class KaraWebSocketClient:
         self._last_message_ts: float = 0
         self._reconnect_count = 0
         self._task: Optional[asyncio.Task] = None
+        self._on_dead_callbacks: List[Callable] = []  # called when WS permanently dies
+
+    def add_dead_callback(self, fn: Callable):
+        """Register an async or sync callback invoked when WS exceeds max retries."""
+        self._on_dead_callbacks.append(fn)
 
     # ──────────────────────────────────────────
     # PUBLIC API
@@ -114,7 +119,7 @@ class KaraWebSocketClient:
             log.warning(f"WS send failed: {e}")
 
     async def _run_loop(self):
-        """Main reconnect loop. Never permanently gives up."""
+        """Main reconnect loop. Never gives up — notifies callbacks if max retries hit."""
         cfg = config.EXEC
         consecutive_failures = 0
         while self._running:
@@ -126,6 +131,23 @@ class KaraWebSocketClient:
                 if not self._running:
                     break
                 consecutive_failures += 1
+
+                if consecutive_failures > cfg.ws_reconnect_max_retries:
+                    log.error(
+                        f"🚨 WS max reconnect retries ({cfg.ws_reconnect_max_retries}) exceeded. "
+                        "Notifying admin and entering slow-retry mode."
+                    )
+                    for cb in self._on_dead_callbacks:
+                        try:
+                            if asyncio.iscoroutinefunction(cb):
+                                asyncio.create_task(cb())
+                            else:
+                                cb()
+                        except Exception as cb_err:
+                            log.debug(f"WS dead callback error: {cb_err}")
+                    consecutive_failures = 0
+                    await asyncio.sleep(60.0)
+                    continue
 
                 delay = min(
                     cfg.ws_reconnect_base_delay_s * (2 ** min(consecutive_failures, 6)),

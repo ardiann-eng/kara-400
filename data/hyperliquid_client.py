@@ -973,6 +973,38 @@ class HyperliquidClient:
             log.error(f"cancel_order error: {e}")
             raise
 
+    async def place_sl_order(
+        self,
+        asset: str,
+        is_buy: bool,
+        sz: float,
+        trigger_px: float,
+    ) -> Dict[str, Any]:
+        """Place a reduce-only stop-loss trigger order (market fill when triggered)."""
+        if not self._exchange:
+            raise RuntimeError("Exchange client not initialized")
+        order_type = {
+            "trigger": {
+                "triggerPx": str(round(trigger_px, 8)),
+                "isMarket": True,
+                "tpsl": "sl",
+            }
+        }
+        try:
+            result = await self._run(
+                self._exchange.order,
+                asset, is_buy, sz, trigger_px, order_type,
+                reduce_only=True,
+            )
+            log.info(
+                f"🛡️ SL trigger placed: {asset} {'BUY' if is_buy else 'SELL'} "
+                f"{sz} trigger @ {trigger_px}"
+            )
+            return result
+        except Exception as e:
+            log.error(f"place_sl_order error: {e}")
+            raise
+
     async def set_leverage(self, asset: str, leverage: int, is_cross: bool = False) -> Dict:
         """Set leverage for an asset."""
         if not self._exchange:

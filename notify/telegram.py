@@ -2494,13 +2494,12 @@ class KaraTelegram:
         if action == "reset_cfg_defaults":
             if session:
                 u = session.user
-                # Threshold: signal=55, auto_trade=60
-                u.config.std_min_score_to_signal = 55
-                u.config.std_min_score_to_auto_trade = 60
+                u.config.std_min_score_to_signal = 45
+                u.config.std_min_score_to_auto_trade = 52
                 u.config.std_max_leverage = 10
                 u.config.std_max_concurrent_positions = 10
-                u.config.scl_min_score_to_signal = 50
-                u.config.scl_min_score_to_auto_trade = 60  # was 57
+                u.config.scl_min_score_to_signal = 45
+                u.config.scl_min_score_to_auto_trade = 52
                 u.config.scl_max_leverage = 20
                 u.config.scl_max_concurrent_positions = 3
                 user_db.update_user(u)
@@ -2702,9 +2701,12 @@ class KaraTelegram:
 
         # 3. Static fallback (Final safety)
         return [
-            "Peningkatan performa mesin scoring.",
-            "Optimalisasi koneksi WebSocket.",
-            "Penyempurnaan manajemen risiko."
+            "Live Mode kini lebih aman: Stop Loss order dikirim langsung ke exchange saat posisi dibuka.",
+            "Posisi terbuka dipulihkan otomatis saat bot restart — tidak ada posisi yang 'hilang' lagi.",
+            "WebSocket tidak lagi mati permanen — notifikasi Telegram dikirim jika koneksi bermasalah.",
+            "Risk limit Live Mode diperketat: max drawdown 25% & daily loss 15% (paper tetap seperti biasa).",
+            "Kill-switch di Live Mode kini hanya bisa di-reset manual oleh admin, bukan auto-reset.",
+            "Perbaikan keamanan konfigurasi: enkripsi key tidak lagi tertimpa saat startup.",
         ]
 
     def _build_git_auto_notes(self) -> list[str]:
@@ -2746,15 +2748,19 @@ class KaraTelegram:
         if any(f.startswith("engine/") for f in files):
             bullets.append("Peningkatan logika analisa sinyal dan akurasi scoring market.")
         if any(f.startswith("risk/") for f in files):
-            bullets.append("Perbaikan proteksi risiko agar eksekusi lebih aman dan stabil.")
+            bullets.append("Perbaikan proteksi risiko: limit drawdown Live Mode diperketat dan kill-switch lebih aman.")
         if any(f.startswith("execution/") for f in files):
-            bullets.append("Optimalisasi alur eksekusi posisi untuk mengurangi bug saat trade berjalan.")
+            bullets.append("Live Mode: Stop Loss order dikirim ke exchange + posisi pulih otomatis saat restart.")
+        if any(f.startswith("data/") for f in files):
+            bullets.append("Koneksi WebSocket kini tidak mati permanen — notif Telegram jika koneksi bermasalah.")
+        if any(f.startswith("core/") for f in files):
+            bullets.append("Perbaikan inisialisasi sesi Live Mode agar koneksi dan sinkronisasi berjalan benar.")
         if any(f.startswith("notify/") for f in files):
             bullets.append("Penyempurnaan pengalaman notifikasi Telegram supaya lebih informatif dan rapi.")
         if any(f.startswith("dashboard/") for f in files):
             bullets.append("Pembaruan tampilan/monitoring dashboard untuk visibilitas yang lebih baik.")
         if any(f.startswith("config") for f in files):
-            bullets.append("Penyesuaian konfigurasi inti sistem sesuai kalibrasi terbaru.")
+            bullets.append("Perbaikan keamanan konfigurasi: enkripsi key dan validasi startup Live Mode.")
 
         if body:
             # Pick up to two meaningful lines from commit body.

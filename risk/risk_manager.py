@@ -20,7 +20,7 @@ import logging
 import time
 import os
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.db import user_db
 from config import RISK, SCALPER, MODE
@@ -113,6 +113,13 @@ class RiskManager:
             return True
         return False
 
+    def _is_live(self) -> bool:
+        """True if user is in live (real money) trading mode."""
+        if not self._chat_id: return False
+        from models.schemas import BotMode
+        user = user_db.get_user(self._chat_id)
+        return user is not None and user.config.bot_mode == BotMode.LIVE
+
     def _get_user_value(self, key: str, global_fallback=None):
         """Helper to get mode-specific value from user config."""
         user = user_db.get_user(self._chat_id)
@@ -164,15 +171,23 @@ class RiskManager:
         Full risk check before executing a trade.
         Returns (approved: bool, reason: str)
         """
-        # ── Kill switch ───────────────────────────────────────────────
+        import config as _cfg_mod
         cfg = self._cfg()
-        max_dd = cfg.max_drawdown_pct if hasattr(cfg, 'max_drawdown_pct') else RISK.max_drawdown_pct
+        is_live = self._is_live()
+
+        # ── Risk limits: live mode uses tighter env-var overrides ─────
+        if is_live:
+            max_dd     = _cfg_mod.LIVE_MAX_DRAWDOWN_PCT
+            daily_hard = _cfg_mod.LIVE_DAILY_LOSS_HARD_PCT
+        else:
+            max_dd     = cfg.max_drawdown_pct if hasattr(cfg, 'max_drawdown_pct') else RISK.max_drawdown_pct
+            daily_hard = cfg.daily_loss_hard_pct if hasattr(cfg, 'daily_loss_hard_pct') else RISK.daily_loss_hard_pct
 
         # Kill switch TIDAK pernah auto-reset — hanya admin yang bisa reset via reset_kill_switch().
         # Auto-reset dihapus karena berbahaya: drawdown -95% → harga naik 1% → bot trading lagi dari -93%.
         if self._kill_switch or account.kill_switch_active:
             return False, "🚨 KILL SWITCH ACTIVE - trading stopped (max drawdown hit)"
-            
+
         # ── Intelligence Filter (ML Expected Edge) ────────────────────
         import config as _cfg
         from intelligence.intelligence_model import intelligence_model as _im
@@ -198,8 +213,6 @@ class RiskManager:
             mins = (remaining % 3600) // 60
             return False, f"❄️  Post-loss cooldown active - {hrs}h {mins}m remaining"
 
-        cfg = self._cfg()
-
         # ── Concurrent positions cap (mode-aware & user-specific) ──────
         open_count = len([p for p in open_positions if p.status == PositionStatus.OPEN])
         max_pos = self._get_user_value("max_concurrent_positions", cfg.max_concurrent_positions)
@@ -214,40 +227,37 @@ class RiskManager:
             if p.asset == signal.asset and p.status == PositionStatus.OPEN
         ]
         if asset_positions:
-            # Check for Pyramid Scale-in (Scalper only)
             if self._is_scalper() and cfg.enable_pyramid:
-                # Need at least 0.4% profit on existing position
                 p = asset_positions[0]
-                # mark_price for profit calc from current signal entry
                 profit = p.floating_pct(signal.entry_price)
                 if profit >= cfg.pyramid_at_profit_pct:
                     log.info(f"📐 [PYRAMID] Found profitable position on {signal.asset} ({profit*100:.2f}%). Allowing scale-in.")
-                    signal.is_pyramid = True  # set flag for telegram/executor handling
+                    signal.is_pyramid = True
                 else:
                     return False, f"📌 Already holding {signal.asset} but profit {profit*100:.2f}% < {cfg.pyramid_at_profit_pct*100:.1f}% for pyramid"
             else:
                 return False, f"📌 Already have an open position on {signal.asset}"
 
-        # ── Daily loss limit (mode-specific) ───────────────────────────
+        # ── Daily loss limit ───────────────────────────────────────────
         daily_pnl_pct = self._daily_pnl / max(account.total_equity, 1)
-        daily_hard = cfg.daily_loss_hard_pct if hasattr(cfg, 'daily_loss_hard_pct') else RISK.daily_loss_hard_pct
 
         if abs(daily_pnl_pct) >= daily_hard and self._daily_pnl < 0:
             self._paused = True
+            mode_tag = "[LIVE]" if is_live else "[PAPER]"
             return False, (
-                f"🚫 Daily loss limit reached: {daily_pnl_pct*100:.1f}% "
+                f"🚫 {mode_tag} Daily loss limit reached: {daily_pnl_pct*100:.1f}% "
                 f"(limit: {daily_hard*100:.0f}%) - trading paused for today"
             )
 
         if hasattr(RISK, 'daily_loss_limit_pct') and abs(daily_pnl_pct) >= RISK.daily_loss_limit_pct and self._daily_pnl < 0:
             log.warning(f"⚠️  Daily loss at {daily_pnl_pct*100:.1f}% — approaching limit")
 
-        # ── Max drawdown kill-switch (mode-specific) ───────────────────
-        max_dd = cfg.max_drawdown_pct if hasattr(cfg, 'max_drawdown_pct') else RISK.max_drawdown_pct
+        # ── Max drawdown kill-switch ───────────────────────────────────
         if account.current_drawdown_pct >= max_dd:
             self._kill_switch = True
+            mode_tag = "[LIVE]" if is_live else "[PAPER]"
             return False, (
-                f"🚨 MAX DRAWDOWN KILL-SWITCH: {account.current_drawdown_pct*100:.1f}% "
+                f"🚨 {mode_tag} MAX DRAWDOWN KILL-SWITCH: {account.current_drawdown_pct*100:.1f}% "
                 f"(limit: {max_dd*100:.0f}%) - ALL trading stopped."
             )
 
@@ -373,27 +383,15 @@ class RiskManager:
         return contracts * signal.entry_price * sl_pct
 
     def get_risk_pct(self, score: int, equity: float) -> float:
-        """
-        [FIX 5 - 2026-04-22] Score-based position sizing.
-        
-        Data 124 trades: Losers avg notional $295 vs Winners avg $258.
-        Trade low confidence malah pakai capital lebih banyak.
-        
-        Tier baru:
-          Score >= 75: 2.5% risk (full confidence)
-          Score >= 68: 2.0% risk
-          Score >= 62: 1.5% risk (minimum threshold)
-          Score <  62: 1.0% risk (seharusnya tidak masuk, tapi safety net)
-        """
-        # [FIX 5 - 2026-04-22] Increased risk tiers based on user request
+        # Score-based tiers from 124-trade analysis (user-calibrated)
         if score >= 75:
-            risk_pct = 0.035   # 3.5% - high conviction trade (was 2.5%)
+            risk_pct = 0.035   # 3.5% high conviction
         elif score >= 68:
-            risk_pct = 0.030   # 3.0% (was 2.0%)
+            risk_pct = 0.030   # 3.0%
         elif score >= 60:
-            risk_pct = 0.025   # 2.5% (was 1.5%)
+            risk_pct = 0.025   # 2.5%
         else:
-            risk_pct = 0.020   # 2.0% - minimum risk (was 1.0%)
+            risk_pct = 0.020   # 2.0% minimum
         
         # Equity protection multiplier
         ratio = equity / self._session_start_balance if self._session_start_balance > 0 else 1.0
@@ -407,7 +405,18 @@ class RiskManager:
     # ATR HELPER (dipakai main.py untuk localize_for_user)
     # ──────────────────────────────────────────
 
-    def calculate_atr(self, candles) -> float:
+    def calculate_tp_levels(self, asset: str, entry_price: float, side: Side, realized_vol: float) -> Tuple[float, float, float]:
+        """Vol-based SL/TP pcts used by scoring engine R:R gate."""
+        daily_vol = realized_vol
+        if daily_vol > 0.05:
+            sl_pct, tp1_pct, tp2_pct = 0.025, 0.040, 0.065
+        elif daily_vol > 0.025:
+            sl_pct, tp1_pct, tp2_pct = 0.020, 0.030, 0.050
+        else:
+            sl_pct, tp1_pct, tp2_pct = 0.015, 0.022, 0.038
+        return sl_pct, tp1_pct, tp2_pct
+
+    def calculate_atr(self, candles: List[Dict[str, Any]]) -> float:
         """
         ATR sebagai persentase dari close price.
         Mendukung dua format candle:
@@ -726,12 +735,9 @@ class RiskManager:
         # ── Rule D: Trailing stop on last position piece (post-TP1) ─────
         if position.tp1_hit:
             tp1_diff_pct = abs(position.entry_price - position.tp1) / position.entry_price
-            # Activate trail once price extends 0.3% beyond TP1
             activation_threshold = tp1_diff_pct + 0.003
 
             if max_floating >= activation_threshold:
-                # After TP2: tighter trail (0.3x vol or 0.3% min)
-                # Before TP2: standard trail (0.5x vol or 0.5% min)
                 vol_est = getattr(position, 'realized_vol', 0.02)
                 if position.tp2_hit:
                     trail_pct = max(vol_est * 0.30, 0.003)

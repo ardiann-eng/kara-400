@@ -347,27 +347,14 @@ class ScoringEngine:
         # 4. Compute scalper indicators
         score, side, reasons = self._calculate_scalper_score(asset, mark_price, candles, mtf_trend)
 
-        # [FIX 3] Block SHORT trades until scoring is fixed
-        if side == Side.SHORT and not config.ALLOW_SHORT:
-            log.debug(f"{asset} [SCALPER]: SHORT blocked (ALLOW_SHORT=False). WR=31.4% data proof.")
-            return None, score
-
-        # 3c. Apply session bonus/penalty so adaptive threshold can use it.
-        session_bonus, session_reasons = self._get_session_bonus()
-        if session_bonus > 0:
-            if score >= 72:
-                effective_session = int(session_bonus * 0.30)
-            elif score >= 62:
-                effective_session = int(session_bonus * 0.60)
-            else:
-                effective_session = session_bonus
-        else:
-            effective_session = session_bonus
-        score = max(0, min(score + effective_session, 100))
+        # FIX #5: Session adjusts entry threshold, not score.
+        session_bonus, session_reasons, session_threshold_delta = self._get_session_bonus()
+        # session_bonus is always 0; score is unchanged
         reasons.extend(session_reasons)
 
-        if score < config.SCALPER.min_score_to_enter:
-            log.debug(f"[SCALPER] {asset}: score {score} < {config.SCALPER.min_score_to_enter}")
+        effective_threshold = config.SCALPER.min_score_to_enter + session_threshold_delta
+        if score < effective_threshold:
+            log.debug(f"[SCALPER] {asset}: score {score} < effective_threshold {effective_threshold}")
             return None, score
 
         # 3d. Apply Meta-Learning adjustment
@@ -938,8 +925,8 @@ class ScoringEngine:
         else:
             ob_bull, ob_bear, ob_reasons, ob_warns = 2, 2, ["Orderbook unavailable -- neutral"], []
 
-        # Step 4: Session bonus
-        session_bonus, session_reasons = self._get_session_bonus()
+        # Step 4: Session context (FIX #5: threshold adjuster, not score inflator)
+        session_bonus, session_reasons, session_threshold_delta = self._get_session_bonus()
 
         # ── DIAGNOSTIC LOG (Bug 4 Fix) ─────────────────────────────────
         basis = mark_price - spot_price
@@ -1081,10 +1068,7 @@ class ScoringEngine:
 
         raw_score += structure_delta
 
-        # Session bonus TIDAK dimasukkan ke raw_score sebelum multiplier.
-        # Sebelumnya session +10 ikut dikalikan trend_multiplier 1.10x = efektif +11.
-        # Ini menyebabkan skor 75+ banyak berisi sinyal lemah yang tertiup session bonus.
-        # Session bonus ditambahkan SETELAH multiplier agar nilainya tetap flat.
+        # session_bonus is always 0; session adjusts threshold not score.
         raw_score = max(0, min(raw_score, 92))
 
         # ── Apply regime multiplier ────────────────────────────────────
@@ -1141,10 +1125,10 @@ class ScoringEngine:
         all_reasons.insert(0, f"📊 Market regime: {regime_labels.get(log_regime, '⚪ UNKNOWN')}")
 
         breakdown = ScoreBreakdown(
-            oi_funding_score=int(oi_bull + oi_bear),
-            liquidation_score=int(liq_bull + liq_bear),
-            orderbook_score=int(ob_bull + ob_bear),
-            session_bonus=int(session_bonus),
+            oi_funding_score=oi_bull + oi_bear,
+            liquidation_score=liq_bull + liq_bear,
+            orderbook_score=ob_bull + ob_bear,
+            session_bonus=session_threshold_delta,
             regime_multiplier=final_multiplier,
             total_bull=int(total_bull),
             total_bear=int(total_bear),
@@ -1155,20 +1139,19 @@ class ScoringEngine:
         )
 
         # ── Format Combat Report ────────────────────────────────────────
-        # Format: CC | Score: XX/52 | (OI+XX Liq+XX OB+XX Ses+XX) | Regime: XXX
         breakdown_str = (
             f"(OI:{oi_bull+oi_bear:+} Liq:{liq_bull+liq_bear:+} "
-            f"OB:{ob_bull+ob_bear:+} Ses:{session_bonus:+})"
+            f"OB:{ob_bull+ob_bear:+} SesThresh:{session_threshold_delta:+})"
         )
-        
-        # ── UNIFORM SCORING LOG (User Request: "Satu jenis format log") ──
+
+        # ── UNIFORM SCORING LOG ──
         if final_score >= 20:
             bias_emoji = "🟢 LONG " if total_bull > total_bear else "🔴 SHORT"
             log.info(
                 f"🎯 [SCORE] {asset:6} | {bias_emoji} | {final_score:2d}/100 | "
                 f"Pts: {total_bull:.1f} vs {total_bear:.1f} | "
                 f"OI:{oi_bull:.1f}/{oi_bear:.1f} Liq:{liq_bull:.1f}/{liq_bear:.1f} OB:{ob_bull:.1f}/{ob_bear:.1f} | "
-                f"Sess:{int(session_bonus):+d} Mult:{final_multiplier:.2f}x ({vol_regime.value})"
+                f"SesThresh:{session_threshold_delta:+d} Mult:{final_multiplier:.2f}x ({vol_regime.value})"
             )
 
         # ── Apply Meta-Learning adjustment ─────────────────────────────
@@ -1182,12 +1165,48 @@ class ScoringEngine:
         breakdown.meta_score_delta = meta_delta
         breakdown.final_score = final_score
 
+        # ── FIX #9: OI-tier threshold adjustment ──────────────────────
+        # Large-cap assets (BTC/ETH) are more efficient — need stronger signal.
+        # Small-cap assets are more explosive — can enter on weaker signal.
+        # This replaces the old magnitude_bonus (+2..+8) that inflated scores.
+        oi_usd = oi.open_interest
+        if oi_usd > 1_000_000_000:      # > $1B  (BTC, ETH)
+            oi_threshold_delta = 3
+        elif oi_usd > 200_000_000:      # > $200M (SOL, HYPE)
+            oi_threshold_delta = 1
+        elif oi_usd > 50_000_000:       # > $50M
+            oi_threshold_delta = 0
+        elif oi_usd > 10_000_000:       # > $10M
+            oi_threshold_delta = -2
+        else:                           # micro-cap
+            oi_threshold_delta = -3
+
         # ── Check threshold ────────────────────────────────────────────
-        # [FIX 2] Threshold dinaikkan dari 30 ke 62 berdasarkan data 124 trades
-        # Score 55-59: WR 18.4% (-$19.80) | Score 60-64: WR 41.7% (+$10.75)
-        threshold = getattr(config.SIGNAL, 'min_score_to_signal', 62)
+        # SHORT needs higher threshold (audit: 57.6% WR, net -$12.55).
+        # session_threshold_delta adjusts by session liquidity (FIX #5).
+        # oi_threshold_delta adjusts by market efficiency (FIX #9).
+        if side == Side.SHORT:
+            base_threshold = config.SIGNAL.min_score_short_signal
+        else:
+            base_threshold = 30  # LONG: internal capture threshold
+        threshold = base_threshold + session_threshold_delta + oi_threshold_delta
         if final_score < threshold:
-            log.debug(f"[{asset}] STANDARD: score {final_score} < threshold {threshold}, skipping")
+            log.debug(
+                f"[{asset}] {side.value.upper()} score {final_score} < threshold {threshold} "
+                f"(base={base_threshold} sess={session_threshold_delta:+d} oi={oi_threshold_delta:+d}), skip"
+            )
+            return None, final_score
+
+        # ── R:R Quality Gate ───────────────────────────────────────────
+        sl_pct_check, tp1_pct_check, tp2_pct_check = self.risk_mgr.calculate_tp_levels(
+            asset, mark_price, side, realized_vol
+        )
+        rr_ratio = tp2_pct_check / max(sl_pct_check, 0.001)
+        if rr_ratio < 1.5:
+            log.info(
+                f"[{asset}] R:R GATE: {tp2_pct_check*100:.2f}%/{sl_pct_check*100:.2f}% "
+                f"= {rr_ratio:.2f}x < 1.5x minimum. Signal rejected."
+            )
             return None, final_score
 
         # ── Build signal ───────────────────────────────────────────────
@@ -1327,41 +1346,35 @@ class ScoringEngine:
     # ──────────────────────────────────────────
 
     def _get_session_bonus(self):
-        """Apply trading session bonus/penalty based on UTC hour."""
-        now_utc = datetime.now(timezone.utc)
-        hour = now_utc.hour
+        """Session adjusts entry threshold (not score). Returns (0, reasons, threshold_delta)."""
+        hour = datetime.now(timezone.utc).hour
         ny_start = SIGNAL.ny_session_start_utc
         ny_end   = SIGNAL.ny_session_end_utc
         lon_start= SIGNAL.london_start_utc
         lon_end  = SIGNAL.london_end_utc
 
-        score = 0
+        threshold_delta = 0  # negative = lower threshold (more permissive)
         reasons = []
 
         is_ny  = ny_start  <= hour < ny_end
         is_lon = lon_start <= hour < lon_end
 
         if is_ny:
-            score += SIGNAL.ny_session_bonus
-            reasons.append(f"🗽 NY session (+{SIGNAL.ny_session_bonus})")
+            threshold_delta -= 3   # NY liquidity: slightly lower threshold to enter
+            reasons.append("🗽 NY session (threshold -3)")
 
         if is_lon:
-            score += SIGNAL.london_session_bonus
-            reasons.append(f"🇬🇧 London session (+{SIGNAL.london_session_bonus})")
+            threshold_delta -= 2   # London-NY overlap: slightly lower threshold
+            reasons.append("🇬🇧 London session (threshold -2)")
 
         if not is_ny and not is_lon:
             if hour >= 22 or hour < 7:
-                score += SIGNAL.asia_session_penalty
-                reasons.append(f"🌏 Asia session penalty ({SIGNAL.asia_session_penalty})")
+                threshold_delta += 5  # Asia: raise threshold (lower liquidity = need stronger signal)
+                reasons.append("🌏 Asia session (threshold +5, need stronger signal)")
             else:
                 reasons.append("⏰ Off-session neutral")
 
-        log.debug(
-            f"[SESSION] UTC={now_utc.strftime('%H:%M')} hour={hour} "
-            f"London={is_lon}({lon_start}-{lon_end}) NY={is_ny}({ny_start}-{ny_end}) "
-            f"bonus={score:+d}"
-        )
-        return score, reasons
+        return 0, reasons, threshold_delta
 
     # ──────────────────────────────────────────
     # SIGNAL BUILDER
@@ -1519,13 +1532,13 @@ class ScoringEngine:
         delta = 0
         reason = ""
         
+        max_d = config.SIGNAL.meta_max_delta
         if wr >= config.SIGNAL.meta_boost_threshold:
-            delta = 8
-            reason = f"🧠 Meta-learning: HI-WR pattern ({wr*100:.0f}%) → +8"
+            delta = max_d
+            reason = f"🧠 Meta-learning: HI-WR pattern ({wr*100:.0f}%) → +{max_d}"
         elif wr <= config.SIGNAL.meta_penalty_threshold:
-            delta = -12
-            reason = f"🧠 Meta-learning: LO-WR pattern ({wr*100:.0f}%) → -12"
-            
-        # Clamp delta
-        delta = max(-config.SIGNAL.meta_max_delta, min(config.SIGNAL.meta_max_delta, delta))
+            delta = -max_d
+            reason = f"🧠 Meta-learning: LO-WR pattern ({wr*100:.0f}%) → -{max_d}"
+
+        delta = max(-max_d, min(max_d, delta))
         return delta, reason, pattern_key

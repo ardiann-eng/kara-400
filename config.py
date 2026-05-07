@@ -77,18 +77,19 @@ ACCESS_BLOCK_HOURS = 1            # block duration in hours
 from dotenv import load_dotenv
 load_dotenv(override=True)  # Aggressive load
 
-# ─────────── DASHBOARD (ULTIMATE DEBUG) ───────────
+# ─────────── DASHBOARD ───────────
 DASHBOARD_HOST   = "0.0.0.0"
 DASHBOARD_PORT   = int(os.getenv("PORT", 8080))
 
-# [KARA_PORT_DEBUG] - Direct print to bypass logging
-print("\n" + "="*50)
-print(f"📡 [KARA_DEBUG] SYSTEM_PORT ENV: {os.getenv('PORT')}")
-print(f"🚀 [KARA_DEBUG] BINDING DASHBOARD TO: {DASHBOARD_HOST}:{DASHBOARD_PORT}")
-print("="*50 + "\n")
-
 SECRET_KEY       = os.getenv("SECRET_KEY", "CHANGEME")
-FERNET_KEY       = os.getenv("FERNET_KEY", "")
+# NOTE: FERNET_KEY already set above from HL_FERNET_KEY / FERNET_KEY. Do NOT re-assign here.
+
+# ──────────────────────────────────────────────
+# LIVE MODE RISK LIMITS (tighter than paper defaults)
+# Set via env; paper mode keeps its own relaxed limits in RiskConfig/ScalperConfig.
+# ──────────────────────────────────────────────
+LIVE_MAX_DRAWDOWN_PCT    = float(os.getenv("KARA_LIVE_MAX_DRAWDOWN_PCT", "0.25"))   # 25%
+LIVE_DAILY_LOSS_HARD_PCT = float(os.getenv("KARA_LIVE_DAILY_LOSS_HARD_PCT", "0.15"))  # 15%
 
 # ──────────────────────────────────────────────
 # DATABASE & PERSISTENCE
@@ -263,10 +264,17 @@ if TRADE_MODE == "live":
 # ──────────────────────────────────────────────
 @dataclass
 class SignalConfig:
-    # Threshold: signal=55, auto_trade=60
-    min_score_to_signal:     int   = 55      # STANDARD: minimum score emit signal
-    min_score_to_auto_trade: int   = 60      # STANDARD: minimum score full-auto execute
+    # ⚠️ HARD THRESHOLDS — TIDAK BISA DIUBAH USER (perubahan hanya via code)
+    # Recalibrated after Fix #5 (session bonus removed) and Fix #9 (OI magnitude removed).
+    # Scores now avg ~13-15 pts lower — thresholds lowered proportionally.
+    min_score_to_signal:     int   = 45       # was 60; recalibrated for score deflation
+    min_score_to_auto_trade: int   = 52       # was 65; data: 52 filters worst borderline trades (WR 44.4%)
     signal_cooldown_minutes: int   = 15       # cooldown per asset between signals
+    # FIX #4: SHORT trades had 57.6% WR and net -$12.55 in audit data.
+    # Structural bias: positive funding/basis almost always favors LONG on Hyperliquid.
+    # Raise SHORT threshold significantly to only execute highest-conviction SHORT signals.
+    min_score_short_signal:  int   = 72       # SHORT needs 72+ to emit (vs 60 for LONG)
+    min_score_short_auto:    int   = 75       # SHORT auto-execute needs 75+ (vs 65 for LONG)
 
     # Bull-Bear gap (LONG vs SHORT berbeda threshold)
     min_bull_bear_gap:       int   = 18       # LONG: minimum gap bull vs bear pts
@@ -311,10 +319,10 @@ class SignalConfig:
 
     # Meta-Scoring (Outcome-based learning)
     meta_learning_enabled:   bool = True
-    meta_min_samples:        int = 5          # min 5 trades before trusting pattern
-    meta_boost_threshold:    float = 0.68     # winrate > 68% = +8 pts (was 62%, too easy to reach by luck)
-    meta_penalty_threshold:  float = 0.45     # winrate < 45% = -12 pts (was 40%, catches more losers)
-    meta_max_delta:          int = 15         # absolute max cap for adj
+    meta_min_samples:        int = 10          # n=10: CI [37%-90%] acceptable, avoids pure noise at n=5
+    meta_boost_threshold:    float = 0.68     # winrate > 68% = boost
+    meta_penalty_threshold:  float = 0.35     # winrate < 35% = penalty (tightened from 0.40)
+    meta_max_delta:          int = 10         # reduced from 15: smaller nudge, less noise
 
 
 SIGNAL = SignalConfig()

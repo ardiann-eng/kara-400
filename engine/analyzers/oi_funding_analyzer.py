@@ -183,33 +183,24 @@ class OIFundingAnalyzer:
                 f"OI dropping {oi_chg*100:.1f}% -> position unwinding"
             )
 
-        # ── 5. OI Magnitude (tiebreaker kecil, bukan amplifier besar) ───
-        # Masalah sebelumnya: BTC selalu dapat +8 bonus hanya karena OI besar.
-        # Ini bukan sinyal — itu hanya fakta struktural yang tidak berubah.
-        # Bonus dikurangi ke maksimum +4 dan hanya dipakai saat bull == bear (tiebreaker).
+        # ── 5. OI Magnitude (context label only — no longer a score adder) ────
+        # FIX #9: Removed magnitude_bonus from bull/bear score.
+        # Previously added up to +8 to BTC/ETH unconditionally — pure inflation.
+        # OI size is now used by the scoring engine as a THRESHOLD modifier:
+        # large-cap markets are more efficient (harder to edge) → stricter threshold.
+        # small-cap markets are more explosive → more permissive threshold.
+        # We still log the OI tier for transparency.
         oi_usd = oi.open_interest
-        if oi_usd > 1_000_000_000:      # > $1B  (BTC, ETH)
-            magnitude_bonus = 4
-        elif oi_usd > 200_000_000:       # > $200M (SOL, HYPE)
-            magnitude_bonus = 3
-        elif oi_usd > 50_000_000:        # > $50M
-            magnitude_bonus = 2
-        elif oi_usd > 10_000_000:        # > $10M
-            magnitude_bonus = 1
+        if oi_usd > 1_000_000_000:
+            reasons.append(f"📊 Large-cap market (OI ${oi_usd/1e9:.1f}B) — threshold +3 in engine")
+        elif oi_usd > 200_000_000:
+            reasons.append(f"📊 Mid-cap market (OI ${oi_usd/1e6:.0f}M) — threshold +1 in engine")
+        elif oi_usd > 50_000_000:
+            reasons.append(f"📊 Active market (OI ${oi_usd/1e6:.0f}M) — threshold neutral")
+        elif oi_usd > 10_000_000:
+            reasons.append(f"📊 Small-cap market (OI ${oi_usd/1e6:.0f}M) — threshold -2 in engine")
         else:
-            magnitude_bonus = 0
-
-        # Hanya gunakan magnitude untuk memutus seri — jangan amplifikasi yang sudah unggul
-        if bull == bear and magnitude_bonus > 0:
-            if fr > 0:
-                bear += magnitude_bonus
-            elif fr < 0:
-                bull += magnitude_bonus
-            else:
-                bull += magnitude_bonus // 2
-                bear += magnitude_bonus // 2
-            reasons.append(f"OI size tiebreaker (OI ${oi_usd/1e6:.0f}M)")
-        # Jika sudah ada pemenang jelas, magnitude tidak menambah apapun
+            reasons.append(f"📊 Micro-cap market (OI ${oi_usd/1e6:.1f}M) — threshold -3 in engine")
 
         # ── 6. 24h OI perspective ────────────────────────────────────
         oi_24h = oi.oi_change_24h
