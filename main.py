@@ -1113,6 +1113,25 @@ class KaraBot:
             except Exception as e:
                 log.debug(f"Failed to fetch market price for {asset}: {e}")
 
+        # 2b. Fetch 1m candle closes per asset untuk momentum reversal exit
+        # Hanya diambil sekali per asset, dishare ke semua user yang hold asset tsb.
+        candle_closes_map: dict = {}
+        for asset in all_open_assets:
+            try:
+                candles = await self.hl_client.get_candles(asset, "1m", limit=6)
+                if candles:
+                    candle_closes_map[asset] = [c[4] for c in candles]  # index 4 = close
+            except Exception as e:
+                log.debug(f"Candle fetch skipped for {asset}: {e}")
+
+        # 2c. Inject candle_closes ke setiap open scalper position
+        for chat_id, session in self.sessions.items():
+            if not hasattr(session.executor, 'open_positions'):
+                continue
+            for pos in session.executor.open_positions:
+                if pos.trade_mode == 'scalper' and pos.asset in candle_closes_map:
+                    pos.candle_closes = candle_closes_map[pos.asset]
+
         # 3. Apply updates to each user
         for chat_id, session in self.sessions.items():
             try:
@@ -1135,13 +1154,13 @@ class KaraBot:
                 continue
 
             actions = await session.executor.update_positions(prices)
-            time_exit_actions = [a for a in actions if a.get("action") == "time_exit"]
-            other_actions = [a for a in actions if a.get("action") != "time_exit"]
+            early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "momentum_exit")]
+            other_actions = [a for a in actions if a.get("action") not in ("time_exit", "momentum_exit")]
 
             # Kirim notifikasi personal per posisi (KARA style)
-            if time_exit_actions:
+            if early_exit_actions:
                 from datetime import timezone as _tz, datetime as _dt
-                for a in time_exit_actions:
+                for a in early_exit_actions:
                     pos = session.executor._positions.get(a.get("position_id", "")) if hasattr(session.executor, "_positions") else None
                     if not pos:
                         continue
@@ -1165,14 +1184,61 @@ class KaraBot:
                     )
                     outcome_emoji = "✅" if pnl >= 0 else "🔻"
                     outcome = "Profit" if pnl >= 0 else "Loss"
+
+                    if a.get("action") == "momentum_exit":
+                        header = f"↩️ <b>Momentum Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
+                        subtext = "<i>Candle berbalik arah — keluar sebelum kena SL.</i>"
+                    else:
+                        header = f"⏱ <b>Time Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
+                        subtext = f"<i>Posisi ditutup otomatis setelah {hold_min} menit~</i>"
+
+                    # Akumulasi total PnL: semua partial close (pnl_realized) + final close ini
+                    total_pnl   = getattr(pos, "pnl_realized", 0.0) + pnl
+                    total_sign  = "+" if total_pnl >= 0 else ""
+                    total_idr   = total_pnl * USD_TO_IDR
+                    total_idr_str = (
+                        f"+Rp{total_idr:,.0f}".replace(",", ".")
+                        if total_idr >= 0
+                        else f"-Rp{abs(total_idr):,.0f}".replace(",", ".")
+                    )
+
+                    # Hitung ROE% berbasis total PnL akumulasi
+                    entry_val = pos.entry_price * pos.size_initial if pos.size_initial else 1
+                    total_roe_pct = (total_pnl / entry_val * lev * 100) if entry_val else pnl_pct
+
+                    # Cache PnL card data dan buat button
+                    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                    inline_markup = None
+                    try:
+                        acc_state = await session.get_account_state()
+                        if acc_state:
+                            self.telegram._pending_pnl_cards[pos.position_id] = {
+                                "pos": pos,
+                                "close_data": {
+                                    "exit_price": price,
+                                    "pnl": total_pnl,
+                                    "pnl_pct": total_roe_pct / 100,
+                                    "reason": a.get("action"),
+                                    "score": getattr(pos, "entry_score", 0) or 0,
+                                    "duration_sec": hold_min * 60,
+                                },
+                                "account": acc_state,
+                            }
+                            inline_markup = InlineKeyboardMarkup([[
+                                InlineKeyboardButton("📊 Lihat PnL Card", callback_data=f"card_detail:{pos.position_id}"),
+                            ]])
+                    except Exception as _e:
+                        log.debug(f"[PnLCard] early_exit cache failed: {_e}")
+
                     await self.telegram.send_text(
-                        f"⏱ <b>Time Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>\n"
-                        f"<i>Posisi ditutup otomatis setelah {hold_min} menit~</i>\n\n"
-                        f"{outcome_emoji} <b>{outcome}    {pct_sign}{pnl_pct:.2f}%</b>\n"
-                        f"PnL    : <code>{pnl_sign}${abs(pnl):.2f}</code>  (<code>{pnl_idr_str}</code>)\n"
-                        f"Entry  : <code>${pos.entry_price:,.3f}</code>  →  Exit: <code>${price:,.3f}</code>\n"
-                        f"Durasi : {hold_min} menit",
-                        target_chat_id=chat_id
+                        f"{header}\n"
+                        f"{subtext}\n\n"
+                        f"{outcome_emoji} <b>{outcome}    {total_sign}{total_roe_pct:.2f}%</b>\n"
+                        f"Total PnL : <code>{total_sign}${abs(total_pnl):.2f}</code>  (<code>{total_idr_str}</code>)\n"
+                        f"Entry     : <code>${pos.entry_price:,.3f}</code>  →  Exit: <code>${price:,.3f}</code>\n"
+                        f"Durasi    : {hold_min} menit",
+                        target_chat_id=chat_id,
+                        reply_markup=inline_markup
                     )
 
             for action in other_actions:

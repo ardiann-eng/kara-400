@@ -444,7 +444,7 @@ class PaperExecutor:
             pos.tp2_hit = True
             log.info(f" [PAPER] TP2 hit on {pos.asset}")
 
-        elif action["action"] in ("trailing_stop", "stop_loss", "time_exit"):
+        elif action["action"] in ("trailing_stop", "stop_loss", "time_exit", "momentum_exit"):
             # Full close — guard: only if still OPEN
             if pos.status == PositionStatus.OPEN:
                 await self.close_position(

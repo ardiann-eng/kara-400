@@ -244,6 +244,12 @@ class ScalperConfig:
     mtf_score_bonus:         int = 12        # bonus if 1m aligns with 15m trend
     mtf_score_penalty:       int = -15       # penalty if counter-trend
 
+    # Scalper momentum reversal exit (pre-SL protection)
+    momentum_exit_enabled:       bool  = True
+    momentum_exit_min_minutes:   float = 3.0    # tunggu 3 menit setelah entry sebelum cek
+    momentum_exit_candles:       int   = 3       # evaluasi 3 candle 1m terakhir
+    momentum_exit_loss_floor:    float = -0.003  # hanya exit kalau loss <= -0.3% (hindari exit di noise)
+
 SCALPER = ScalperConfig()
 
 # ──────────────────────────────────────────────

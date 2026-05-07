@@ -771,12 +771,12 @@ class RiskManager:
                             )
                         }
 
-        # ── Rule E: Scalper max-hold (unchanged) ─────────────────────────
+        # ── Rule E: Scalper max-hold + momentum reversal exit ────────────
         if getattr(position, 'trade_mode', 'standard') == 'scalper':
             scfg = SCALPER
-            max_hold  = getattr(scfg, 'max_hold_minutes', 12.0)
-            grace     = getattr(scfg, 'max_hold_grace_minutes', 6.0)
-            soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.15)
+            max_hold   = getattr(scfg, 'max_hold_minutes', 20.0)
+            grace      = getattr(scfg, 'max_hold_grace_minutes', 8.0)
+            soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.0015)
 
             now    = _dt.now(_tz.utc)
             opened = position.opened_at
@@ -784,8 +784,43 @@ class RiskManager:
                 opened = opened.replace(tzinfo=_tz.utc)
             hold_minutes = (now - opened).total_seconds() / 60.0
 
+            # ── Rule E2: Momentum reversal exit (pre-SL protection) ──────
+            # Keluar lebih awal kalau candle 1m berbalik arah sebelum SL hit.
+            # Hanya aktif setelah 3 menit (hindari noise awal entry) dan
+            # hanya kalau posisi sudah merugi melewati floor (bukan sekadar noise).
+            if (
+                not position.tp1_hit
+                and getattr(scfg, 'momentum_exit_enabled', True)
+                and hold_minutes >= getattr(scfg, 'momentum_exit_min_minutes', 3.0)
+            ):
+                loss_floor = getattr(scfg, 'momentum_exit_loss_floor', -0.003)
+                n_candles  = getattr(scfg, 'momentum_exit_candles', 3)
+                candle_history = getattr(position, 'candle_closes', [])
+
+                if len(candle_history) >= n_candles and floating <= loss_floor:
+                    recent = candle_history[-n_candles:]
+                    # Momentum reversal: semua candle terakhir berlawanan arah posisi
+                    if position.side == Side.LONG:
+                        reversal = all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
+                    else:
+                        reversal = all(recent[i] > recent[i - 1] for i in range(1, len(recent)))
+
+                    if reversal:
+                        return {
+                            "action":      "momentum_exit",
+                            "close_ratio": 1.0,
+                            "price":       current_price,
+                            "pnl":         position.pnl_unrealized,
+                            "position_id": position.position_id,
+                            "message":     (
+                                f"↩️ Momentum reversal ({n_candles} candle bearish/bullish berturut). "
+                                f"Exit pre-SL. PnL: {floating*100:.2f}%."
+                            )
+                        }
+
+            # ── Rule E1: Max-hold force exit ─────────────────────────────
             if hold_minutes >= max_hold:
-                if floating <= soft_floor / 100.0 and hold_minutes < (max_hold + grace):
+                if floating <= soft_floor and hold_minutes < (max_hold + grace):
                     pass  # grace period — wait
                 else:
                     return {

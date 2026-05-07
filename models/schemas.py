@@ -312,6 +312,9 @@ class Position(BaseModel):
     meta_score_delta:  int = 0            # meta-learning score adjustment applied at entry
     meta_pattern_key:  Optional[str] = None  # pattern bucket for meta outcome tracking
 
+    # Rolling 1m candle closes — diupdate setiap monitor tick untuk momentum reversal exit
+    candle_closes:     List[float] = Field(default_factory=list)
+
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:
             pnl = (current_price - self.entry_price) / self.entry_price

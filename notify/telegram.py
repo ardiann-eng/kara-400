@@ -1889,19 +1889,22 @@ class KaraTelegram:
         pnl_pct  = (pnl / (pos.size_initial * entry)) * pos.leverage * 100 if (entry and pos.size_initial) else 0
         pnl_sign = "+" if pnl >= 0 else ""
 
+        # Action types yang merupakan full/final close (posisi benar-benar selesai)
+        FINAL_EXIT_TYPES = ("trailing_stop", "stop_loss", "time_exit", "momentum_exit")
+
         if action_type == "tp1":
             text = (
                 "🌸 <b>KARA UPDATE: Target Reached</b>\n\n"
                 f"<i>I have secured partial profits for <b>{pos.asset}</b>. Taking some chips off the table.</i>\n\n"
-                
+
                 f"🎯 <b>TP1 HIT</b>\n"
                 f"  • Entry   : <code>${format_price(entry)}</code>\n"
                 f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
-                
+
                 f"🛡️ <b>Risk Adjustment</b>\n"
-                f"  • Status : Sisa 60% masih jalan\n"
+                f"  • Status : Sisa posisi masih jalan\n"
                 f"  • Action : SL digeser ke Entry ✅\n\n"
-                
+
                 f"<i>Continuing to monitor for TP2. ✨</i>"
             )
 
@@ -1909,24 +1912,24 @@ class KaraTelegram:
             text = (
                 "🏁 <b>KARA UPDATE: Final Targets</b>\n\n"
                 f"<i>Excellent progress on <b>{pos.asset}</b>. TP2 has been successfully triggered.</i>\n\n"
-                
+
                 f"🎯🎯 <b>TP2 HIT</b>\n"
                 f"  • Entry   : <code>${format_price(entry)}</code>\n"
                 f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
-                
+
                 f"🛡️ <b>Trailing Active</b>\n"
-                f"  • Status : 25% sisa dengan trailing stop\n"
+                f"  • Status : Sisa posisi dengan trailing stop\n"
                 f"  • Objective: Maximizing the remainder. 🚀"
             )
 
         elif action_type == "trailing_stop":
-            trail_px = action.get("trail_price", current)
-            total_pnl = pnl + pos.pnl_realized
+            trail_px  = action.get("trail_price", current)
+            total_pnl = pos.pnl_realized + pnl
             total_sign = "+" if total_pnl >= 0 else ""
             text = (
                 "📍 <b>TRAILING STOP — {asset}</b>\n"
-                "Trailing SL Hit: <code>${trail:,.4f}</code>\n"
-                "Profit Total    : <b>{tsign}{pnl_idr}</b>\n"
+                "Trailing SL Hit : <code>${trail:,.4f}</code>\n"
+                "Total PnL       : <b>{tsign}{pnl_idr}</b>\n"
                 "Posisi ditutup  : 100% ✅"
             ).format(
                 asset=pos.asset, trail=trail_px,
@@ -1934,7 +1937,8 @@ class KaraTelegram:
             )
 
         elif action_type == "stop_loss":
-            loss_pct = abs(pnl_pct)
+            total_pnl  = pos.pnl_realized + pnl
+            loss_pct   = abs(pnl_pct)
             text = (
                 "🛑 <b>STOP LOSS — {asset}</b>\n"
                 "Entry   : <code>${entry:,.4f}</code>\n"
@@ -1943,7 +1947,7 @@ class KaraTelegram:
                 "Modal   : Dilindungi 🛡️"
             ).format(
                 asset=pos.asset, entry=entry,
-                sl=pos.stop_loss, loss_idr=format_idr(abs(pnl)), lpct=loss_pct
+                sl=pos.stop_loss, loss_idr=format_idr(abs(total_pnl)), lpct=loss_pct
             )
 
         else:
@@ -1952,20 +1956,22 @@ class KaraTelegram:
                 await self.send_text(msg, target_chat_id=target_chat_id)
             return
 
-        # PnL Card button: only for profit events (tp1, tp2, trailing_stop), inline in same message.
-        # stop_loss gets no button.
+        # PnL Card button: HANYA pada final exit (posisi benar-benar tutup semua).
+        # TP1 dan TP2 adalah partial close — tidak ada button.
+        # Akumulasi total PnL dari semua partial close + final close.
         inline_markup = None
-        if action_type in ("tp1", "tp2", "trailing_stop") and pos:
+        if action_type in FINAL_EXIT_TYPES and pos:
             try:
                 acc_state = None
                 if session:
                     acc_state = await session.get_account_state()
                 if acc_state:
-                    total_pnl_for_card = pnl + getattr(pos, "pnl_realized", 0)
+                    total_pnl_for_card = pos.pnl_realized + pnl
                     close_data_card = {
                         "exit_price": current,
                         "pnl": total_pnl_for_card,
-                        "pnl_pct": pos.roe_pct(current),
+                        "pnl_pct": (total_pnl_for_card / (pos.size_initial * entry) * pos.leverage)
+                                    if (entry and pos.size_initial) else pos.roe_pct(current),
                         "reason": action_type,
                         "score": getattr(pos, "entry_score", 0) or 0,
                         "duration_sec": (
