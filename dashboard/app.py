@@ -432,10 +432,27 @@ async def ping():
 async def health():
     # Derive bot username from token (format: 123456:ABCDEF...)
     bot_username = None
-    if _telegram and hasattr(_telegram, "_application"):
+
+    # 1. Hardcoded env var (most reliable — set TELEGRAM_BOT_USERNAME in Railway)
+    bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "").strip() or None
+
+    # 2. From running bot instance
+    if not bot_username and _telegram and getattr(_telegram, "_app", None):
         try:
-            bot = _telegram._application.bot
-            bot_username = (await bot.get_me()).username
+            bot_username = (await _telegram._app.bot.get_me()).username
+        except Exception:
+            pass
+
+    # 3. Derive from token via Telegram API (skip if token is placeholder)
+    if not bot_username and config.TELEGRAM_TOKEN and not config.TELEGRAM_TOKEN.startswith("CHANGE"):
+        try:
+            import httpx
+            r = httpx.get(
+                f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}/getMe",
+                timeout=4,
+            )
+            if r.status_code == 200:
+                bot_username = r.json().get("result", {}).get("username")
         except Exception:
             pass
     return {
