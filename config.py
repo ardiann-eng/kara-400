@@ -80,6 +80,8 @@ load_dotenv(override=True)  # Aggressive load
 # ─────────── DASHBOARD ───────────
 DASHBOARD_HOST   = "0.0.0.0"
 DASHBOARD_PORT   = int(os.getenv("PORT", 8080))
+_railway_domain  = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+DASHBOARD_URL    = os.getenv("DASHBOARD_URL", f"https://{_railway_domain}" if _railway_domain else "")
 
 SECRET_KEY       = os.getenv("SECRET_KEY", "CHANGEME")
 # NOTE: FERNET_KEY already set above from HL_FERNET_KEY / FERNET_KEY. Do NOT re-assign here.

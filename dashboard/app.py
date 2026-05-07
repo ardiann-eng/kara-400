@@ -85,6 +85,64 @@ async def auth_telegram(payload: dict = Body(...)):
     return response
 
 
+# ── Magic Link Auth ──────────────────────────────────────────────────────────
+
+@app.get("/auth/magic")
+async def auth_magic(token: str):
+    """Verify magic token from Telegram bot and issue JWT."""
+    import time
+    from fastapi.responses import RedirectResponse
+    from core.db import user_db
+
+    if not token:
+        raise HTTPException(400, "Missing token")
+
+    # Get token store from telegram bot instance
+    magic_tokens = getattr(_telegram, "_magic_tokens", {}) if _telegram else {}
+    entry = magic_tokens.get(token)
+
+    if not entry:
+        return HTMLResponse(
+            "<script>document.write('<h2 style=\"font-family:monospace;color:#f0407a\">Link tidak valid atau sudah digunakan.</h2>')</script>",
+            status_code=400,
+        )
+    if entry["exp"] < time.time():
+        magic_tokens.pop(token, None)
+        return HTMLResponse(
+            "<script>document.write('<h2 style=\"font-family:monospace;color:#f0407a\">Link sudah kadaluarsa. Ketik /weblogin lagi di bot.</h2>')</script>",
+            status_code=400,
+        )
+
+    # Consume token (one-time use)
+    magic_tokens.pop(token, None)
+
+    chat_id = entry["chat_id"]
+    u = user_db.get_user(chat_id)
+    if not u:
+        raise HTTPException(403, "User not registered")
+
+    username = u.username or f"user_{chat_id[-4:]}"
+    is_admin = (chat_id == str(config.TELEGRAM_CHAT_ID)) if config.TELEGRAM_CHAT_ID else False
+    jwt_token = create_jwt(chat_id, username)
+
+    # Inject token into page and redirect
+    redirect_to = "/" if is_admin else "/terminal"
+    html_content = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <script>
+      localStorage.setItem('kara_token', '{jwt_token}');
+      localStorage.setItem('kara_username', '{username}');
+      localStorage.setItem('kara_chat_id', '{chat_id}');
+      localStorage.setItem('kara_is_admin', '{'1' if is_admin else '0'}');
+      window.location.replace('{redirect_to}');
+    </script>
+    </head><body style="background:#050a12;color:#00e5b0;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;">
+    Redirecting…</body></html>"""
+
+    response = HTMLResponse(html_content)
+    response.set_cookie("kara_token", jwt_token, httponly=True, samesite="lax", max_age=7*24*3600)
+    return response
+
+
 # ── Pages ─────────────────────────────────────────────────────────────────────
 
 @app.get("/login", response_class=HTMLResponse)

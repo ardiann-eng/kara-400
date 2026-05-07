@@ -318,16 +318,34 @@
 
       <div class="divider"></div>
 
-      <!-- Telegram login button -->
-      <div id="tg-wrap" style="display:flex; flex-direction:column; align-items:center; gap:10px;">
-        <div class="tg-loading" id="tg-loading">
-          <div class="ring"></div>
-          <span>Initializing…</span>
+      <!-- Magic link instruction -->
+      <div id="tg-wrap" style="display:flex; flex-direction:column; align-items:center; gap:14px; width:100%;">
+
+        <!-- Step box -->
+        <div style="width:100%; background:rgba(0,229,176,0.04); border:1px solid rgba(0,229,176,0.14); border-radius:10px; padding:16px 18px;">
+          <div style="font-size:0.70rem; letter-spacing:0.1em; text-transform:uppercase; color:rgba(0,229,176,0.45); font-family:'JetBrains Mono',monospace; margin-bottom:10px;">How to login</div>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <div style="display:flex; align-items:flex-start; gap:10px; font-size:0.82rem;">
+              <span style="color:#00e5b0; font-family:'JetBrains Mono',monospace; font-weight:600; flex-shrink:0;">1.</span>
+              <span style="color:rgba(208,245,236,0.6);">Buka bot KARA di Telegram</span>
+            </div>
+            <div style="display:flex; align-items:flex-start; gap:10px; font-size:0.82rem;">
+              <span style="color:#00e5b0; font-family:'JetBrains Mono',monospace; font-weight:600; flex-shrink:0;">2.</span>
+              <span style="color:rgba(208,245,236,0.6);">Ketik <code style="background:rgba(0,229,176,0.1); padding:1px 6px; border-radius:4px; color:#00e5b0; font-family:'JetBrains Mono',monospace;">/weblogin</code></span>
+            </div>
+            <div style="display:flex; align-items:flex-start; gap:10px; font-size:0.82rem;">
+              <span style="color:#00e5b0; font-family:'JetBrains Mono',monospace; font-weight:600; flex-shrink:0;">3.</span>
+              <span style="color:rgba(208,245,236,0.6);">Klik link yang dikirim bot — otomatis masuk</span>
+            </div>
+          </div>
         </div>
-        <button id="tg-btn" onclick="doTelegramLogin()" style="display:none; width:100%; padding:12px 20px; background:rgba(0,229,176,0.08); border:1px solid rgba(0,229,176,0.25); border-radius:10px; color:#00e5b0; font-family:'JetBrains Mono',monospace; font-size:0.88rem; font-weight:500; letter-spacing:0.05em; cursor:pointer; transition:all .2s; display:none; align-items:center; justify-content:center; gap:10px;">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm4.93 6.89l-1.68 7.93c-.12.55-.46.68-.93.42l-2.57-1.9-1.24 1.2c-.14.14-.25.25-.51.25l.18-2.6 4.72-4.26c.2-.18-.05-.28-.32-.1L7.9 14.47l-2.52-.79c-.55-.17-.56-.55.11-.81l9.85-3.8c.46-.16.86.11.59.82z" fill="currentColor"/></svg>
-          Continue with Telegram
-        </button>
+
+        <!-- Open bot button -->
+        <a id="bot-link" href="#" target="_blank"
+           style="width:100%; padding:12px 20px; background:rgba(0,229,176,0.08); border:1px solid rgba(0,229,176,0.25); border-radius:10px; color:#00e5b0; font-family:'JetBrains Mono',monospace; font-size:0.85rem; font-weight:500; letter-spacing:0.05em; cursor:pointer; transition:all .2s; display:flex; align-items:center; justify-content:center; gap:10px; text-decoration:none;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm4.93 6.89l-1.68 7.93c-.12.55-.46.68-.93.42l-2.57-1.9-1.24 1.2c-.14.14-.25.25-.51.25l.18-2.6 4.72-4.26c.2-.18-.05-.28-.32-.1L7.9 14.47l-2.52-.79c-.55-.17-.56-.55.11-.81l9.85-3.8c.46-.16.86.11.59.82z" fill="currentColor"/></svg>
+          Open Telegram Bot
+        </a>
       </div>
 
       <!-- Error -->
@@ -364,78 +382,7 @@
       }
     })();
 
-    let _botUsername = null;
-    let _botId = null;
-
-    function showError(msg) {
-      const b = document.getElementById('error-box');
-      b.textContent = '⚠ ' + msg;
-      b.style.display = 'block';
-    }
-
-    function hideLoading() {
-      const el = document.getElementById('tg-loading');
-      if (el) el.style.display = 'none';
-    }
-
-    function showBtn() {
-      const btn = document.getElementById('tg-btn');
-      if (btn) { btn.style.display = 'flex'; }
-    }
-
-    // ── Redirect mode: send user to Telegram OAuth ─────────────────────────
-    function doTelegramLogin() {
-      if (!_botId) { showError('Bot not configured.'); return; }
-      const origin   = encodeURIComponent(location.origin);
-      const redirect = encodeURIComponent(location.origin + '/login');
-      window.location.href =
-        `https://oauth.telegram.org/auth?bot_id=${_botId}&origin=${origin}&embed=0&return_to=${redirect}`;
-    }
-
-    // ── Handle redirect-back from Telegram ────────────────────────────────
-    async function handleTelegramReturn() {
-      // Telegram appends ?tgAuthResult=<base64url-encoded JSON>
-      const params = new URLSearchParams(location.search);
-      const raw    = params.get('tgAuthResult');
-      if (!raw) return false;
-
-      // Clean URL immediately
-      history.replaceState({}, '', '/login');
-
-      let user;
-      try {
-        user = JSON.parse(atob(raw.replace(/-/g,'+').replace(/_/g,'/')));
-      } catch {
-        showError('Invalid auth data from Telegram.');
-        return true;
-      }
-
-      hideLoading();
-      document.getElementById('tg-btn').style.display = 'flex';
-      document.getElementById('tg-btn').textContent   = 'Signing in…';
-      document.getElementById('tg-btn').disabled      = true;
-
-      try {
-        const r    = await fetch('/auth/telegram', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(user),
-          credentials: 'include',
-        });
-        const data = await r.json();
-        if (!r.ok) { showError(data.detail || 'Authentication failed.'); return true; }
-        localStorage.setItem('kara_token',    data.token);
-        localStorage.setItem('kara_username', data.username);
-        localStorage.setItem('kara_chat_id',  data.chat_id);
-        localStorage.setItem('kara_is_admin', data.is_admin ? '1' : '0');
-        window.location.href = data.is_admin ? '/' : '/terminal';
-      } catch {
-        showError('Network error. Please try again.');
-      }
-      return true;
-    }
-
-    // ── Already logged in? ─────────────────────────────────────────────────
+    // ── Already logged in? ────────────────────────────────────────────────
     const existing = localStorage.getItem('kara_token');
     if (existing) {
       fetch('/api/me', { headers: { Authorization: 'Bearer ' + existing } })
@@ -448,34 +395,18 @@
         .catch(() => {});
     }
 
-    // ── Init ──────────────────────────────────────────────────────────────
+    // ── Set bot link from health endpoint ─────────────────────────────────
     async function init() {
-      // Handle return from Telegram OAuth first
-      const handled = await handleTelegramReturn();
-      if (handled) return;
-
-      // Fetch bot username
       try {
         const r = await fetch('/api/health');
         if (r.ok) {
           const d = await r.json();
-          _botUsername = d.bot_username || null;
-          _botId       = d.bot_id       || null;
+          if (d.bot_username) {
+            document.getElementById('bot-link').href =
+              `https://t.me/${d.bot_username}`;
+          }
         }
       } catch {}
-
-      hideLoading();
-
-      if (!_botUsername) {
-        document.getElementById('tg-wrap').innerHTML = `
-          <div class="tg-unavailable">
-            <span>⚡</span>
-            <span>Telegram login unavailable — set TELEGRAM_BOT_USERNAME in Railway</span>
-          </div>`;
-        return;
-      }
-
-      showBtn();
     }
 
     init();

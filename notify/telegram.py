@@ -313,6 +313,7 @@ class KaraTelegram:
                 CommandHandler("setmaxpos",    self.cmd_direct_set_config),
                 CommandHandler("resetml",      self.cmd_reset_ml),
                 CommandHandler("resetdata",    self.cmd_reset_data),
+                CommandHandler("weblogin",     self.cmd_weblogin),
                 # No more manual whatsnew command, it's automatic now
 
                 CallbackQueryHandler(self.on_callback),
@@ -1747,6 +1748,44 @@ class KaraTelegram:
     # ──────────────────────────────────────────
     # SIGNAL NOTIFICATION
     # ──────────────────────────────────────────
+
+    async def cmd_weblogin(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Generate a magic login link for the web terminal."""
+        if not self._is_authorized(update): return
+        import secrets, time
+        chat_id  = str(update.effective_chat.id)
+        token    = secrets.token_urlsafe(32)
+        expires  = int(time.time()) + 600   # 10 minutes
+
+        # Store in a simple in-memory dict (dashboard reads via endpoint)
+        if not hasattr(self, "_magic_tokens"):
+            self._magic_tokens = {}
+        # Clean expired tokens
+        self._magic_tokens = {k: v for k, v in self._magic_tokens.items() if v["exp"] > time.time()}
+        self._magic_tokens[token] = {"chat_id": chat_id, "exp": expires}
+
+        base_url = config.__dict__.get("DASHBOARD_URL", "").rstrip("/")
+        if not base_url:
+            # Fallback: derive from Railway env
+            import os
+            railway = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+            base_url = f"https://{railway}" if railway else ""
+
+        if not base_url:
+            await update.effective_message.reply_html(
+                "⚠️ Set <code>DASHBOARD_URL</code> di Railway env agar link bisa digenerate."
+            )
+            return
+
+        link = f"{base_url}/auth/magic?token={token}"
+        await update.effective_message.reply_html(
+            f"🔐 <b>Login ke KARA Terminal</b>\n\n"
+            f"Klik link berikut untuk masuk ke dashboard kamu:\n"
+            f"<a href='{link}'>{link}</a>\n\n"
+            f"⏱ Link berlaku <b>10 menit</b> dan hanya bisa digunakan sekali.\n"
+            f"Jangan share link ini ke siapapun.",
+            disable_web_page_preview=True,
+        )
 
     async def _cleanup_pending_signals(self):
         from datetime import datetime, timezone
