@@ -19,7 +19,7 @@ import config
 import base64
 
 _JWT_ALG   = "HS256"
-_JWT_TTL   = 7 * 24 * 3600   # 7 days
+_JWT_TTL   = 365 * 24 * 3600  # 1 year
 
 
 def _b64url_encode(data: bytes) -> str:
