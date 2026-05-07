@@ -462,7 +462,7 @@ class HyperliquidClient:
                 return data[:limit]
 
         try:
-            log.info(f"[{asset}] Fetching fresh candles from API...")
+            log.debug(f"[{asset}] Fetching fresh candles from API...")
             await self._ensure_info()
             
             # 2. Try SDK

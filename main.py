@@ -1053,7 +1053,11 @@ class KaraBot:
                 if pos:
                     await self.telegram.send_position_opened(pos, user_signal, target_chat_id=chat_id)
             else:
-                # AUTO-ONLY policy: no manual signal dispatch.
+                # FULL_AUTO is off — log signal clearly so operator knows it was seen but not executed
+                log.info(
+                    f"📨 [SIGNAL] {user_signal.asset} {user_signal.side.value.upper()} score={user_signal.score} "
+                    f"user={chat_id} → NOT executed (FULL_AUTO=off, set KARA_FULL_AUTO=true to enable)"
+                )
                 continue
 
     async def _on_trade_confirmed(self, signal, chat_id: str):

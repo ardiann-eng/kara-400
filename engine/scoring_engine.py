@@ -455,7 +455,7 @@ class ScoringEngine:
                 if bids and asks and bids[0][0] > 0:
                     spread_pct = (asks[0][0] - bids[0][0]) / asks[0][0]
                     if spread_pct > 0.0015:
-                        log.info(f"[{asset}] SCALPER REJECT: Spread too wide ({spread_pct*100:.2f}%)")
+                        log.debug(f"[{asset}] SCALPER REJECT: Spread too wide ({spread_pct*100:.2f}%)")
                         return 0, Side.LONG, ["REJECT: Spread too wide"]
             except Exception:
                 imb = 0.0
