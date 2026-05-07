@@ -332,6 +332,7 @@ class KaraTelegram:
                 CommandHandler("setleverage",  self.cmd_direct_set_config),
                 CommandHandler("setmaxpos",    self.cmd_direct_set_config),
                 CommandHandler("resetml",      self.cmd_reset_ml),
+                CommandHandler("resetdata",    self.cmd_reset_data),
                 # No more manual whatsnew command, it's automatic now
 
                 CallbackQueryHandler(self.on_callback),
@@ -780,7 +781,10 @@ class KaraTelegram:
             "• /pnl      — Ringkasan keuntungan/kerugian\n"
             "• /export   — Download riwayat trade Excel\n\n"
             "✨ <b>Update & Info</b>\n"
-            "• /whatsnew — Lihat pembaruan fitur terbaru\n\n"
+            "• /whatsnew  — Lihat pembaruan fitur terbaru\n\n"
+            "🔧 <b>Reset & Maintenance</b>\n"
+            "• /resetml   — Reset AI/ML intelligence (hapus model & training data)\n"
+            "• /resetdata — Reset history trade & journal Excel (saldo & posisi aman)\n\n"
             "<i>Tips: Gunakan menu /settings untuk menyesuaikan bot dengan kenyamanan risiko User.</i>\n\n"
             "⚠️ <b>Not Financial Advice:</b> Seluruh aktivitas trading memiliki risiko. User bertanggung jawab penuh. ✨"
         )
@@ -1732,6 +1736,43 @@ class KaraTelegram:
                 f"• Meta patterns: <b>{meta_count} pola dihapus</b>\n"
                 "• AI ABORT: <b>nonaktif</b> sampai 300 trades terkumpul\n\n"
                 "<i>Bot akan mulai kumpulkan data bersih dari sekarang.</i>"
+            )
+        except Exception as e:
+            await update.effective_message.reply_html(f"❌ Reset gagal: <code>{e}</code>")
+
+    async def cmd_reset_data(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Hapus semua history trade & journal user (DB + Excel). Saldo & posisi tetap aman."""
+        if not self._is_authorized(update): return
+        chat_id = str(update.effective_chat.id)
+
+        args = ctx.args or []
+        confirmed = len(args) > 0 and args[0].lower() == "confirm"
+
+        if not confirmed:
+            await update.effective_message.reply_html(
+                "⚠️ <b>Konfirmasi Reset Data Trade</b>\n\n"
+                "Ini akan menghapus:\n"
+                "• Semua history trade kamu di database\n"
+                "• Semua baris kamu di file Excel log\n\n"
+                "<b>Saldo, posisi terbuka, dan setting TIDAK akan terpengaruh.</b>\n\n"
+                "Ketik <code>/resetdata confirm</code> untuk lanjutkan."
+            )
+            return
+
+        await update.effective_message.reply_html("⏳ <b>Menghapus data history trade kamu...</b>")
+        try:
+            from core.db import user_db as _udb
+            from utils.excel_logger import get_excel_logger as _get_xl
+
+            db_count = _udb.clear_trade_history(chat_id)
+            xl_count = _get_xl().clear_trades_for_user(chat_id)
+
+            await update.effective_message.reply_html(
+                "✅ <b>Data history trade berhasil direset!</b>\n\n"
+                f"• Database: <b>{db_count} trade dihapus</b>\n"
+                f"• Excel log: <b>{xl_count} baris dihapus</b>\n\n"
+                "Saldo, posisi terbuka, dan setting kamu <b>aman</b>.\n"
+                "<i>Journal dan history kini kosong — siap mulai fresh.</i>"
             )
         except Exception as e:
             await update.effective_message.reply_html(f"❌ Reset gagal: <code>{e}</code>")

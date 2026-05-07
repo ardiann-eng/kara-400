@@ -74,6 +74,24 @@ class TradeExcelLogger:
         except Exception as e:
             log.error(f" Failed to log trade to Excel: {e}")
 
+    def clear_trades_for_user(self, chat_id: str) -> int:
+        """Hapus semua baris trade milik chat_id dari Excel. Returns jumlah baris dihapus."""
+        try:
+            if not os.path.exists(self.file_path):
+                return 0
+            df = pd.read_excel(self.file_path, engine='openpyxl', header=0)
+            mask = df["Chat ID"].astype(str) == str(chat_id)
+            count = int(mask.sum())
+            if count > 0:
+                df = df[~mask]
+                df.to_excel(self.file_path, index=False, engine='openpyxl')
+                log.info(f"clear_trades_for_user: removed {count} rows for chat_id={chat_id}")
+            return count
+        except Exception as e:
+            log.error(f"Failed to clear Excel trades for {chat_id}: {e}")
+            return 0
+
+
 # Singleton instance
 _logger = None
 

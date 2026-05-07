@@ -703,6 +703,22 @@ class UserDB:
                 log.error(f"Error fetching trade history for {chat_id}: {e}")
         return trades
 
+    def clear_trade_history(self, chat_id: str) -> int:
+        """Hapus semua trade history milik chat_id. Returns jumlah row yang dihapus."""
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM trade_history WHERE chat_id = ?", (str(chat_id),))
+                count = cursor.fetchone()[0]
+                cursor.execute("DELETE FROM trade_history WHERE chat_id = ?", (str(chat_id),))
+                conn.commit()
+                log.info(f"clear_trade_history: deleted {count} trades for chat_id={chat_id}")
+                return count
+            except Exception as e:
+                log.error(f"Error clearing trade history for {chat_id}: {e}")
+                return 0
+
     def load(self):
         with self._lock:
             if not os.path.exists(self.file_path):
