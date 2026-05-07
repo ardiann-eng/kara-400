@@ -991,10 +991,10 @@ class KaraTelegram:
             )
 
             # Close button per position (2-column grid)
-            side_short = "L" if pos.side.value == "long" else "S"
+            side_emoji = "📈" if pos.side.value == "long" else "📉"
             close_buttons.append(
                 InlineKeyboardButton(
-                    f"❌ {pos.asset} {side_short}",
+                    f"Close {pos.asset} {side_emoji}",
                     callback_data=f"close_req:{pos.asset}:{pos.side.value}"
                 )
             )
@@ -1008,7 +1008,7 @@ class KaraTelegram:
 
         # Close All row
         keyboard_rows.append([
-            InlineKeyboardButton("🚨 CLOSE ALL POSITIONS 🚨", callback_data="close_all_req")
+            InlineKeyboardButton("CLOSE ALL POSITIONS", callback_data="close_all_req")
         ])
 
         reply_markup = InlineKeyboardMarkup(keyboard_rows)
@@ -2205,6 +2205,13 @@ class KaraTelegram:
             except Exception as e:
                 log.error(f"[PnLCard] on-demand generation failed: {e}")
                 await query.answer("Gagal generate kartu PnL.", show_alert=True)
+            return
+
+        # ── Dismiss / Cancel ────────────────────────────────────────
+        if action == "close_settings":
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("❌ Dibatalkan.")
             return
 
         # ── Refresh Logic ───────────────────────────────────────────
