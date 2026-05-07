@@ -252,9 +252,8 @@ class KaraBot:
         short_sha = deploy_sha[:8] if deploy_sha else ""
         short_dep = deploy_id[:8] if deploy_id else ""
         
-        if short_dep:
-            release_tag = f"{current_version}-d{short_dep}"
-        elif short_sha:
+        # Prefer git SHA (stable across restarts) over deployment ID (changes every redeploy)
+        if short_sha:
             release_tag = f"{current_version}-{short_sha}"
         else:
             release_tag = current_version
