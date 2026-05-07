@@ -373,7 +373,7 @@ class KaraBot:
         self._running = True
 
         # ── Session diagnostic log ──────────────────────────────────────
-        _sess_bonus, _sess_reasons = self.scorer._get_session_bonus()
+        _sess_bonus, _sess_reasons, _sess_threshold_delta = self.scorer._get_session_bonus()
         from datetime import datetime as _dt, timezone as _tz
         _hour = _dt.now(_tz.utc).hour
         log.info(
