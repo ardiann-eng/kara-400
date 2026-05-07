@@ -551,7 +551,7 @@ class KaraTelegram:
         is_scl = (view_mode == "scalper")
         pfx = "scl_" if is_scl else "std_"
         mode_label = "🌸 SCALPER MODE" if is_scl else "🛡️ STANDARD MODE"
-        threshold_str = "Score ≥ 60 (TETAP)" if is_scl else "Score ≥ 65 (TETAP)"
+        threshold_str = "LONG ≥ 52 | SHORT ≥ 75 (TETAP)"
 
         text = (
             f"⚙️ <b>KARA Settings — {mode_label}</b>\n\n"
