@@ -306,11 +306,14 @@ class KaraBot:
 
         # ── Update Notification System ────────────────────────────────
         if self.telegram and self.telegram._bot_started:
-            # Prefer Telegram active/authorized chats so notifications are sent
-            # even if DB authorization flags are stale.
-            target_chat_ids = list(self.telegram._authorized_chat_ids)
-            if not target_chat_ids:
-                target_chat_ids = [u.chat_id for u in users_to_update]
+            # Only notify chats that haven't seen this release_tag yet.
+            # Also cover chats in _authorized_chat_ids with no/stale DB record.
+            needs_update: set = {u.chat_id for u in users_to_update}
+            for cid in self.telegram._authorized_chat_ids:
+                db_user = user_db.get_user(cid)
+                if db_user is None or db_user.last_seen_version != release_tag:
+                    needs_update.add(cid)
+            target_chat_ids = list(needs_update)
 
             if target_chat_ids:
                 log.info(
