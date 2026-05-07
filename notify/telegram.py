@@ -228,27 +228,8 @@ class KaraTelegram:
             log.error(f"Failed to save state: {e}")
 
     def _sync_mode_manager(self):
-        """
-        Sync the global ModeManager to reflect the fastest mode across all active users.
-        Called after every user mode switch so scan_interval stays correct.
-        If ANY user is in scalper mode, mode_manager is set to scalper (fastest wins).
-        If ALL users are standard, mode_manager is set to standard.
-        """
-        if not self.mode_manager:
-            return
-        try:
-            all_users = user_db.get_all_users()
-            any_scalper = any(
-                getattr(u.config, 'trading_mode', 'standard') == 'scalper'
-                for u in all_users
-                if u.is_authorized
-            )
-            target = 'scalper' if any_scalper else 'standard'
-            if self.mode_manager.mode != target:
-                self.mode_manager.switch(target)
-                log.info(f"[MODE] mode_manager synced to '{target}' after user switch")
-        except Exception as e:
-            log.error(f"_sync_mode_manager failed: {e}")
+        """Mode manager selalu scalper — method ini dipertahankan untuk kompatibilitas call site."""
+        pass
 
     # ──────────────────────────────────────────
     # STARTUP
@@ -323,7 +304,6 @@ class KaraTelegram:
                 CommandHandler("export",   self.cmd_export),
                 CommandHandler("mode",     self.cmd_mode),
                 CommandHandler("scalper",  self.cmd_scalper),
-                CommandHandler("standard", self.cmd_standard),
                 CommandHandler("paper",    self.cmd_paper),
                 CommandHandler("settings", self.cmd_settings),
                 CommandHandler("signal",   self.cmd_signal),
@@ -770,7 +750,7 @@ class KaraTelegram:
         help_text = (
             "📖 <b>KARA 4.0 - User Manual</b> 🌸\n\n"
             "🎛️ <b>Mode Trading & Akun</b>\n"
-            "• /mode     — Pilih gaya trading (Standard/Scalper)\n"
+            "• /mode     — Info Scalper Mode (SL 0.70% | TP1 1.00% | TP2 1.50%)\n"
             "• /settings — Atur threshold & leverage pribadi\n"
             "• /live     — Aktivasi Live Mode (Risiko Nyata)\n"
             "• /paper    — Kembali ke Paper Mode & Reset saldo\n\n"
@@ -1580,14 +1560,13 @@ class KaraTelegram:
         
         text = (
             f"🎯 <b>Trading Mode: {mode}</b> {mode_icon}\n\n"
-            f"<b>Standard Mode:</b> Swing/Positional. Lebih kalem, score sinyal lebih tinggi, target profit lebih jauh.\n"
-            f"<b>Scalper Mode:</b> Ultra-Agresif. Entry/Exit cepat (menit), leverage tinggi, frekuensi trade tinggi.\n\n"
-            f"<i>Pilih mode di bawah untuk mengganti gaya trading Anda:</i>"
+            f"<b>Scalper Mode:</b> Ultra-Agresif. Entry/Exit cepat (maks 20 menit), leverage 25-35x, frekuensi trade tinggi.\n"
+            f"SL: 0.70% | TP1: 1.00% | TP2: 1.50% | Max 5 posisi concurrent.\n\n"
+            f"<i>KARA berjalan eksklusif dalam Scalper Mode.</i>"
         )
-        
+
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Standard Mode", callback_data="mode_switch:standard")],
-            [InlineKeyboardButton("⚡ Scalper Mode", callback_data="mode_switch:scalper")]
+            [InlineKeyboardButton("⚡ Scalper Mode (Aktif)", callback_data="mode_switch:scalper")]
         ])
         
         msg = update.effective_message
@@ -1685,18 +1664,6 @@ class KaraTelegram:
             "Apakah Anda yakin?",
             reply_markup=keyboard
         )
-
-    async def cmd_standard(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update): return
-        if self._is_throttled(str(update.effective_chat.id), threshold=2, action_key="standard"): return
-        chat_id = str(update.effective_chat.id)
-        session = await self.bot_app.get_session(chat_id) if self.bot_app else None
-        if not session: return
-
-        session.user.config.trading_mode = "standard"
-        user_db.update_user(session.user)
-        self._sync_mode_manager()
-        await update.effective_message.reply_html("📊 <b>Ganti ke Standard Mode Berhasil!</b>")
 
     async def cmd_reset_ml(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Hapus semua data ML + model pkl dari Railway volume. Mulai fresh."""
@@ -2307,12 +2274,6 @@ class KaraTelegram:
                     parse_mode=ParseMode.HTML,
                     reply_markup=keyboard
                 )
-            elif sig_id == "standard":
-                session.user.config.trading_mode = "standard"
-                user_db.update_user(session.user)
-                self._sync_mode_manager()
-                await query.edit_message_reply_markup(reply_markup=None)
-                await query.message.reply_html("📊 <b>STANDARD MODE AKTIF!</b>\n\nMode swing yang lebih aman dan terukur.")
             else:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.message.reply_html("❌ Pemindahan mode dibatalkan.")
@@ -2831,7 +2792,18 @@ class KaraTelegram:
 
     def _get_changelog_text(self, version: str, release_tag: str = "", extra_notes: Optional[list[str]] = None) -> str:
         """KARA dynamic update card with friendly style ✨."""
-        if version == "6.2.0":
+        if version == "7.1.0":
+            bullets = [
+                "<b>Scalper-Only Mode</b>: KARA kini fokus 100% ke Scalper — Standard Mode dihapus untuk performa lebih tajam.",
+                "<b>R:R Fix (kritis)</b>: SL diperketat ke 0.70%, TP1 dinaikkan ke 1.00% (RR 1.43x), TP2 ke 1.50% (RR 2.14x). EV per trade naik drastis.",
+                "<b>TP2 Close Ratio</b>: 75% posisi ditutup di TP2 (was 40%) — lebih banyak profit dikunci sebelum trailing.",
+                "<b>ATR SL Fix</b>: ATR adaptive tidak lagi override fixed SL scalper — R:R tidak bisa berubah diam-diam.",
+                "<b>Post-Loss Cooldown</b>: Cooldown setelah loss besar kini 2 jam (was 5 jam) — lebih cocok untuk frekuensi scalping.",
+                "<b>FULL_AUTO via Env</b>: Full-Auto kini bisa dikontrol via env KARA_FULL_AUTO tanpa perlu redeploy.",
+                "<b>Max Posisi</b>: Maksimum 5 posisi concurrent scalper (was 3).",
+                "<b>/resetdata</b>: Hapus history trade & journal Excel user tanpa menyentuh saldo atau posisi terbuka."
+            ]
+        elif version == "6.2.0":
             bullets = [
                 "<b>Arsitektur Multi-User</b>: KARA kini mendukung banyak pengguna dengan dompet terpisah secara sirkular.",
                 "<b>Secure Agent Wallet</b>: Sistem L1 Agent yang terverifikasi on-chain untuk keamanan maksimal.",

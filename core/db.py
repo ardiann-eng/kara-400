@@ -664,7 +664,9 @@ class UserDB:
             try:
                 conn = self._get_conn()
                 cursor = conn.cursor()
-                trade_id = trade_data.get("pos_id", f"t_{int(datetime.now().timestamp())}")
+                # Buat trade_id unik per-event (bukan per-posisi) agar partial close tidak saling menimpa
+                base_id  = trade_data.get("pos_id", "")
+                trade_id = f"{base_id}_{trade_data.get('reason','x')}_{int(datetime.now().timestamp())}" if base_id else f"t_{int(datetime.now().timestamp())}"
                 cursor.execute("""
                     INSERT OR REPLACE INTO trade_history (trade_id, chat_id, asset, side, pnl_usd, pnl_pct, data, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)

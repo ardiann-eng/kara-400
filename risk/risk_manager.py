@@ -908,7 +908,7 @@ class RiskManager:
         self._persist_risk_state()
 
         if daily_pnl_pct < -0.50 and not self._cooldown_until:
-            cooldown_hrs = RISK.post_loss_cooldown_hrs
+            cooldown_hrs = SCALPER.post_loss_cooldown_hrs if self._is_scalper() else RISK.post_loss_cooldown_hrs
             from datetime import timedelta
             self._cooldown_until = datetime.now(timezone.utc) + timedelta(hours=cooldown_hrs)
             self._persist_risk_state()  # Persist immediately so restart doesn't bypass cooldown

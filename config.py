@@ -14,15 +14,15 @@ load_dotenv()
 # ──────────────────────────────────────────────
 # ENVIRONMENT
 # ──────────────────────────────────────────────
-KARA_VERSION = "7.0.2"  # /resetdata command — reset trade history & Excel journal
+KARA_VERSION = "7.1.0"  # Scalper-Only: hapus STANDARD, fix R:R (SL 0.70% TP1 1.00% TP2 1.50%)
 DATA_SOURCE = os.getenv("KARA_DATA_SOURCE", "mainnet").lower() # "mainnet" | "testnet"
 TRADE_MODE  = os.getenv("KARA_TRADE_MODE", "paper").lower()    # "paper" | "live"
-FULL_AUTO   = True  # Force auto execution mode as requested
+FULL_AUTO   = os.getenv("KARA_FULL_AUTO", "true").lower() == "true"
 
 # ── Trading Strategy Mode ──────────────────────────────────────────────────
 # Switch between "standard" (swing/positional) and "scalper" (ultra-aggressive)
 # Change at runtime via Telegram /scalper or /standard, or via Dashboard.
-TRADING_MODE = os.getenv("KARA_TRADING_MODE", "standard").lower()
+TRADING_MODE = "scalper"  # KARA runs exclusively in Scalper Mode
 
 MODE = TRADE_MODE  # alias for backward compatibility
 
@@ -199,13 +199,15 @@ class ScalperConfig:
     max_risk_per_trade_pct:  float = 0.10     # 10% absolute cap (AI Boost)
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
-    # Scalper SL/TP (Calibrated for 25x leverage)
-    # [SL FIX 2026-04-28] Data: scalper SL WR rendah — 0.65% kena noise sebelum bergerak.
-    # Dinaikkan ke 0.80% (+23%) supaya SL di luar zona noise 25x leverage.
-    sl_pct:                  float = 0.0080   # 0.80% stop loss (was 0.65% — terlalu sempit)
-    tp1_pct:                 float = 0.0090   # 0.90% TP1 — close 60% (was 1.00%, RR 1.125x vs SL 0.80%)
-    tp2_pct:                 float = 0.0120   # 1.20% TP2 — close 40% (was 1.60%, RR 1.5x)
-    trailing_pct:            float = 0.0040   # 0.40% trailing on remainder
+    # Scalper SL/TP (Calibrated for 25x leverage, 20-min max hold)
+    # [R:R FIX 2026-05-07] Audit: weighted avg loss > avg win karena TP terlalu dekat.
+    # TP1 dinaikkan 0.90%→1.00%, TP2 1.20%→1.50%, trailing 0.40%→0.35%.
+    # SL sedikit diperketat 0.80%→0.70% untuk improve R:R.
+    # R:R baru: TP1=1.43x, TP2=2.14x. EV per trade naik ~70x vs sebelumnya.
+    sl_pct:                  float = 0.0070   # 0.70% stop loss (was 0.80%)
+    tp1_pct:                 float = 0.0100   # 1.00% TP1 — close 55% (was 0.90%, RR 1.43x)
+    tp2_pct:                 float = 0.0150   # 1.50% TP2 — close 75% remaining (was 1.20%, RR 2.14x)
+    trailing_pct:            float = 0.0035   # 0.35% trailing on remainder (was 0.40%)
 
     # Timing
     max_hold_minutes:        float = 20.0     # force close after 20min if no TP hit (was 12)
@@ -220,12 +222,12 @@ class ScalperConfig:
     mtf_confirm_interval:    str   = "15m"
     mtf_confirm_lookback:    int   = 32       # ~8h on 15m candles
 
-    # Concurrent positions (tight — capital concentration)
-    max_concurrent_positions: int  = 3        # max 3 scalper positions
+    # Concurrent positions
+    max_concurrent_positions: int  = 5        # max 5 scalper positions (was 3)
 
-    # Partial TP ratios (scalper closes more early)
-    tp1_close_ratio:         float = 0.60     # 60% on TP1 (vs 40% standard)
-    tp2_close_ratio:         float = 0.40     # 40% on TP2
+    # Partial TP ratios
+    tp1_close_ratio:         float = 0.55     # 55% on TP1 (was 0.60)
+    tp2_close_ratio:         float = 0.75     # 75% of remaining on TP2 (was 0.40)
 
     # Pyramid — scale in when profit > 0.4%, REQUIRES CONFIRMATION
     enable_pyramid:          bool  = False    # off by default, Telegram confirm required
@@ -236,6 +238,7 @@ class ScalperConfig:
     # Live mode: override oleh LIVE_SCALPER_RISK di bawah.
     daily_loss_hard_pct:     float = 0.90    # paper: 90% daily loss → stop
     max_drawdown_pct:        float = 0.95    # paper: 95% total drawdown kill-switch
+    post_loss_cooldown_hrs:  float = 2.0     # cooldown setelah 50% daily loss (was pinjam RISK 5h)
 
     # MTF Score weights
     mtf_score_bonus:         int = 12        # bonus if 1m aligns with 15m trend

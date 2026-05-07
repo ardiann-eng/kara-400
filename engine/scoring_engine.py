@@ -235,69 +235,36 @@ class ScoringEngine:
         Returns -1 as max_score if ALL active modes were blocked by schedule.
         """
         import config
-        if active_modes is None:
-            active_modes = ["standard"]
-            
+        # KARA runs exclusively in Scalper Mode — active_modes parameter kept for signature compat
         signals = {}
         max_score_found = 0
-        all_mode_scores = []  # track per-mode scores for sentinel propagation
         now_ts = time.monotonic()
 
-        # 1. SCALPER MODE
-        score_scl = 0
-        if "scalper" in active_modes:
-            try:
-                cooldown_secs = 1 * 60 # Default
-                if hasattr(config, 'SCALPER'):
-                    cooldown_secs = config.SCALPER.signal_cooldown_minutes * 60
+        try:
+            cooldown_secs = config.SCALPER.signal_cooldown_minutes * 60
+            last_ts = self._last_signal_ts.get(f"{asset}_scalper", 0)
 
-                last_ts = self._last_signal_ts.get(f"{asset}_scalper", 0)
-                sig, score_scl = await self._run_scalper(asset, meta_data)
-                all_mode_scores.append(score_scl)
+            sig, score_scl = await self._run_scalper(asset, meta_data)
 
-                if score_scl > max_score_found: max_score_found = score_scl
+            if score_scl == -1:
+                return signals, -1
 
-                if sig and (now_ts - last_ts >= cooldown_secs):
-                    signals["scalper"] = sig
-                    self._last_signal_ts[f"{asset}_scalper"] = now_ts
-                    log.info(f"⚡ SCALPER SIGNAL: {asset} {sig.side.value.upper()} score={score_scl} (Meta: {getattr(sig, 'meta_score_delta', 0):+d})")
-                elif sig:
-                    log.debug(f"{asset} [SCALPER]: cooldown active (score={score_scl} blocked)")
-            except RuntimeError as e:
-                if "backoff" in str(e):
-                    log.debug(f"[SCAN] {asset}: skipped (API backoff)")
-                    return {}, 0
-                log.error(f"Error in scalper: {e}")
-            except Exception as e:
-                log.error(f"Error in scalper: {e}")
+            if score_scl > max_score_found:
+                max_score_found = score_scl
 
-        # 2. STANDARD MODE
-        score_std = 0
-        if "standard" in active_modes:
-            try:
-                cooldown_secs = config.SIGNAL.signal_cooldown_minutes * 60
-                last_ts = self._last_signal_ts.get(f"{asset}_standard", 0)
-
-                sig, score_std = await self._run_standard(asset, meta_data)
-                all_mode_scores.append(score_std)
-
-                if score_std > max_score_found: max_score_found = score_std
-
-                if sig and (now_ts - last_ts >= cooldown_secs):
-                    signals["standard"] = sig
-                    self._last_signal_ts[f"{asset}_standard"] = now_ts
-            except RuntimeError as e:
-                if "backoff" in str(e):
-                    log.debug(f"[SCAN] {asset}: skipped (API backoff)")
-                    return {}, 0
-                log.error(f"Error in standard: {e}")
-            except Exception as e:
-                log.error(f"Error in standard: {e}")
-
-        # Propagate blocked-by-schedule sentinel:
-        # If ALL active modes returned -1, this asset was entirely blocked.
-        if all_mode_scores and all(s == -1 for s in all_mode_scores):
-            return signals, -1
+            if sig and (now_ts - last_ts >= cooldown_secs):
+                signals["scalper"] = sig
+                self._last_signal_ts[f"{asset}_scalper"] = now_ts
+                log.info(f"⚡ SCALPER SIGNAL: {asset} {sig.side.value.upper()} score={score_scl} (Meta: {getattr(sig, 'meta_score_delta', 0):+d})")
+            elif sig:
+                log.debug(f"{asset} [SCALPER]: cooldown active (score={score_scl} blocked)")
+        except RuntimeError as e:
+            if "backoff" in str(e):
+                log.debug(f"[SCAN] {asset}: skipped (API backoff)")
+                return {}, 0
+            log.error(f"Error in scalper: {e}")
+        except Exception as e:
+            log.error(f"Error in scalper: {e}")
 
         return signals, max_score_found
 

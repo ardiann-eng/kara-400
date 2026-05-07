@@ -164,7 +164,7 @@ class TradeSignal(BaseModel):
     meta_pattern_key: Optional[str] = None   # outcome-learning pattern bucket
     meta_score_delta: int = 0                # score adj from meta winrate
     expected_edge:    Optional[float] = None # ML predicted probability of win (0.0-1.0)
-    trade_mode:       str = "standard"       # "scalper" | "standard"
+    trade_mode:       str = "scalper"        # scalper only
 
     # Levels
     entry_price:      float
@@ -303,7 +303,7 @@ class Position(BaseModel):
 
     # Meta
     signal_id:         Optional[str] = None
-    trade_mode:        str = "standard"   # "scalper" | "standard"
+    trade_mode:        str = "scalper"    # scalper only
     opened_at:         datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at:         Optional[datetime] = None
     is_paper:          bool = True
@@ -369,7 +369,7 @@ class TelegramResponse(BaseModel):
 # ──────────────────────────────────────────────
 
 class UserConfig(BaseModel):
-    trading_mode:  str = "standard"        # standard | scalper
+    trading_mode:  str = "scalper"          # scalper only
     bot_mode:      BotMode = BotMode.PAPER # paper | live
     risk_pct:      float = 0.02            # 2% of equity
     
@@ -384,7 +384,7 @@ class UserConfig(BaseModel):
     scl_min_score_to_signal:     int = 45   # was 50, recalibrated after session removal
     scl_min_score_to_auto_trade: int = 52   # was 57, recalibrated
     scl_max_leverage:            int = 20
-    scl_max_concurrent_positions: int = 5
+    scl_max_concurrent_positions: int = 5   # approved: 5 concurrent scalper positions
 
 class User(BaseModel):
     chat_id:           str

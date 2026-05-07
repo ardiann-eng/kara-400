@@ -693,11 +693,7 @@ class KaraBot:
         while self._running:
             try:
                 now = asyncio.get_event_loop().time()
-                any_scalper = any(
-                    getattr(s.user.config, 'trading_mode', 'standard') == 'scalper'
-                    for s in self.sessions.values()
-                )
-                scan_interval = 5 if any_scalper else self.mode_mgr.scan_interval
+                scan_interval = config.SCALPER.scan_interval_seconds
 
                 if now - last_scan >= scan_interval:
                     await self._scan_all_assets()
@@ -782,19 +778,9 @@ class KaraBot:
             cached_asset_count = len(all_meta[0]) if all_meta else 0
             log.debug(f"[SCAN] Cache OK: {cached_asset_count} assets in ctx")
 
-            # Gather active modes across all authorized users
+            # KARA runs exclusively in Scalper Mode
             target_ids = list(self.telegram._authorized_chat_ids)
-            active_modes = set()
-            for cid in target_ids:
-                session = await self.get_session(cid)
-                if session and session.user and hasattr(session.user.config, 'trading_mode'):
-                    active_modes.add(session.user.config.trading_mode)
-
-            # If no authorized users yet, default to standard to keep cache warm
-            if not active_modes:
-                active_modes.add("standard")
-
-            active_modes_list = list(active_modes)
+            active_modes_list = ["scalper"]
 
             # 2. Parallel scan with Semaphore(5)
             max_score = 0
@@ -836,14 +822,11 @@ class KaraBot:
                         else:
                             log.error(f" ❌ Scan error for {asset}: {e}")
 
-            # Determine assets to scan
+            # Scan all assets: base watched_assets + scalper-specific assets
             assets_to_scan = list(self.watched_assets)
-            scalper_only_assets = []
-            if "scalper" in active_modes:
-                import config as _cfg
-                scalper_assets = getattr(_cfg, 'SCALPER_ASSETS', [])
-                scalper_only_assets = [a for a in scalper_assets if a not in assets_to_scan]
-                assets_to_scan.extend(scalper_only_assets)
+            scalper_assets = getattr(config, 'SCALPER_ASSETS', [])
+            scalper_only_assets = [a for a in scalper_assets if a not in assets_to_scan]
+            assets_to_scan.extend(scalper_only_assets)
 
             tasks = [_scan_one(asset, scalper_only=(asset in scalper_only_assets)) for asset in assets_to_scan]
             await asyncio.gather(*tasks)
@@ -941,25 +924,14 @@ class KaraBot:
                 user = user_db.create_user(chat_id, "Master", init_usd=config.PAPER_BALANCE_USD)
                 session = await self.get_session(chat_id)
                 
-            user_mode = getattr(session.user.config, 'trading_mode', 'standard')
-            base_signal = signals_dict.get(user_mode)
-            fallback_from_standard = False
-
-            # If user is in scalper but dedicated scalper signal is not produced,
-            # allow standard signal as fallback so opportunities are not missed.
-            if user_mode == "scalper" and not base_signal:
-                std_fallback = signals_dict.get("standard")
-                if std_fallback:
-                    base_signal = std_fallback
-                    fallback_from_standard = True
-            
+            user_mode = 'scalper'
+            base_signal = signals_dict.get("scalper")
             if not base_signal:
                 continue
 
             # ── Per-User Threshold Check (AUTO-ONLY POLICY) ──────────────────
             user_cfg = session.user.config
-            is_scl = (user_mode == 'scalper')
-            auto_threshold = int(user_cfg.scl_min_score_to_auto_trade if is_scl else user_cfg.std_min_score_to_auto_trade)
+            auto_threshold = int(user_cfg.scl_min_score_to_auto_trade)
 
             # ── MULTI-USER FIX: Deep-copy signal with a UNIQUE signal_id per user ──
             # model_copy() copies ALL fields including signal_id.
@@ -970,14 +942,12 @@ class KaraBot:
             # Deep copy so nested breakdown/warnings are not shared across users/cycles.
             user_signal = base_signal.model_copy(deep=True)
             user_signal.signal_id = f"{base_signal.signal_id[:4]}{uuid.uuid4().hex[:4].upper()}"
-            if fallback_from_standard:
-                log.debug(f"[SCALPER] {chat_id}: no dedicated scalper signal this cycle, using standard signal as fallback.")
 
 
-            # ATR dihitung untuk localize_for_user saja.
-            # SL aktual diset oleh calculate_levels() di bawah — bukan dari atr_value ini.
+            # ATR hanya dihitung untuk standard mode — scalper pakai fixed SL ketat,
+            # ATR adaptive akan override 0.70% SL dan merusak R:R yang sudah dikalibrasi.
             atr_value = 0.0
-            if getattr(config, 'RISK', None) and getattr(config.RISK, 'enable_atr_sl', False):
+            if user_mode != 'scalper' and getattr(config, 'RISK', None) and getattr(config.RISK, 'enable_atr_sl', False):
                 try:
                     candles = await self.hl_client.get_candles(
                         user_signal.asset, "1m", limit=config.RISK.atr_lookback

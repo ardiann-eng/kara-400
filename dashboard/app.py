@@ -62,7 +62,7 @@ async def health():
     return {
         "status": "ok",
         "mode": config.MODE,
-        "trading_mode": _mode_manager.mode if _mode_manager else "standard",
+        "trading_mode": _mode_manager.mode if _mode_manager else "scalper",
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -106,7 +106,7 @@ async def get_overview():
             "websocket":    "online"  if ws_connected   else "waiting",
             "sessions":     "online"  if sessions_ready else "initializing",
             "telegram":     "online"  if (_telegram and getattr(_telegram, "_bot_started", False)) else "offline",
-            "trading_mode": _mode_manager.mode if _mode_manager else "standard",
+            "trading_mode": _mode_manager.mode if _mode_manager else "scalper",
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -452,7 +452,7 @@ async def resume_bot(chat_id: str = None):
 @app.get("/api/mode")
 async def get_mode():
     if not _mode_manager:
-        return {"mode": "standard"}
+        return {"mode": "scalper"}
     return _mode_manager.status
 
 
