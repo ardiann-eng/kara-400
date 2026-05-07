@@ -1276,9 +1276,9 @@ class KaraTelegram:
         try:
             from core.db import user_db
             if target_chat_id:
-                history = user_db.load_trade_history(target_chat_id, limit=200)
-                today_str = datetime.now().strftime("%Y-%m-%d")
-                today_trades = [t for t in history if str(t.get("timestamp", "")).startswith(today_str) and t.get("type") == "close"]
+                history = user_db.get_trade_history(target_chat_id, limit=200)
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                today_trades = [t for t in history if str(t.get("timestamp", "")).startswith(today_str)]
                 total_trades = len(today_trades)
                 wins = sum(1 for t in today_trades if (t.get("pnl") or 0) > 0)
                 win_rate = f"{wins/total_trades*100:.0f}% ({wins}/{total_trades})" if total_trades > 0 else "Belum ada trade hari ini"
