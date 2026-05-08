@@ -792,7 +792,7 @@ class UserDB:
             username=username,
             paper_balance_usd=init_usd,
             config=UserConfig(
-                trading_mode="standard",
+                trading_mode="scalper",
                 bot_mode=BotMode.PAPER,
                 risk_pct=0.02
             )

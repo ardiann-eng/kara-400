@@ -206,7 +206,7 @@ class ScalperConfig:
     # TP1 dinaikkan 0.90%→1.00%, TP2 1.20%→1.50%, trailing 0.40%→0.35%.
     # SL sedikit diperketat 0.80%→0.70% untuk improve R:R.
     # R:R baru: TP1=1.43x, TP2=2.14x. EV per trade naik ~70x vs sebelumnya.
-    sl_pct:                  float = 0.0070   # 0.70% stop loss (was 0.80%)
+    sl_pct:                  float = 0.0070   # 0.70% minimum SL floor (ATR-based, actual SL = 1.5×ATR14)
     tp1_pct:                 float = 0.0100   # 1.00% TP1 — close 55% (was 0.90%, RR 1.43x)
     tp2_pct:                 float = 0.0150   # 1.50% TP2 — close 75% remaining (was 1.20%, RR 2.14x)
     trailing_pct:            float = 0.0035   # 0.35% trailing on remainder (was 0.40%)
@@ -250,7 +250,7 @@ class ScalperConfig:
     momentum_exit_enabled:       bool  = True
     momentum_exit_min_minutes:   float = 3.0    # tunggu 3 menit setelah entry sebelum cek
     momentum_exit_candles:       int   = 3       # evaluasi 3 candle 1m terakhir
-    momentum_exit_loss_floor:    float = -0.003  # hanya exit kalau loss <= -0.3% (hindari exit di noise)
+    momentum_exit_loss_floor:    float = -0.0015  # exit kalau loss <= -0.15% (was -0.3%, terlalu lambat vs SL 0.7%)
 
 SCALPER = ScalperConfig()
 

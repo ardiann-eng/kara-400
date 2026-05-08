@@ -173,7 +173,7 @@ class PaperExecutor:
             trailing_high=fill_price,
             liquidation_price=liq_price,
             signal_id=signal.signal_id,
-            trade_mode=getattr(signal, 'trade_mode', 'standard'),
+            trade_mode=getattr(signal, 'trade_mode', 'scalper'),
             is_paper=True,
             entry_score=signal.score,
             realized_vol=getattr(signal, 'realized_vol', 0.02),
@@ -411,11 +411,16 @@ class PaperExecutor:
         current_price: float,
     ) -> Dict:
         """Handle TP1, TP2, trailing, or SL partial/full close."""
+        # SL must fill at stop_loss price, not current_price.
+        # current_price may have rebounded above SL within the 15s scan interval,
+        # which would produce a positive PnL on a stop_loss exit — incorrect.
+        fill_price = pos.stop_loss if action["action"] == "stop_loss" else current_price
+
         close_ratio = action["close_ratio"]
         close_size  = pos.size_current * close_ratio
-        
+
         partial_pnl = (
-            pos.floating_pct(current_price) * 
+            pos.floating_pct(fill_price) *
             close_size * pos.entry_price
         )
         
@@ -431,12 +436,12 @@ class PaperExecutor:
         pos.pnl_realized   += partial_pnl
         pos.margin_usd     -= margin_to_release
         pos.size_current   -= close_size
-        pos.pnl_unrealized = pos.unrealized_pnl(current_price)
+        pos.pnl_unrealized = pos.unrealized_pnl(fill_price)
 
         if action["action"] == "tp1":
             pos.tp1_hit = True
             pos.trailing_active = True
-            pos.trailing_high = current_price
+            pos.trailing_high = fill_price
             pos.stop_loss = pos.entry_price * 1.0005 if pos.side == Side.LONG else pos.entry_price * 0.9995
             log.info(f" [PAPER] TP1 hit on {pos.asset} - SL moved to breakeven")
 
@@ -448,15 +453,15 @@ class PaperExecutor:
             # Full close — guard: only if still OPEN
             if pos.status == PositionStatus.OPEN:
                 await self.close_position(
-                    pos.position_id, current_price, action["action"]
+                    pos.position_id, fill_price, action["action"]
                 )
 
         # Update trailing high
         if pos.trailing_active and pos.status == PositionStatus.OPEN:
             if pos.side == Side.LONG:
-                pos.trailing_high = max(pos.trailing_high, current_price)
+                pos.trailing_high = max(pos.trailing_high, fill_price)
             else:
-                pos.trailing_high = min(pos.trailing_high, current_price)
+                pos.trailing_high = min(pos.trailing_high, fill_price)
 
         # Persist AFTER all state updates so DB always has the correct tp1_hit, stop_loss, trailing_high
         from core.db import user_db

@@ -668,20 +668,24 @@ class ScoringEngine:
         import config
         scfg = config.SCALPER
 
-        # Dynamic SL: scale with realized_vol, floor at config sl_pct, ceiling at 1.5%
-        # RR ratio tetap 1.125x TP1 dan 1.5x TP2 relatif terhadap SL
-        SL_FLOOR   = scfg.sl_pct          # 0.80%
-        SL_CEILING = 0.0150               # 1.50% max — beyond this scalper isn't viable
-        VOL_MULT   = 1.20                 # SL = vol * 1.2 (noise buffer)
+        # ATR-Based Dynamic SL: SL = 1.5 × ATR14
+        # ATR14 diturunkan dari realized_vol (1h annualized) yang sudah di-cache:
+        #   realized_vol = std_dev(1h_returns) × sqrt(24)  →  per-1h vol = realized_vol / sqrt(24)
+        #   ATR14 (1h candle) ≈ per-1h vol × entry_price
+        # Zero API call — pakai vol_cache yang sudah ada dari scan sebelumnya.
+        SL_FLOOR   = scfg.sl_pct          # 0.70% minimum
+        SL_CEILING = 0.0200               # 2.0% hard cap
+        ATR_MULT   = 1.5                  # SL = 1.5 × ATR14
 
         if realized_vol > 0:
-            sl_pct = max(SL_FLOOR, min(realized_vol * VOL_MULT, SL_CEILING))
+            atr14_pct = realized_vol / (24 ** 0.5)   # per-candle (1h) ATR sebagai pct
+            sl_pct = max(SL_FLOOR, min(atr14_pct * ATR_MULT, SL_CEILING))
         else:
             sl_pct = SL_FLOOR
 
-        # TP scaled proportionally to maintain consistent RR
-        rr1 = scfg.tp1_pct / scfg.sl_pct   # ~1.125x
-        rr2 = scfg.tp2_pct / scfg.sl_pct   # ~1.5x
+        # TP scaled proportionally — RR 1.43x TP1, 2.14x TP2 (dari kalibrasi sebelumnya)
+        rr1 = scfg.tp1_pct / scfg.sl_pct
+        rr2 = scfg.tp2_pct / scfg.sl_pct
         tp1_pct = sl_pct * rr1
         tp2_pct = sl_pct * rr2
 
