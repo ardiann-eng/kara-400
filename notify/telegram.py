@@ -2898,14 +2898,14 @@ class KaraTelegram:
         """KARA dynamic update card with friendly style ✨."""
         if version == "7.1.0":
             bullets = [
-                "<b>Scalper-Only Mode</b>: KARA kini fokus 100% ke Scalper — Standard Mode dihapus untuk performa lebih tajam.",
-                "<b>R:R Fix (kritis)</b>: SL diperketat ke 0.70%, TP1 dinaikkan ke 1.00% (RR 1.43x), TP2 ke 1.50% (RR 2.14x). EV per trade naik drastis.",
-                "<b>TP2 Close Ratio</b>: 75% posisi ditutup di TP2 (was 40%) — lebih banyak profit dikunci sebelum trailing.",
-                "<b>ATR SL Fix</b>: ATR adaptive tidak lagi override fixed SL scalper — R:R tidak bisa berubah diam-diam.",
-                "<b>Post-Loss Cooldown</b>: Cooldown setelah loss besar kini 2 jam (was 5 jam) — lebih cocok untuk frekuensi scalping.",
-                "<b>FULL_AUTO via Env</b>: Full-Auto kini bisa dikontrol via env KARA_FULL_AUTO tanpa perlu redeploy.",
-                "<b>Max Posisi</b>: Maksimum 5 posisi concurrent scalper (was 3).",
-                "<b>/resetdata</b>: Hapus history trade & journal Excel user tanpa menyentuh saldo atau posisi terbuka."
+                "<b>SHORT Threshold Aktif</b>: Filter skor SHORT (≥62) kini di-enforce di Scalper Mode — sebelumnya tidak aktif (bug fix kritis).",
+                "<b>Short Squeeze Guard</b>: SHORT otomatis diblok jika harga spike &gt;1% + OI drop &gt;5% dalam 1 menit (anti-squeeze).",
+                "<b>Funding Rate Filter</b>: SHORT diblok jika funding rate terlalu rendah — cegah entry melawan arus pasar.",
+                "<b>Bearish RSI Divergence</b>: Deteksi harga naik tapi RSI turun → bear signal +10 pts (dan sebaliknya untuk LONG).",
+                "<b>Bearish Rejection Wick</b>: Deteksi candle dengan upper wick &gt;1.5× body → bear signal +8 pts.",
+                "<b>AI Fitur is_short</b>: Intelligence model kini bisa bedakan pattern LONG vs SHORT (9→10 fitur).",
+                "<b>Fix Double PnL</b>: Bug double-counting balance pada SL/trailing exit di paper trading sudah diperbaiki.",
+                "<b>Meta Learning n=5</b>: Pattern aktif setelah 5 trade (was 10) — adaptasi lebih cepat.",
             ]
         elif version == "6.2.0":
             bullets = [
