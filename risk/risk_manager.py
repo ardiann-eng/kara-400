@@ -395,12 +395,19 @@ class RiskManager:
         # --- CONVICTION-WEIGHTED POSITION SIZING (AGGRESSIVE) ---
         score = getattr(signal, 'score', 0)
         risk_pct = self.get_risk_pct(score, account_balance)
-        
+
         # Apply AI Multiplier to Risk!
         risk_pct = min(risk_pct * multiplier, cfg.max_risk_per_trade_pct)
 
-        # Compound sizing
-        size_usd = (account_balance * risk_pct) / max(sl_pct * lev, 0.0001)
+        # Scalper: gunakan sl_pct sizing terpisah dari SL on-chain.
+        # SL on-chain 3% adalah backstop darurat (jarang kena) — bukan exit normal.
+        # Sizing pakai 0.70% (ATR-based expected exit) agar margin tetap proporsional.
+        # Kalau pakai sl_pct on-chain 3%: margin jadi 4x lebih kecil dari seharusnya.
+        if self._is_scalper():
+            sl_pct_for_sizing = 0.007  # 0.70% — expected momentum exit distance, bukan backstop SL
+            size_usd = (account_balance * risk_pct) / max(sl_pct_for_sizing * lev, 0.0001)
+        else:
+            size_usd = (account_balance * risk_pct) / max(sl_pct * lev, 0.0001)
 
         # Drawdown guard: if we are >15% below peak, cut risk in half!
         # Find drawdown:
