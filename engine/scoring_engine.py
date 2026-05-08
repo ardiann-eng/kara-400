@@ -779,15 +779,10 @@ class ScoringEngine:
         else:
             sl_pct = SL_FLOOR
 
-        # TP scaled dari sl_pct_for_sizing (0.70% expected exit), bukan SL on-chain (3% backstop).
-        # SL on-chain adalah emergency backstop yang jarang kena — menggunakannya sebagai
-        # denominator RR akan menghasilkan TP yang jauh di bawah SL (RR < 1x), yang salah.
-        # RR yang benar: TP1 = 2.04x, TP2 = 3.06x vs sizing distance.
-        sl_pct_for_rr = 0.007   # sama dengan sl_pct_for_sizing di risk_manager.py
-        rr1 = scfg.tp1_pct / sl_pct_for_rr   # 0.0143 / 0.007 = 2.04x
-        rr2 = scfg.tp2_pct / sl_pct_for_rr   # 0.0214 / 0.007 = 3.06x
-        tp1_pct = sl_pct * rr1
-        tp2_pct = sl_pct * rr2
+        # TP pakai nilai fixed dari config — level realistis untuk hold time 20 menit.
+        # TP1=1.43%, TP2=2.14% dirancang untuk expected exit 0.70%, bukan SL on-chain 3%.
+        tp1_pct = scfg.tp1_pct
+        tp2_pct = scfg.tp2_pct
 
         leverage = min(scfg.default_leverage, scfg.max_leverage)
 

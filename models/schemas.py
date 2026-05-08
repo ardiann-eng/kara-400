@@ -197,14 +197,8 @@ class TradeSignal(BaseModel):
         if mode == "scalper":
             cfg = config.SCALPER
             sl_pct  = cfg.sl_pct
-            # TP di-scale dari sl_pct_for_sizing (0.70% expected exit), bukan SL on-chain (3% backstop).
-            # RR yang benar: TP1=2.04x, TP2=3.06x vs sizing distance (bukan vs backstop SL).
-            # Hasil: TP1 = sl_pct * 2.04, TP2 = sl_pct * 3.06
-            sl_pct_for_rr = 0.007
-            rr1 = cfg.tp1_pct / sl_pct_for_rr   # 0.0143 / 0.007 = 2.043x
-            rr2 = cfg.tp2_pct / sl_pct_for_rr   # 0.0214 / 0.007 = 3.057x
-            tp1_pct = sl_pct * rr1               # 3% * 2.043 = 6.13%
-            tp2_pct = sl_pct * rr2               # 3% * 3.057 = 9.17%
+            tp1_pct = cfg.tp1_pct
+            tp2_pct = cfg.tp2_pct
             self.suggested_leverage = min(cfg.default_leverage, cfg.max_leverage)
         else:
             cfg = config.RISK
@@ -250,12 +244,21 @@ class TradeSignal(BaseModel):
     @property
     def risk_reward_ratio(self) -> float:
         if self.side == Side.LONG:
-            risk   = self.entry_price - self.stop_loss
             reward = self.tp2 - self.entry_price
         else:
-            risk   = self.stop_loss - self.entry_price
             reward = self.entry_price - self.tp2
-        # Clamp: RR > 20x hampir pasti bug (SL terlalu tipis)
+
+        # Scalper: SL on-chain (3%) adalah backstop darurat, bukan exit normal.
+        # Expected exit distance (0.70%) adalah risk sesungguhnya per trade.
+        # Pakai expected exit untuk RR display supaya angka mencerminkan realita.
+        if getattr(self, 'trade_mode', None) == 'scalper':
+            risk = self.entry_price * 0.007
+        else:
+            if self.side == Side.LONG:
+                risk = self.entry_price - self.stop_loss
+            else:
+                risk = self.stop_loss - self.entry_price
+
         if risk <= 0 or risk < self.entry_price * 0.001:
             return 0.0
         return round(min(reward / risk, 20.0), 2)
