@@ -979,21 +979,27 @@ async def get_ml_decision_feed(chat_id: str = None):
         # Fetch more rows than needed so dedup still yields 30 unique signals.
         # Dedup by pos_id: one signal = one entry regardless of how many users executed it.
         # Use MAX(created_at) to pick the most-recent row per pos_id so ORDER BY still works.
+        # Dedup by asset+side+minute: sinyal yang sama dieksekusi ke banyak user
+        # menghasilkan pos_id berbeda per user, sehingga GROUP BY pos_id tidak cukup.
+        # Solusi: group by asset, side, dan menit (created_at // 60) agar satu sinyal
+        # yang dieksekusi ke N user hanya muncul sekali di feed.
         if chat_id:
             rows = conn.execute(
-                "SELECT asset, side, pnl_usd, pnl_pct, data, MAX(created_at) AS created_at "
+                "SELECT asset, side, AVG(pnl_usd) as pnl_usd, AVG(pnl_pct) as pnl_pct, "
+                "data, MAX(created_at) AS created_at "
                 "FROM trade_history "
                 "WHERE json_extract(data, '$.type') = 'close' AND chat_id = ? "
-                "GROUP BY json_extract(data, '$.pos_id') "
+                "GROUP BY asset, side, (created_at / 60) "
                 "ORDER BY created_at DESC LIMIT 30",
                 (str(chat_id),)
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT asset, side, pnl_usd, pnl_pct, data, MAX(created_at) AS created_at "
+                "SELECT asset, side, AVG(pnl_usd) as pnl_usd, AVG(pnl_pct) as pnl_pct, "
+                "data, MAX(created_at) AS created_at "
                 "FROM trade_history "
                 "WHERE json_extract(data, '$.type') = 'close' "
-                "GROUP BY json_extract(data, '$.pos_id') "
+                "GROUP BY asset, side, (created_at / 60) "
                 "ORDER BY created_at DESC LIMIT 30"
             ).fetchall()
         conn.close()
