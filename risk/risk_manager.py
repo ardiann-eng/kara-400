@@ -54,6 +54,8 @@ class RiskManager:
         self._kill_switch:    bool = False
         self._paused:         bool = False
         self._latest_score:   Dict[str, int] = {}     # asset -> latest score from scanner
+        # Per-asset trade tracker: asset -> [unix_ts, ...] of completed trades today
+        self._asset_trade_times: Dict[str, List[float]] = {}
 
         # --- Hydrate from persisted state if exists
         self._load_risk_state()
@@ -130,6 +132,48 @@ class RiskManager:
         return getattr(user.config, f"{prefix}{key}", global_fallback)
 
     # ──────────────────────────────────────────
+    # PER-ASSET REPEAT GUARD
+    # ──────────────────────────────────────────
+
+    MAX_TRADES_PER_ASSET_PER_DAY = 2
+    ASSET_COOLDOWN_SECONDS       = 2 * 3600   # 2 jam setelah trade ke-2
+
+    def _check_asset_repeat(self, asset: str) -> Tuple[bool, str]:
+        """Block if asset already hit max trades today or is in per-asset cooldown."""
+        now = time.time()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        key = f"{asset}_{today}"
+        times = self._asset_trade_times.get(key, [])
+
+        if len(times) >= self.MAX_TRADES_PER_ASSET_PER_DAY:
+            last_ts = times[-1]
+            elapsed = now - last_ts
+            remaining = self.ASSET_COOLDOWN_SECONDS - elapsed
+            if remaining > 0:
+                hrs  = int(remaining) // 3600
+                mins = (int(remaining) % 3600) // 60
+                return False, (
+                    f"🔁 {asset}: sudah {len(times)}x hari ini (WR turun drastis). "
+                    f"Cooldown {hrs}h {mins}m lagi."
+                )
+            # Cooldown lewat tapi sudah max trades — blokir sampai besok
+            return False, (
+                f"🔁 {asset}: batas {self.MAX_TRADES_PER_ASSET_PER_DAY} trade/hari tercapai. "
+                f"Lanjut besok."
+            )
+        return True, ""
+
+    def record_asset_trade(self, asset: str):
+        """Call setelah trade dieksekusi untuk update per-asset counter."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        key = f"{asset}_{today}"
+        if key not in self._asset_trade_times:
+            self._asset_trade_times[key] = []
+        self._asset_trade_times[key].append(time.time())
+        count = len(self._asset_trade_times[key])
+        log.info(f"[REPEAT GUARD] {asset}: trade ke-{count} hari ini dicatat.")
+
+    # ──────────────────────────────────────────
     # DAILY RESET
     # ──────────────────────────────────────────
 
@@ -140,6 +184,7 @@ class RiskManager:
             self._daily_pnl     = 0.0
             self._session_start_balance = current_balance
             self._last_reset_day = today
+            self._asset_trade_times = {}   # reset per-asset counter setiap hari
             self._persist_risk_state()
             log.info(f"📅 Daily reset - session balance: {format_usd(current_balance)}")
             return True
@@ -237,6 +282,11 @@ class RiskManager:
                     return False, f"📌 Already holding {signal.asset} but profit {profit*100:.2f}% < {cfg.pyramid_at_profit_pct*100:.1f}% for pyramid"
             else:
                 return False, f"📌 Already have an open position on {signal.asset}"
+
+        # ── Per-asset repeat trade guard ──────────────────────────────
+        asset_ok, asset_reason = self._check_asset_repeat(signal.asset)
+        if not asset_ok:
+            return False, asset_reason
 
         # ── Daily loss limit ───────────────────────────────────────────
         daily_pnl_pct = self._daily_pnl / max(account.total_equity, 1)

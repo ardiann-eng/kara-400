@@ -208,6 +208,9 @@ class PaperExecutor:
         self._trade_log.append(log_data)
         get_excel_logger().log_trade(self.chat_id, log_data)
 
+        # Record per-asset trade for repeat guard
+        self.risk.record_asset_trade(signal.asset)
+
         log.info(
             f" [PAPER] Opened {signal.asset} {signal.side.value.upper()} "
             f"@ {fill_price} | {contracts:.4f} contracts "

@@ -310,6 +310,9 @@ class LiveExecutor:
         }
         get_excel_logger().log_trade(self.chat_id, log_data)
 
+        # Record per-asset trade for repeat guard
+        self.risk.record_asset_trade(signal.asset)
+
         log.info(
             f" [LIVE] Opened {signal.asset} {signal.side.value.upper()} "
             f"@ {pos.entry_price} | {contracts:.4f} contracts "
