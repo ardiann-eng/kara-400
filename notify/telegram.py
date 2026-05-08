@@ -533,7 +533,7 @@ class KaraTelegram:
         is_scl = (view_mode == "scalper")
         pfx = "scl_" if is_scl else "std_"
         mode_label = "🌸 SCALPER MODE" if is_scl else "🛡️ STANDARD MODE"
-        threshold_str = "LONG ≥ 52 | SHORT ≥ 75 (TETAP)"
+        threshold_str = "LONG ≥ 52 | SHORT ≥ 62"
 
         text = (
             f"⚙️ <b>KARA Settings — {mode_label}</b>\n\n"
@@ -1341,7 +1341,7 @@ class KaraTelegram:
         await update.effective_message.reply_html(
             " <b>Mode Full-Auto</b>\n\n"
             " <b>Perhatian!</b> Dalam mode ini KARA akan:\n"
-            "• Auto-execute trade dengan score ≥ 72\n"
+            "• Auto-execute trade dengan score ≥ 62\n"
             "• Maksimum 1 posisi aktif\n"
             "• Kill-switch otomatis di 20% drawdown\n\n"
             "<i>Ketik /manual untuk kembali ke semi-auto (lebih aman untuk pemula)</i>\n\n"
@@ -1807,6 +1807,23 @@ class KaraTelegram:
         side_emoji = "🟢" if signal.side == Side.LONG else "🔴"
         side_text  = "LONG" if signal.side == Side.LONG else "SHORT"
 
+        short_warning = ""
+        if signal.side == Side.SHORT:
+            fr = getattr(signal, 'funding_rate', None)
+            # 0.005% per 8h = 0.00005 dalam desimal
+            high_funding_threshold = 0.00005
+            if fr is not None and fr > high_funding_threshold:
+                fr_per_8h_pct = fr * 100
+                margin_est = getattr(signal, 'suggested_size_usd', None) or 0
+                cost_8h = margin_est * fr if margin_est else None
+                cost_str = f" (~${cost_8h:.2f}/8h)" if cost_8h else ""
+                short_warning = (
+                    f"\n⚠️ <b>SHORT</b> | 💸 Funding tinggi: <code>{fr_per_8h_pct:.4f}%/8h{cost_str}</code>"
+                    f" — SHORT bayar funding ke LONG. Hold pendek!"
+                )
+            else:
+                short_warning = "\n⚠️ <b>SHORT</b> — cek SL & leverage sebelum konfirmasi."
+
         # Map internal regime enum → human-readable label with emoji
         _regime_labels = {
             "trending":  "📈 Trending",
@@ -1839,6 +1856,7 @@ class KaraTelegram:
             rr=signal.risk_reward_ratio,
             sig_id=signal.signal_id[:8]
         )
+        text += short_warning
 
         keyboard = []
         # Always store signal so the "View Reasons" button can fetch details
@@ -2549,11 +2567,11 @@ class KaraTelegram:
             if session:
                 u = session.user
                 u.config.std_min_score_to_signal = 45
-                u.config.std_min_score_to_auto_trade = 52
+                u.config.std_min_score_to_auto_trade = 57
                 u.config.std_max_leverage = 10
                 u.config.std_max_concurrent_positions = 10
                 u.config.scl_min_score_to_signal = 45
-                u.config.scl_min_score_to_auto_trade = 52
+                u.config.scl_min_score_to_auto_trade = 57
                 u.config.scl_max_leverage = 20
                 u.config.scl_max_concurrent_positions = 3
                 user_db.update_user(u)
@@ -2588,29 +2606,40 @@ class KaraTelegram:
             self._pending_signals.pop(sig_id, None)
 
         elif action == "reasons" and signal:
-            # Grouping logic
-            marketists, fundingists, liqists, others = [], [], [], []
+            is_short = signal.side == Side.SHORT
+
+            # ── Categorize reasons ────────────────────────────────────
+            marketists, fundingists, liqists, shortists, others = [], [], [], [], []
             for r in signal.breakdown.reasons:
                 safe_r = html.escape(r.strip('• '))
                 row = f"• {safe_r}"
                 low = r.lower()
-                if any(x in low for x in ["regime", "vwap", "session", "price", "trend"]):
+                if any(x in low for x in ["rejection wick", "rsi divergence", "bearish rsi", "bullish rsi", "squeeze"]):
+                    shortists.append(row)
+                elif any(x in low for x in ["regime", "vwap", "session", "price", "trend", "mtf", "structure", "momentum"]):
                     marketists.append(row)
                 elif any(x in low for x in ["funding", "pred", "basis", "flow", "cvd"]):
                     fundingists.append(row)
-                elif any(x in low for x in ["oi", "liq ", "imbalance", "depth", "wall"]):
+                elif any(x in low for x in ["oi", "liq ", "imbalance", "depth", "wall", "bid", "ask"]):
                     liqists.append(row)
                 else:
                     others.append(row)
 
             blocks = []
-            if marketists: blocks.append("📈 <b>Konteks Market:</b>\n" + "\n".join(marketists))
-            if fundingists: blocks.append("💰 <b>Funding & Flow:</b>\n" + "\n".join(fundingists))
-            if liqists:    blocks.append("🏦 <b>Likuiditas & Depth:</b>\n" + "\n".join(liqists))
-            if others:     blocks.append("📝 <b>Lainnya:</b>\n" + "\n".join(others))
+            if is_short and shortists:
+                blocks.append("🔴 <b>Sinyal SHORT (Bearish Pattern):</b>\n" + "\n".join(shortists))
+            if marketists:
+                blocks.append("📈 <b>Konteks Market:</b>\n" + "\n".join(marketists))
+            if fundingists:
+                blocks.append("💰 <b>Funding &amp; Flow:</b>\n" + "\n".join(fundingists))
+            if liqists:
+                blocks.append("🏦 <b>Likuiditas &amp; Depth:</b>\n" + "\n".join(liqists))
+            if others:
+                blocks.append("📝 <b>Lainnya:</b>\n" + "\n".join(others))
 
-            reasons_text = "\n\n".join(blocks)
-            # De-duplicate warning lines while preserving order
+            reasons_text = "\n\n".join(blocks) if blocks else "• <i>Tidak ada detail tersedia.</i>"
+
+            # ── De-duplicate warnings ─────────────────────────────────
             uniq_warns = []
             seen_warns = set()
             for w in (signal.breakdown.warnings or []):
@@ -2625,19 +2654,49 @@ class KaraTelegram:
                 if uniq_warns else ""
             )
 
-            # Show active system policies/features so explanation matches latest bot behavior.
+            # ── SHORT-specific risk panel ─────────────────────────────
+            short_risk_text = ""
+            if is_short:
+                fr = getattr(signal, 'funding_rate', None)
+                fr_line = ""
+                if fr is not None:
+                    fr_pct = fr * 100
+                    if fr > 0.00005:
+                        fr_line = f"• 💸 Funding rate <b>{fr_pct:.4f}%/8h</b> — tinggi, SHORT bayar ke LONG. Hold cepat!"
+                    elif fr > 0:
+                        fr_line = f"• 💸 Funding rate <b>{fr_pct:.4f}%/8h</b> — normal, risiko rendah."
+                    else:
+                        fr_line = f"• 💸 Funding rate <b>{fr_pct:.4f}%/8h</b> — negatif, SHORT <i>menerima</i> pembayaran."
+
+                threshold_line = "• 🎯 Threshold SHORT scalper: skor ≥ <b>62</b>."
+                squeeze_note = "• 🔥 Squeeze guard aktif: entry diblok jika price spike &gt;1% + OI drop &gt;5% dalam 1m."
+                unlimited_note = "• ⚠️ SHORT punya risiko loss tak terbatas secara teoritis — SL wajib terpasang."
+
+                short_risk_lines = [threshold_line, squeeze_note, unlimited_note]
+                if fr_line:
+                    short_risk_lines.insert(0, fr_line)
+
+                short_risk_text = "\n\n🔴 <b>Analisis Risiko SHORT:</b>\n" + "\n".join(short_risk_lines)
+
+            # ── System notes ──────────────────────────────────────────
             system_notes = [
-                "🚀 Full-auto execution only: sinyal dikirim saat dieksekusi.",
-                "🧭 Scalper pakai konfirmasi MTF 15m.",
-                "🧩 Market structure (HH/HL) dibobotkan ke skor.",
-                "🧠 Meta-scoring outcome aktif (boost/penalty berbasis winrate pola).",
+                "🧭 Scalper pakai konfirmasi MTF 15m untuk validasi trend.",
+                "🧩 Market structure (HH/HL + LH/LL) dibobotkan ke skor.",
+                "🕯️ Bearish rejection wick detection aktif (+8 bear pts).",
+                "📉 RSI divergence detection aktif (bearish &amp; bullish, +10 pts).",
+                "🧠 Meta-scoring aktif: skor disesuaikan dari winrate historis pola.",
             ]
+            if is_short:
+                system_notes.append("🛡️ SHORT: filter funding rate + short squeeze guard aktif.")
             system_text = "⚙️ <b>Sistem KARA Aktif:</b>\n" + "\n".join(f"• {x}" for x in system_notes)
-            
+
+            side_label = "SHORT 🔴" if is_short else "LONG 🟢"
             explanation = (
-                f"Tentu! Ini analisis mendalamku untuk <b>{signal.asset}</b>:\n\n"
+                f"Tentu! Ini analisis mendalamku untuk <b>{signal.asset} {side_label}</b> "
+                f"(skor <b>{signal.score}/100</b>):\n\n"
                 f"{reasons_text}"
-                f"{warnings_text}\n\n"
+                f"{warnings_text}"
+                f"{short_risk_text}\n\n"
                 f"{system_text}\n\n"
                 f"<i>Semoga membantu kamu membuat keputusan yang tepat! 🌸</i>"
             )
@@ -2695,7 +2754,7 @@ class KaraTelegram:
         target = version.strip().lower().lstrip("v")
         start_idx = -1
         for i, ln in enumerate(lines):
-            m = re.match(r"^\s*##\s+v?([0-9][0-9A-Za-z\.\-\_]*)\s*$", ln.strip())
+            m = re.match(r"^\s*##\s+\[?v?([0-9][0-9A-Za-z\.\-\_]*)\]?", ln.strip())
             if not m:
                 continue
             heading_ver = m.group(1).lower().lstrip("v")

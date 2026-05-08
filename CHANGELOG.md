@@ -4,6 +4,37 @@ Semua perubahan teknis dan pembaruan arsitektur pada bot KARA dicatat di sini.
 
 ---
 
+## [7.1.0] — 2026-05-08
+
+### 🔴 SHORT Signal Improvements
+- **SHORT Threshold Scalper aktif**: `min_score_short_signal` dan `min_score_short_auto` kini di-enforce di `_run_scalper()` — sebelumnya hanya ada di `_run_standard` yang tidak aktif (BUG-1 fixed)
+- **SHORT threshold diubah ke 62**: Sebelumnya 72/75, kini 62 untuk signal dan auto-execute
+- **Funding rate filter untuk SHORT**: SHORT diblok jika funding rate di bawah `short_min_funding_rate` (0.00001)
+- **Short Squeeze Detection**: SHORT diblok jika price spike >1% + OI drop >5% dalam 1 menit terakhir
+- **Bearish RSI Divergence**: Deteksi price higher-high tapi RSI lower-high → `bear_pts +10`; berlaku juga arah sebaliknya untuk LONG
+- **Bearish Rejection Wick**: Deteksi upper wick >1.5× body dengan close bearish → `bear_pts +8`
+- **Funding Cost Warning Telegram**: Saat funding rate >0.005%/8h, sinyal SHORT menampilkan estimasi biaya funding per 8h
+
+### 🧠 Intelligence Model
+- **Fitur `is_short` ditambahkan**: Feature array naik dari 9 → 10 fitur; model kini bisa membedakan pattern LONG vs SHORT
+- **Auto-invalidasi model lama**: Model pkl dengan 9 fitur otomatis dihapus dan retrain saat bot restart
+- **`side` field di training data**: `get_features()` membaca field `side` dari experience buffer DB
+
+### 📊 Meta Learning
+- **`meta_min_samples` turun ke 5**: Pattern key aktif memberikan boost/penalty setelah 5 trade (sebelumnya 10)
+
+### 🐛 Bug Fixes
+- **Double-counting PnL fix** (`paper_executor`): `_execute_partial_close` untuk full-close (SL/trailing/time/momentum exit) sebelumnya menghitung `partial_pnl` dan menambahkannya ke balance, lalu memanggil `close_position()` yang menghitung ulang — mengakibatkan PnL dan balance double-counted, dan meta pattern / ML experience buffer diisi data yang korup
+- **Live Decision Feed dedup**: Feed tidak lagi menampilkan sinyal yang sama berkali-kali akibat multi-user eksekusi; sekarang di-GROUP BY `pos_id`
+
+### 💬 Telegram — Alasan KARA
+- **Bucket baru "Sinyal SHORT"**: Reason dari wick, RSI divergence, dan squeeze muncul di bagian teratas
+- **Panel "Analisis Risiko SHORT"**: Menampilkan status funding rate (nilai aktual), threshold, squeeze guard, dan unlimited-loss warning
+- **System notes diperbarui**: Mention wick detection, RSI divergence, dan SHORT guard
+- **Header sinyal mencantumkan side**: `BTC SHORT 🔴 (skor X/100)`
+
+---
+
 ## [7.0.0] — 2026-04-13
 ### 🧠 Intelligence Layer (Major AI Update)
 - **Self-Learning AI Engine**: Mengintegrasikan `HistGradientBoostingClassifier` (Scikit-Learn) untuk memprediksi probabilitas kemenangan trade secara real-time.

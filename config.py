@@ -202,11 +202,13 @@ class ScalperConfig:
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # Scalper SL/TP (Calibrated for 25x leverage, 20-min max hold)
-    # [R:R FIX 2026-05-08] SL floor naik 0.70%→1.00% karena ATR rendah selalu kena floor.
-    # TP dinaikkan proporsional supaya R:R tetap: TP1=1.43x, TP2=2.14x.
-    sl_pct:                  float = 0.0100   # 1.00% minimum SL floor (ATR-based, actual SL = 1.5×ATR14)
-    tp1_pct:                 float = 0.0143   # 1.43% TP1 — close 55% (RR 1.43x)
-    tp2_pct:                 float = 0.0214   # 2.14% TP2 — close 75% remaining (RR 2.14x)
+    # [SL FIX 2026-05-08] SL on-chain diperlebar ke 3.0% sebagai BACKSTOP DARURAT saja.
+    # Proteksi utama adalah momentum_exit (menit ke-1, 2 candle).
+    # SL 1% sebelumnya selalu kena noise: 7/8 SL = -25% PnL padahal cuma turun 1%.
+    # 3.0% x 25x = -75% per SL on-chain (jarang kena, hanya saat bot crash / flash crash).
+    sl_pct:                  float = 0.0300   # 3.0% backstop on-chain (emergency only — di luar jangkauan noise)
+    tp1_pct:                 float = 0.0143   # 1.43% TP1 — close 55% (RR 4.8x vs new SL)
+    tp2_pct:                 float = 0.0214   # 2.14% TP2 — close 75% remaining (RR 7.1x vs new SL)
     trailing_pct:            float = 0.0050   # 0.50% trailing on remainder
 
     # Timing
@@ -215,8 +217,10 @@ class ScalperConfig:
     max_hold_soft_floor_pct: float = -0.0015  # allow delay if loss worse than -0.15%
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
-    # Score threshold — HARD THRESHOLD SCALPER = 60 (TIDAK BISA DIUBAH USER)
-    min_score_to_enter:      int   = 60       # ⚠️ HARD: scalper entry gate (TETAP 60)
+    # Score threshold — HARD THRESHOLD SCALPER (TIDAK BISA DIUBAH USER)
+    # [THRESHOLD FIX 2026-05-08] Turun 60→57. Data 55 trade: threshold 57 = PnL +14.99
+    # vs threshold 60 = PnL hanya +2.95. Skor rata-rata aktual 62.4, bukan 70+.
+    min_score_to_enter:      int   = 57       # ⚠️ HARD: scalper entry gate
     signal_cooldown_minutes: int   = 5        # 5 min cooldown scalper
     mtf_confirm_enabled:     bool  = True     # require 15m trend confirmation
     mtf_confirm_interval:    str   = "15m"
@@ -244,11 +248,13 @@ class ScalperConfig:
     mtf_score_bonus:         int = 12        # bonus if 1m aligns with 15m trend
     mtf_score_penalty:       int = -15       # penalty if counter-trend
 
-    # Scalper momentum reversal exit (pre-SL protection)
+    # Scalper momentum reversal exit (PRIMARY protection — menggantikan hard SL)
+    # [SL FIX 2026-05-08] Diperketat: aktif dari menit ke-1 (bukan ke-3), 2 candle (bukan 3).
+    # SL on-chain 0.30% hanya backstop kalau bot crash — momentum_exit adalah garis pertahanan utama.
     momentum_exit_enabled:       bool  = True
-    momentum_exit_min_minutes:   float = 3.0    # tunggu 3 menit setelah entry sebelum cek
-    momentum_exit_candles:       int   = 3       # evaluasi 3 candle 1m terakhir
-    momentum_exit_loss_floor:    float = -0.0015  # exit kalau loss <= -0.15% (was -0.3%, terlalu lambat vs SL 0.7%)
+    momentum_exit_min_minutes:   float = 1.0    # aktif dari menit ke-1 (was 3.0 — terlambat, SL kena duluan)
+    momentum_exit_candles:       int   = 2       # cukup 2 candle bearish berturut (was 3 — terlalu lambat)
+    momentum_exit_loss_floor:    float = -0.0030  # exit kalau loss <= -0.30% (was -0.15%, terlalu sensitif noise)
 
 SCALPER = ScalperConfig()
 
@@ -274,16 +280,17 @@ if TRADE_MODE == "live":
 @dataclass
 class SignalConfig:
     # ⚠️ HARD THRESHOLDS — TIDAK BISA DIUBAH USER (perubahan hanya via code)
-    # Recalibrated after Fix #5 (session bonus removed) and Fix #9 (OI magnitude removed).
-    # Scores now avg ~13-15 pts lower — thresholds lowered proportionally.
-    min_score_to_signal:     int   = 45       # was 60; recalibrated for score deflation
-    min_score_to_auto_trade: int   = 52       # was 65; data: 52 filters worst borderline trades (WR 44.4%)
+    # [THRESHOLD FIX 2026-05-08] Berdasarkan data 55 trade aktual (avg skor 62.4):
+    # threshold 57 = PnL +14.99 (50 trade) vs threshold 60 = hanya +2.95 (27 trade).
+    # Skor 60-64 justru WR 28-30% — worst range. Threshold signal tetap 45 (filter noise saja).
+    min_score_to_signal:     int   = 45       # filter awal: emit signal ke user (bukan entry gate)
+    min_score_to_auto_trade: int   = 57       # entry gate: data terbukti optimal dari 55 trade
     signal_cooldown_minutes: int   = 15       # cooldown per asset between signals
     # FIX #4: SHORT trades had 57.6% WR and net -$12.55 in audit data.
     # Structural bias: positive funding/basis almost always favors LONG on Hyperliquid.
     # Raise SHORT threshold significantly to only execute highest-conviction SHORT signals.
-    min_score_short_signal:  int   = 72       # SHORT needs 72+ to emit (vs 60 for LONG)
-    min_score_short_auto:    int   = 75       # SHORT auto-execute needs 75+ (vs 65 for LONG)
+    min_score_short_signal:  int   = 62       # SHORT needs 62+ to emit
+    min_score_short_auto:    int   = 62       # SHORT auto-execute needs 62+
 
     # Bull-Bear gap (LONG vs SHORT berbeda threshold)
     min_bull_bear_gap:       int   = 18       # LONG: minimum gap bull vs bear pts
@@ -328,7 +335,7 @@ class SignalConfig:
 
     # Meta-Scoring (Outcome-based learning)
     meta_learning_enabled:   bool = True
-    meta_min_samples:        int = 10          # n=10: CI [37%-90%] acceptable, avoids pure noise at n=5
+    meta_min_samples:        int = 5           # n=5: aktivasi lebih cepat untuk bootstrap data
     meta_boost_threshold:    float = 0.68     # winrate > 68% = boost
     meta_penalty_threshold:  float = 0.35     # winrate < 35% = penalty (tightened from 0.40)
     meta_max_delta:          int = 10         # reduced from 15: smaller nudge, less noise

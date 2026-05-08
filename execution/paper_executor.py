@@ -415,10 +415,18 @@ class PaperExecutor:
     ) -> Dict:
         """Handle TP1, TP2, trailing, or SL partial/full close."""
         # SL must fill at stop_loss price, not current_price.
-        # current_price may have rebounded above SL within the 15s scan interval,
-        # which would produce a positive PnL on a stop_loss exit — incorrect.
         fill_price = pos.stop_loss if action["action"] == "stop_loss" else current_price
 
+        # Full-close actions (SL, trailing, time, momentum): delegate entirely to
+        # close_position() which owns the balance update + meta + ML labeling.
+        # Do NOT touch balance/pnl here — close_position handles it all.
+        if action["action"] in ("trailing_stop", "stop_loss", "time_exit", "momentum_exit"):
+            if pos.status == PositionStatus.OPEN:
+                result = await self.close_position(pos.position_id, fill_price, action["action"])
+                return {**action, "pnl": (result or {}).get("pnl", 0), "position_id": pos.position_id}
+            return {**action, "pnl": 0, "position_id": pos.position_id}
+
+        # Partial close (TP1 / TP2): calculate and apply partial PnL only
         close_ratio = action["close_ratio"]
         close_size  = pos.size_current * close_ratio
 
@@ -426,15 +434,15 @@ class PaperExecutor:
             pos.floating_pct(fill_price) *
             close_size * pos.entry_price
         )
-        
+
         # Release proportional margin back to balance
         margin_to_release = pos.margin_usd * close_ratio
-        
+
         # Update executor state
         self._balance      += partial_pnl
         self._available    += partial_pnl + margin_to_release
         self._used_margin  -= margin_to_release
-        
+
         # Update position state
         pos.pnl_realized   += partial_pnl
         pos.margin_usd     -= margin_to_release
@@ -452,13 +460,6 @@ class PaperExecutor:
             pos.tp2_hit = True
             log.info(f" [PAPER] TP2 hit on {pos.asset}")
 
-        elif action["action"] in ("trailing_stop", "stop_loss", "time_exit", "momentum_exit"):
-            # Full close — guard: only if still OPEN
-            if pos.status == PositionStatus.OPEN:
-                await self.close_position(
-                    pos.position_id, fill_price, action["action"]
-                )
-
         # Update trailing high
         if pos.trailing_active and pos.status == PositionStatus.OPEN:
             if pos.side == Side.LONG:
@@ -466,7 +467,7 @@ class PaperExecutor:
             else:
                 pos.trailing_high = min(pos.trailing_high, fill_price)
 
-        # Persist AFTER all state updates so DB always has the correct tp1_hit, stop_loss, trailing_high
+        # Persist partial state to DB
         from core.db import user_db
         if pos.status == PositionStatus.OPEN:
             user_db.save_paper_position(self.chat_id, pos)

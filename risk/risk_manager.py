@@ -443,15 +443,12 @@ class RiskManager:
         return contracts * signal.entry_price * sl_pct
 
     def get_risk_pct(self, score: int, equity: float) -> float:
-        # Thresholds diturunkan karena skor tidak inflasi lagi (avg ~60-75)
+        # 2-tier berdasarkan data 55 trade aktual (avg skor 62.4).
+        # Skor 65+ WR 33% — tidak lebih baik dari 57-64 (50%), jadi tidak dapat tier lebih tinggi.
         if score >= 65:
-            risk_pct = 0.035   # 3.5% high conviction
-        elif score >= 60:
-            risk_pct = 0.030   # 3.0%
-        elif score >= 55:
-            risk_pct = 0.025   # 2.5%
+            risk_pct = 0.025   # 2.5% — WR 33%, moderat
         else:
-            risk_pct = 0.020   # 2.0% minimum
+            risk_pct = 0.020   # 2.0% — baseline untuk 57-64
         
         # Equity protection multiplier
         ratio = equity / self._session_start_balance if self._session_start_balance > 0 else 1.0
@@ -742,7 +739,55 @@ class RiskManager:
             new_low = min(position.trailing_high, current_price)
             max_floating = (position.entry_price - new_low) / position.entry_price
 
-        # ── Rule A: Hard SL ───────────────────────────────────────────────
+        cfg = self._cfg()
+        # Fix 5: ratios now come from config (0.25 / 0.50)
+        tp1_ratio = getattr(cfg, 'tp1_close_ratio', 0.25)
+        tp2_ratio = getattr(cfg, 'tp2_close_ratio', 0.50)
+
+        # ── Rule E2 (EARLY): Scalper momentum reversal — runs BEFORE hard SL ─
+        # Dipindah ke depan supaya keluar lebih awal sebelum backstop SL 0.30% kena.
+        # SL 0.30% on-chain adalah emergency backstop (bot crash), bukan proteksi utama.
+        if getattr(position, 'trade_mode', 'scalper') == 'scalper' and not position.tp1_hit:
+            scfg = SCALPER
+            if getattr(scfg, 'momentum_exit_enabled', True):
+                now    = _dt.now(_tz.utc)
+                opened = position.opened_at
+                if opened.tzinfo is None:
+                    opened = opened.replace(tzinfo=_tz.utc)
+                hold_minutes = (now - opened).total_seconds() / 60.0
+
+                loss_floor = getattr(scfg, 'momentum_exit_loss_floor', -0.003)
+                n_candles  = getattr(scfg, 'momentum_exit_candles', 2)
+                min_minutes = getattr(scfg, 'momentum_exit_min_minutes', 1.0)
+                candle_history = getattr(position, 'candle_closes', [])
+
+                if (
+                    hold_minutes >= min_minutes
+                    and len(candle_history) >= n_candles
+                    and floating <= loss_floor
+                ):
+                    recent = candle_history[-n_candles:]
+                    if position.side == Side.LONG:
+                        reversal = all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
+                    else:
+                        reversal = all(recent[i] > recent[i - 1] for i in range(1, len(recent)))
+
+                    if reversal:
+                        return {
+                            "action":      "momentum_exit",
+                            "close_ratio": 1.0,
+                            "price":       current_price,
+                            "pnl":         position.pnl_unrealized,
+                            "position_id": position.position_id,
+                            "message":     (
+                                f"↩️ Momentum reversal ({n_candles} candle berturut). "
+                                f"Exit pre-SL. PnL: {floating*100:.2f}%."
+                            )
+                        }
+
+        # ── Rule A: Hard SL (backstop — emergency only untuk scalper) ────────
+        # Untuk scalper: SL 0.30% adalah backstop kalau bot crash/momentum exit gagal.
+        # Untuk standard: SL normal seperti biasa.
         if (position.side == Side.LONG and current_price <= position.stop_loss) or \
            (position.side == Side.SHORT and current_price >= position.stop_loss):
             return {
@@ -754,11 +799,6 @@ class RiskManager:
                     f"Loss: {floating*100:.2f}%."
                 )
             }
-
-        cfg = self._cfg()
-        # Fix 5: ratios now come from config (0.25 / 0.50)
-        tp1_ratio = getattr(cfg, 'tp1_close_ratio', 0.25)
-        tp2_ratio = getattr(cfg, 'tp2_close_ratio', 0.50)
 
         # ── Rule B: TP1 hit — close 25%, move SL to breakeven+0.1% ──────
         tp1_hit_now = (
@@ -831,7 +871,7 @@ class RiskManager:
                             )
                         }
 
-        # ── Rule E: Scalper max-hold + momentum reversal exit ────────────
+        # ── Rule E: Scalper max-hold force exit ──────────────────────────
         if getattr(position, 'trade_mode', 'scalper') == 'scalper':
             scfg = SCALPER
             max_hold   = getattr(scfg, 'max_hold_minutes', 20.0)
@@ -844,44 +884,10 @@ class RiskManager:
                 opened = opened.replace(tzinfo=_tz.utc)
             hold_minutes = (now - opened).total_seconds() / 60.0
 
-            # ── Rule E2: Momentum reversal exit (pre-SL protection) ──────
-            # Keluar lebih awal kalau candle 1m berbalik arah sebelum SL hit.
-            # Hanya aktif setelah 3 menit (hindari noise awal entry) dan
-            # hanya kalau posisi sudah merugi melewati floor (bukan sekadar noise).
-            if (
-                not position.tp1_hit
-                and getattr(scfg, 'momentum_exit_enabled', True)
-                and hold_minutes >= getattr(scfg, 'momentum_exit_min_minutes', 3.0)
-            ):
-                loss_floor = getattr(scfg, 'momentum_exit_loss_floor', -0.003)
-                n_candles  = getattr(scfg, 'momentum_exit_candles', 3)
-                candle_history = getattr(position, 'candle_closes', [])
-
-                if len(candle_history) >= n_candles and floating <= loss_floor:
-                    recent = candle_history[-n_candles:]
-                    # Momentum reversal: semua candle terakhir berlawanan arah posisi
-                    if position.side == Side.LONG:
-                        reversal = all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
-                    else:
-                        reversal = all(recent[i] > recent[i - 1] for i in range(1, len(recent)))
-
-                    if reversal:
-                        return {
-                            "action":      "momentum_exit",
-                            "close_ratio": 1.0,
-                            "price":       current_price,
-                            "pnl":         position.pnl_unrealized,
-                            "position_id": position.position_id,
-                            "message":     (
-                                f"↩️ Momentum reversal ({n_candles} candle bearish/bullish berturut). "
-                                f"Exit pre-SL. PnL: {floating*100:.2f}%."
-                            )
-                        }
-
             # ── Rule E1: Max-hold force exit ─────────────────────────────
             if hold_minutes >= max_hold:
-                if floating > soft_floor and hold_minutes < (max_hold + grace):
-                    pass  # grace period — wait if loss is mild or position is profitable
+                if floating <= soft_floor and hold_minutes < (max_hold + grace):
+                    pass  # grace period — tahan selama loss masih dalam batas soft_floor
                 else:
                     return {
                         "action":      "time_exit",

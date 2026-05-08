@@ -311,6 +311,34 @@ class ScoringEngine:
         # 3. Fetch 15m MTF trend
         mtf_trend = await self._fetch_15m_mtf_data(asset)
 
+        # Short Squeeze Detection: price spike + OI drop dalam 1m = squeeze risk → blok SHORT
+        _squeeze_detected = False
+        _squeeze_reason = ""
+        _now_ts = time.time()
+        _snaps = self._oi_snapshots.get(asset, [])
+        if len(_snaps) >= 2:
+            _snap_1m_ago = [v for t, v in _snaps if t >= _now_ts - 90]  # last 90s
+            _snap_prev = [v for t, v in _snaps if t < _now_ts - 90 and t >= _now_ts - 180]
+            if _snap_1m_ago and _snap_prev:
+                _oi_now = _snap_1m_ago[-1]
+                _oi_prev = _snap_prev[-1]
+                if _oi_prev > 0:
+                    _oi_delta_pct = (_oi_now - _oi_prev) / _oi_prev
+                    # Ambil price change dari candles terakhir 1m
+                    _price_1m_ago = None
+                    if len(candles) >= 2:
+                        try:
+                            _price_1m_ago = float(candles[-2].get("c", 0)) if isinstance(candles[-2], dict) else None
+                        except (TypeError, ValueError, AttributeError):
+                            _price_1m_ago = None
+                    if _price_1m_ago and _price_1m_ago > 0:
+                        _price_chg = (mark_price - _price_1m_ago) / _price_1m_ago
+                        if _price_chg > 0.010 and _oi_delta_pct < -0.05:
+                            _squeeze_detected = True
+                            _squeeze_reason = (
+                                f"price +{_price_chg*100:.1f}% + OI {_oi_delta_pct*100:.1f}%"
+                            )
+
         # 4. Compute scalper indicators
         score, side, reasons = self._calculate_scalper_score(asset, mark_price, candles, mtf_trend)
 
@@ -324,6 +352,25 @@ class ScoringEngine:
             log.debug(f"[SCALPER] {asset}: score {score} < effective_threshold {effective_threshold}")
             return None, score
 
+        # SHORT-specific filters: higher threshold + funding rate confirmation + squeeze guard
+        if side == Side.SHORT:
+            short_min = getattr(config.SIGNAL, 'min_score_short_signal', 62)
+            if score < short_min:
+                log.debug(f"[SCALPER] {asset}: SHORT score {score} < {short_min}, blocked")
+                return None, score
+
+            cached_funding = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
+            if cached_funding:
+                fr = cached_funding[-1] if isinstance(cached_funding[-1], float) else float(cached_funding[-1].get('fundingRate', 0) if isinstance(cached_funding[-1], dict) else cached_funding[-1])
+                min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', 0.00001)
+                if fr < min_fr:
+                    log.debug(f"[SCALPER] {asset}: SHORT BLOCKED: funding {fr:.6f} < min {min_fr}")
+                    return None, score
+
+            if _squeeze_detected:
+                log.debug(f"[SCALPER] {asset}: SHORT BLOCKED: potential squeeze ({_squeeze_reason})")
+                return None, score
+
         # 3d. Apply Meta-Learning adjustment
         meta_delta, meta_reason, pattern_key = self._apply_meta_learning(asset, "scalper", side, score)
         if meta_delta != 0:
@@ -336,6 +383,13 @@ class ScoringEngine:
         signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol, trend_pct)
         signal.meta_pattern_key = pattern_key
         signal.meta_score_delta = meta_delta
+
+        # Attach last-known funding rate for Telegram warning
+        _fr_cache = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
+        if _fr_cache:
+            _last_fr = _fr_cache[-1]
+            signal.funding_rate = _last_fr if isinstance(_last_fr, float) else float(_last_fr.get('fundingRate', 0) if isinstance(_last_fr, dict) else _last_fr)
+
         return signal, score
 
     async def _fetch_scalper_mtf_candles(self, asset: str) -> list:
@@ -555,6 +609,43 @@ class ScoringEngine:
             else:
                 reasons.append(f"📊 RSI neutral ({rsi:.1f})")
 
+            # ── Bearish RSI Divergence: price HH tapi RSI LH ───────────
+            # Butuh minimal 20 candles: hitung RSI di t-5 dan t-10 untuk bandingan
+            if len(closes) >= 20:
+                def _rsi_at(cl, window=14):
+                    g = [max(cl[i] - cl[i-1], 0) for i in range(1, len(cl))]
+                    l = [max(cl[i-1] - cl[i], 0) for i in range(1, len(cl))]
+                    ag = sum(g[-window:]) / window
+                    al = sum(l[-window:]) / window
+                    return (100 - 100 / (1 + ag / al)) if al > 0 else 100.0
+
+                rsi_now = rsi
+                rsi_5ago = _rsi_at(closes[:-5])
+                price_now = closes[-1]
+                price_5ago = closes[-6]
+
+                if price_now > price_5ago * 1.002 and rsi_now < rsi_5ago - 3:
+                    bear_pts += 10
+                    reasons.append(f"📉 Bearish RSI divergence (price ↑ tapi RSI {rsi_5ago:.0f}→{rsi_now:.0f}) → SHORT")
+                elif price_now < price_5ago * 0.998 and rsi_now > rsi_5ago + 3:
+                    bull_pts += 10
+                    reasons.append(f"📈 Bullish RSI divergence (price ↓ tapi RSI {rsi_5ago:.0f}→{rsi_now:.0f}) → LONG")
+
+        # ── Bearish Rejection Wick Detection (SHORT signal) ──────────────
+        if len(closes) >= 3 and len(opens) >= 3 and len(candles) >= 1:
+            last_c = candles[-1] if isinstance(candles[-1], dict) else {}
+            try:
+                c_high = float(last_c.get("h", closes[-1]))
+                c_open = opens[-1]
+                c_close = closes[-1]
+                body = abs(c_close - c_open)
+                upper_wick = c_high - max(c_close, c_open)
+                if body > 0 and upper_wick > 1.5 * body and c_close < c_open:
+                    bear_pts += 8
+                    reasons.append(f"🕯️ Rejection wick (wick {upper_wick/body:.1f}× body) → SHORT signal")
+            except (TypeError, ValueError):
+                pass
+
         # ── Short-term CVD (last 80 trades from cache) ────────────────
         recent_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
         if len(recent_trades) >= 20:
@@ -722,7 +813,8 @@ class ScoringEngine:
                 bd=breakdown,
                 funding_rate=0.0,   # scalper tidak fetch funding — pakai 0.0 konsisten
                 realized_vol=realized_vol,
-                trend_pct=trend_pct
+                trend_pct=trend_pct,
+                side=side.value if hasattr(side, 'value') else str(side)
             )
             edge = intelligence_model.predict_edge(features)
         else:
@@ -1407,7 +1499,8 @@ class ScoringEngine:
                 bd=breakdown,
                 funding_rate=funding_rate,
                 realized_vol=realized_vol,
-                trend_pct=trend_pct
+                trend_pct=trend_pct,
+                side=side.value if hasattr(side, 'value') else str(side)
             )
             expected_edge = intelligence_model.predict_edge(features)
         else:

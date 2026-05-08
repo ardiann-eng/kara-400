@@ -177,6 +177,7 @@ class TradeSignal(BaseModel):
     suggested_size_usd: Optional[float] = None
     suggested_contracts: Optional[float] = None
     realized_vol:       float = 0.02             # daily realized vol — used for trail distance
+    funding_rate:       Optional[float] = None   # last known funding rate at signal time
 
     # Meta
     timestamp:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -378,14 +379,14 @@ class UserConfig(BaseModel):
     
     # ── Standard Mode Settings ────────────────
     # Recalibrated: session bonus and OI magnitude removed from score (~13-15 pts lower).
-    std_min_score_to_signal:     int = 45   # was 58, recalibrated after score inflation removed
-    std_min_score_to_auto_trade: int = 52   # was 65; threshold 52 filters worst trades (WR 44.4%)
+    std_min_score_to_signal:     int = 45   # emit signal ke user (bukan entry gate)
+    std_min_score_to_auto_trade: int = 57   # entry gate: data 55 trade — threshold 57 optimal
     std_max_leverage:            int = 10
     std_max_concurrent_positions: int = 10
 
     # ── Scalper Mode Settings ─────────────────
-    scl_min_score_to_signal:     int = 45   # was 50, recalibrated after session removal
-    scl_min_score_to_auto_trade: int = 52   # was 57, recalibrated
+    scl_min_score_to_signal:     int = 45   # emit signal ke user (bukan entry gate)
+    scl_min_score_to_auto_trade: int = 57   # entry gate: sama dengan standard (data-driven)
     scl_max_leverage:            int = 20
     scl_max_concurrent_positions: int = 5   # approved: 5 concurrent scalper positions
 

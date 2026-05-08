@@ -49,7 +49,22 @@ class IntelligenceModel:
             return
 
         try:
-            self.model = joblib.load(MODEL_PATH)
+            candidate = joblib.load(MODEL_PATH)
+            # Validate feature count: model harus dilatih dengan 10 fitur (9 + is_short).
+            # Model lama (9 fitur) akan mismatch — hapus dan retrain fresh.
+            expected_features = 10
+            n_features = getattr(candidate, 'n_features_in_', None)
+            if n_features is not None and n_features != expected_features:
+                log.warning(
+                    f"[Intelligence] Model pkl punya {n_features} fitur, butuh {expected_features} "
+                    f"(feature 'is_short' ditambahkan) — model dihapus, akan retrain."
+                )
+                try:
+                    os.remove(MODEL_PATH)
+                except Exception:
+                    pass
+                return
+            self.model = candidate
             self.last_train_samples = labeled_count
             self.is_ready = True
             log.info(f"[Intelligence] Model loaded dan valid ({labeled_count} training samples).")
@@ -59,9 +74,10 @@ class IntelligenceModel:
 
     def get_features(self, row):
         """Convert a row from experience buffer into a feature array"""
-        # We must align this perfectly with the predict method.
-        # Format: [score, meta_delta, oi_score, liq_score, ob_score, session_bonus, funding_rate, realized_vol, trend_pct]
+        # Format: [score, meta_delta, oi_score, liq_score, ob_score, session_bonus, funding_rate, realized_vol, trend_pct, is_short]
         try:
+            side_val = row.get('side', 'long')
+            is_short = float(1 if str(side_val).lower() == 'short' else 0)
             return [
                 float(row.get('score', 0)),
                 float(row.get('meta_delta', 0)),
@@ -71,10 +87,11 @@ class IntelligenceModel:
                 float(row.get('session_bonus', 0)),
                 float(row.get('funding_rate', 0)),
                 float(row.get('realized_vol', 0)),
-                float(row.get('trend_pct', 0))
+                float(row.get('trend_pct', 0)),
+                is_short
             ]
         except Exception:
-            return [0.0] * 9
+            return [0.0] * 10
 
     def retrain(self):
         if self.is_training:

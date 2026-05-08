@@ -970,27 +970,34 @@ async def get_ml_meta_patterns():
 
 @app.get("/api/ml_decision_feed")
 async def get_ml_decision_feed(chat_id: str = None):
-    """Last 30 meta scoring decisions from trade history."""
+    """Last 30 meta scoring decisions from trade history, one entry per signal (deduped by pos_id)."""
     try:
-        import sqlite3
+        import sqlite3, json as _json
         conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+
+        # Fetch more rows than needed so dedup still yields 30 unique signals.
+        # Dedup by pos_id: one signal = one entry regardless of how many users executed it.
+        # Use MAX(created_at) to pick the most-recent row per pos_id so ORDER BY still works.
         if chat_id:
             rows = conn.execute(
-                "SELECT trade_id, asset, side, pnl_usd, pnl_pct, data, created_at FROM trade_history "
+                "SELECT asset, side, pnl_usd, pnl_pct, data, MAX(created_at) AS created_at "
+                "FROM trade_history "
                 "WHERE json_extract(data, '$.type') = 'close' AND chat_id = ? "
+                "GROUP BY json_extract(data, '$.pos_id') "
                 "ORDER BY created_at DESC LIMIT 30",
                 (str(chat_id),)
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT trade_id, asset, side, pnl_usd, pnl_pct, data, created_at FROM trade_history "
+                "SELECT asset, side, pnl_usd, pnl_pct, data, MAX(created_at) AS created_at "
+                "FROM trade_history "
                 "WHERE json_extract(data, '$.type') = 'close' "
+                "GROUP BY json_extract(data, '$.pos_id') "
                 "ORDER BY created_at DESC LIMIT 30"
             ).fetchall()
         conn.close()
 
-        import json as _json
         feed = []
         for r in rows:
             try:
