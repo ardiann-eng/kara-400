@@ -68,8 +68,8 @@ class RiskManager:
             "session_start_balance": self._session_start_balance,
             "kill_switch":    self._kill_switch,
             "last_reset_day": self._last_reset_day,
-            # Store as ISO string so it survives restart (monotonic() would not)
             "cooldown_until": self._cooldown_until.isoformat() if self._cooldown_until else None,
+            "asset_trade_times": self._asset_trade_times,
         })
 
     def _load_risk_state(self):
@@ -95,6 +95,15 @@ class RiskManager:
                         )
                 except Exception:
                     pass
+
+            # Restore per-asset trade times, drop stale keys (yesterday's date)
+            raw_att = state.get("asset_trade_times", {})
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            self._asset_trade_times = {
+                k: v for k, v in raw_att.items() if k.endswith(today)
+            }
+            if self._asset_trade_times:
+                log.info(f"[REPEAT GUARD] Restored trade times: {list(self._asset_trade_times.keys())}")
 
             # Validation: if session_start_balance is 0 but we have a peak, use that as fallback
             # to prevent 'amnesia' during mid-day restarts
@@ -172,6 +181,7 @@ class RiskManager:
         self._asset_trade_times[key].append(time.time())
         count = len(self._asset_trade_times[key])
         log.info(f"[REPEAT GUARD] {asset}: trade ke-{count} hari ini dicatat.")
+        self._persist_risk_state()   # survive restart
 
     # ──────────────────────────────────────────
     # DAILY RESET

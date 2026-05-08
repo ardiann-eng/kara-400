@@ -202,14 +202,12 @@ class ScalperConfig:
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # Scalper SL/TP (Calibrated for 25x leverage, 20-min max hold)
-    # [R:R FIX 2026-05-07] Audit: weighted avg loss > avg win karena TP terlalu dekat.
-    # TP1 dinaikkan 0.90%→1.00%, TP2 1.20%→1.50%, trailing 0.40%→0.35%.
-    # SL sedikit diperketat 0.80%→0.70% untuk improve R:R.
-    # R:R baru: TP1=1.43x, TP2=2.14x. EV per trade naik ~70x vs sebelumnya.
-    sl_pct:                  float = 0.0070   # 0.70% minimum SL floor (ATR-based, actual SL = 1.5×ATR14)
-    tp1_pct:                 float = 0.0100   # 1.00% TP1 — close 55% (was 0.90%, RR 1.43x)
-    tp2_pct:                 float = 0.0150   # 1.50% TP2 — close 75% remaining (was 1.20%, RR 2.14x)
-    trailing_pct:            float = 0.0035   # 0.35% trailing on remainder (was 0.40%)
+    # [R:R FIX 2026-05-08] SL floor naik 0.70%→1.00% karena ATR rendah selalu kena floor.
+    # TP dinaikkan proporsional supaya R:R tetap: TP1=1.43x, TP2=2.14x.
+    sl_pct:                  float = 0.0100   # 1.00% minimum SL floor (ATR-based, actual SL = 1.5×ATR14)
+    tp1_pct:                 float = 0.0143   # 1.43% TP1 — close 55% (RR 1.43x)
+    tp2_pct:                 float = 0.0214   # 2.14% TP2 — close 75% remaining (RR 2.14x)
+    trailing_pct:            float = 0.0050   # 0.50% trailing on remainder
 
     # Timing
     max_hold_minutes:        float = 20.0     # force close after 20min if no TP hit (was 12)

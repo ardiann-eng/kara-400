@@ -676,9 +676,9 @@ class ScoringEngine:
         # SL floor dinaikkan per regime karena vol_cache bisa stale (TTL 60m),
         # sehingga realized_vol rendah tidak membuat SL terlalu ketat saat regime HIGH_VOL.
         if regime in (MarketRegime.HIGH_VOL, MarketRegime.EXTREME):
-            SL_FLOOR = max(scfg.sl_pct, 0.0120)   # min 1.2% di high/extreme vol
+            SL_FLOOR = max(scfg.sl_pct, 0.0150)   # min 1.5% di high/extreme vol
         else:
-            SL_FLOOR = scfg.sl_pct                  # 0.70% di normal/low vol
+            SL_FLOOR = scfg.sl_pct                  # 1.0% di normal/low vol
         SL_CEILING = 0.0200               # 2.0% hard cap
         ATR_MULT   = 1.5                  # SL = 1.5 × ATR14
 
