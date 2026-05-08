@@ -35,10 +35,20 @@ class TradeExcelLogger:
             except Exception as e:
                 log.error(f" Failed to create Excel log: {e}")
 
+    def _recreate_file(self):
+        """Recreate Excel file from scratch (called when file is corrupt)."""
+        try:
+            if os.path.exists(self.file_path):
+                os.remove(self.file_path)
+            df = pd.DataFrame(columns=self._columns)
+            df.to_excel(self.file_path, index=False, engine='openpyxl')
+            log.info(f"Excel log recreated (was corrupt): {self.file_path}")
+        except Exception as e:
+            log.warning(f"Excel recreate failed: {e}")
+
     def log_trade(self, chat_id: str, data: Dict[str, Any]):
         """Append a new trade action to the Excel file."""
         try:
-            # Prepare row data
             row = {
                 "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "Chat ID": str(chat_id),
@@ -56,30 +66,35 @@ class TradeExcelLogger:
                 "Position ID": data.get("pos_id", "")
             }
 
-            # Read, append, write
-            if os.path.exists(self.file_path):
-                # Ensure we specify that header is on row 0
-                df = pd.read_excel(self.file_path, engine='openpyxl', header=0)
-            else:
+            try:
+                if os.path.exists(self.file_path):
+                    df = pd.read_excel(self.file_path, engine='openpyxl', header=0)
+                else:
+                    df = pd.DataFrame(columns=self._columns)
+            except Exception:
+                # File corrupt — recreate silently
+                self._recreate_file()
                 df = pd.DataFrame(columns=self._columns)
-            
+
             new_row_df = pd.DataFrame([row])
-            
-            # Use concat but only if new_row_df has data
             if not new_row_df.empty:
                 df = pd.concat([df, new_row_df], ignore_index=True)
                 df.to_excel(self.file_path, index=False, engine='openpyxl')
-                log.debug(f" Logged trade to Excel for {chat_id}: {row['Asset']} {row['Action']}")
-            
+                log.debug(f"Logged trade to Excel for {chat_id}: {row['Asset']} {row['Action']}")
+
         except Exception as e:
-            log.error(f" Failed to log trade to Excel: {e}")
+            log.debug(f"Excel log skipped: {e}")
 
     def clear_trades_for_user(self, chat_id: str) -> int:
         """Hapus semua baris trade milik chat_id dari Excel. Returns jumlah baris dihapus."""
         try:
             if not os.path.exists(self.file_path):
                 return 0
-            df = pd.read_excel(self.file_path, engine='openpyxl', header=0)
+            try:
+                df = pd.read_excel(self.file_path, engine='openpyxl', header=0)
+            except Exception:
+                self._recreate_file()
+                return 0
             mask = df["Chat ID"].astype(str) == str(chat_id)
             count = int(mask.sum())
             if count > 0:
@@ -88,7 +103,7 @@ class TradeExcelLogger:
                 log.info(f"clear_trades_for_user: removed {count} rows for chat_id={chat_id}")
             return count
         except Exception as e:
-            log.error(f"Failed to clear Excel trades for {chat_id}: {e}")
+            log.debug(f"Failed to clear Excel trades for {chat_id}: {e}")
             return 0
 
 

@@ -1134,7 +1134,15 @@
         <div class="glass p-4 md:p-5 mb-4">
           <div class="flex items-center justify-between mb-4">
             <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(196,181,253,.4)">Meta Pattern Heatmap</div>
-            <div class="text-xs font-mono" style="color:rgba(196,181,253,.3)">Win Rate per Pola Trading</div>
+            <div class="flex items-center gap-2">
+              <div class="text-xs font-mono" style="color:rgba(196,181,253,.3)">Win Rate per Pola Trading</div>
+              <button onclick="exportMlData('meta')" title="Export Meta Pattern CSV"
+                style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:7px;border:1px solid rgba(139,92,246,.35);background:rgba(139,92,246,.1);color:#c4b5fd;font-size:11px;font-family:JetBrains Mono,monospace;cursor:pointer;transition:background .15s"
+                onmouseover="this.style.background='rgba(139,92,246,.2)'" onmouseout="this.style.background='rgba(139,92,246,.1)'">
+                <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export CSV
+              </button>
+            </div>
           </div>
           <!-- Legend -->
           <div class="flex gap-4 mb-3 text-xs" style="color:rgba(196,181,253,.4)">
@@ -1151,7 +1159,23 @@
         <div class="glass p-4 md:p-5">
           <div class="flex items-center justify-between mb-4">
             <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(196,181,253,.4)">Live Decision Feed</div>
-            <div class="text-xs font-mono" style="color:rgba(196,181,253,.3)">30 Trade Terakhir + Meta Reasoning</div>
+            <div class="flex items-center gap-2">
+              <div class="text-xs font-mono" style="color:rgba(196,181,253,.3)">30 Trade Terakhir + Meta Reasoning</div>
+              <div style="display:flex;gap:6px">
+                <button onclick="exportMlData('combined')" title="Export Combined: winrate + score delta per coin"
+                  style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:7px;border:1px solid rgba(52,211,153,.3);background:rgba(52,211,153,.08);color:#34d399;font-size:11px;font-family:JetBrains Mono,monospace;cursor:pointer;transition:background .15s"
+                  onmouseover="this.style.background='rgba(52,211,153,.18)'" onmouseout="this.style.background='rgba(52,211,153,.08)'">
+                  <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Per Coin
+                </button>
+                <button onclick="exportMlData('experience')" title="Export raw ML experience buffer"
+                  style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:7px;border:1px solid rgba(196,181,253,.2);background:rgba(196,181,253,.06);color:rgba(196,181,253,.6);font-size:11px;font-family:JetBrains Mono,monospace;cursor:pointer;transition:background .15s"
+                  onmouseover="this.style.background='rgba(196,181,253,.14)'" onmouseout="this.style.background='rgba(196,181,253,.06)'">
+                  <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Raw Data
+                </button>
+              </div>
+            </div>
           </div>
           <div id="ml-decision-feed" class="flex flex-col gap-2"></div>
           <div id="ml-feed-empty" class="text-xs py-4 text-center" style="color:rgba(196,181,253,.3);display:none">Belum ada trade tercatat.</div>
@@ -1942,6 +1966,51 @@
       loadMlStatus();
       loadMetaPatterns();
       loadDecisionFeed();
+    }
+
+    // ── ML Export ────────────────────────────────────────────────────────────
+    async function exportMlData(type) {
+      const labels = {
+        meta: 'Meta Pattern (winrate + score delta)',
+        combined: 'Per Coin Summary (winrate + delta)',
+        experience: 'Raw ML Experience Buffer',
+      };
+      const btn = event.currentTarget;
+      const origText = btn.innerHTML;
+      btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Exporting...`;
+      btn.disabled = true;
+
+      try {
+        const token = localStorage.getItem('kara_token') || '';
+        const resp = await fetch(`/api/ml_export?type=${type}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const cd   = resp.headers.get('Content-Disposition') || '';
+        const match = cd.match(/filename=([^\s;]+)/);
+        const fname = match ? match[1] : `kara_ml_${type}_export.csv`;
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = fname;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch(e) {
+        alert(`Export gagal: ${e.message}`);
+        console.error('ML Export error:', e);
+      } finally {
+        btn.innerHTML = origText;
+        btn.disabled  = false;
+      }
+    }
+
+    // Inject spin animation once
+    if (!document.getElementById('ml-export-style')) {
+      const s = document.createElement('style');
+      s.id = 'ml-export-style';
+      s.textContent = '@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin .8s linear infinite;display:inline-block}';
+      document.head.appendChild(s);
     }
 
     setInterval(() => {

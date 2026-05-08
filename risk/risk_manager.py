@@ -322,12 +322,12 @@ class RiskManager:
         
         # Apply the triple cap
         lev = min(actual_lev, user_max_lev, exchange_max)
-        
+
         if lev != signal.suggested_leverage:
-             log.info(
-                 f"🛡️ [RISK] {signal.asset} Leverage capped: "
-                 f"signal={signal.suggested_leverage}x, user={user_max_lev}x, exchange={exchange_max}x -> using {lev}x"
-             )
+            log.debug(
+                f"🛡️ [RISK] {signal.asset} Leverage capped: "
+                f"signal={signal.suggested_leverage}x, user={user_max_lev}x, exchange={exchange_max}x -> using {lev}x"
+            )
 
         # ── 1. Determine size_usd (margin) — mode-aware ───────────────
         cfg = self._cfg()
@@ -772,7 +772,7 @@ class RiskManager:
                         }
 
         # ── Rule E: Scalper max-hold + momentum reversal exit ────────────
-        if getattr(position, 'trade_mode', 'standard') == 'scalper':
+        if getattr(position, 'trade_mode', 'scalper') == 'scalper':
             scfg = SCALPER
             max_hold   = getattr(scfg, 'max_hold_minutes', 20.0)
             grace      = getattr(scfg, 'max_hold_grace_minutes', 8.0)
@@ -820,8 +820,8 @@ class RiskManager:
 
             # ── Rule E1: Max-hold force exit ─────────────────────────────
             if hold_minutes >= max_hold:
-                if floating <= soft_floor and hold_minutes < (max_hold + grace):
-                    pass  # grace period — wait
+                if floating > soft_floor and hold_minutes < (max_hold + grace):
+                    pass  # grace period — wait if loss is mild or position is profitable
                 else:
                     return {
                         "action":      "time_exit",
@@ -832,88 +832,6 @@ class RiskManager:
                         "message":     (
                             f"⏱️ Scalper max-hold {hold_minutes:.0f}m — exit paksa. "
                             f"PnL: {floating*100:.2f}%."
-                        )
-                    }
-
-        # ── Rule F: Standard momentum-based time exit (Fix 6) ────────────
-        # time_exit 72.2% WR proves signals are right, but hard 12-min cuts
-        # winners mid-move. New: only exit on reversal or flatline, NEVER
-        # exit if above TP1 (let trail handle it).
-        if getattr(position, 'trade_mode', 'standard') == 'standard':
-            now    = _dt.now(_tz.utc)
-            opened = position.opened_at
-            if opened.tzinfo is None:
-                opened = opened.replace(tzinfo=_tz.utc)
-            hold_minutes = (now - opened).total_seconds() / 60.0
-
-            # Condition C: NEVER time-exit above TP1 — let trailing close it
-            if position.tp1_hit:
-                pass  # trailing stop will handle this, not time exit
-
-            else:
-                cfg_risk = RISK
-                flatline_pct  = getattr(cfg_risk, 'time_exit_flatline_pct',  0.0015)
-                flatline_mins = getattr(cfg_risk, 'time_exit_flatline_mins', 30)
-                pullback_pct  = getattr(cfg_risk, 'time_exit_pullback_pct',  0.20)
-                hard_hours    = getattr(cfg_risk, 'time_exit_hard_hours',    6.0)
-
-                # Condition A: momentum reversed — price pulled back 20% of TP1 distance
-                # Only after 30min to avoid triggering on normal noise
-                if hold_minutes >= 30:
-                    tp1_dist = abs(position.tp1 - position.entry_price)
-                    if position.side == Side.LONG:
-                        pullback_threshold = position.entry_price + tp1_dist * pullback_pct
-                        momentum_reversed = (
-                            current_price <= pullback_threshold and
-                            floating >= 0  # still slightly positive — take it
-                        )
-                    else:
-                        pullback_threshold = position.entry_price - tp1_dist * pullback_pct
-                        momentum_reversed = (
-                            current_price >= pullback_threshold and
-                            floating >= 0
-                        )
-
-                    if momentum_reversed:
-                        return {
-                            "action":      "time_exit",
-                            "close_ratio": 1.0,
-                            "price":       current_price,
-                            "pnl":         position.pnl_unrealized,
-                            "position_id": position.position_id,
-                            "message":     (
-                                f"↩️ Momentum reversal at {hold_minutes:.0f}m — "
-                                f"price pulled back {pullback_pct*100:.0f}% of TP1 dist. "
-                                f"PnL: {floating*100:.2f}%."
-                            )
-                        }
-
-                # Condition B: flatline — less than 0.15% move in last 30min
-                if hold_minutes >= flatline_mins and abs(floating) < flatline_pct:
-                    return {
-                        "action":      "time_exit",
-                        "close_ratio": 1.0,
-                        "price":       current_price,
-                        "pnl":         position.pnl_unrealized,
-                        "position_id": position.position_id,
-                        "message":     (
-                            f"😴 Flatline exit at {hold_minutes:.0f}m — "
-                            f"price moved only {abs(floating)*100:.2f}% in {flatline_mins}m. "
-                            f"Capital redeployed."
-                        )
-                    }
-
-                # Condition D: hard safety net — 6h below TP1
-                if hold_minutes >= hard_hours * 60:
-                    return {
-                        "action":      "time_exit",
-                        "close_ratio": 1.0,
-                        "price":       current_price,
-                        "pnl":         position.pnl_unrealized,
-                        "position_id": position.position_id,
-                        "message":     (
-                            f"⏰ Hard time limit {hard_hours:.0f}h — "
-                            f"position stuck. PnL: {floating*100:.2f}%."
                         )
                     }
 
