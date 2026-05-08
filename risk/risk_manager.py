@@ -443,12 +443,12 @@ class RiskManager:
         return contracts * signal.entry_price * sl_pct
 
     def get_risk_pct(self, score: int, equity: float) -> float:
-        # Score-based tiers from 124-trade analysis (user-calibrated)
-        if score >= 75:
+        # Thresholds diturunkan karena skor tidak inflasi lagi (avg ~60-75)
+        if score >= 65:
             risk_pct = 0.035   # 3.5% high conviction
-        elif score >= 68:
-            risk_pct = 0.030   # 3.0%
         elif score >= 60:
+            risk_pct = 0.030   # 3.0%
+        elif score >= 55:
             risk_pct = 0.025   # 2.5%
         else:
             risk_pct = 0.020   # 2.0% minimum
