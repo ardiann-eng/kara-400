@@ -325,7 +325,7 @@ class PaperExecutor:
             if pos.signal_id:
                 sig = user_db.get_signal_by_id(pos.signal_id)
                 if sig and getattr(sig, "meta_pattern_key", None):
-                    user_db.update_meta_pattern_outcome(sig.meta_pattern_key, total_pnl)
+                    user_db.update_meta_pattern_outcome(sig.meta_pattern_key, total_pnl, signal_id=pos.signal_id)
                     stats = user_db.get_meta_pattern_stats(sig.meta_pattern_key)
                     n = stats["samples"] if stats else 1
                     log.info(

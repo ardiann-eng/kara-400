@@ -139,13 +139,19 @@ class UserDB:
                 # 7. Meta pattern stats (Outcome-based score learning)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS meta_pattern_stats (
-                        pattern_key TEXT PRIMARY KEY,
-                        winrate_ema REAL,
-                        pnl_ema     REAL,
-                        samples     INTEGER,
-                        updated_at  REAL
+                        pattern_key    TEXT PRIMARY KEY,
+                        winrate_ema    REAL,
+                        pnl_ema        REAL,
+                        samples        INTEGER,
+                        updated_at     REAL,
+                        last_signal_id TEXT
                     )
                 """)
+                # Migration: tambah kolom last_signal_id kalau belum ada (DB lama)
+                try:
+                    cursor.execute("ALTER TABLE meta_pattern_stats ADD COLUMN last_signal_id TEXT")
+                except Exception:
+                    pass  # kolom sudah ada
                 
                 # 8. OI Snapshots Cache (Priority 2 Fix - Amnesia)
                 cursor.execute("""
@@ -436,11 +442,10 @@ class UserDB:
                 log.error(f"Error loading signal by id {signal_id}: {e}")
         return None
 
-    def update_meta_pattern_outcome(self, pattern_key: str, pnl_usd: float, alpha: float = 0.10):
+    def update_meta_pattern_outcome(self, pattern_key: str, pnl_usd: float, alpha: float = 0.10, signal_id: str = None):
         """
-        Rolling pattern outcome stats:
-        - winrate_ema in [0,1]
-        - pnl_ema (USD, smoothed)
+        Rolling pattern outcome stats — satu update per signal_id, bukan per user.
+        Kalau signal_id sudah pernah di-update ke pattern ini, skip (dedup multi-user).
         """
         if not pattern_key:
             return
@@ -450,22 +455,27 @@ class UserDB:
                 conn = self._get_conn()
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT winrate_ema, pnl_ema, samples FROM meta_pattern_stats WHERE pattern_key = ?",
+                    "SELECT winrate_ema, pnl_ema, samples, last_signal_id FROM meta_pattern_stats WHERE pattern_key = ?",
                     (pattern_key,)
                 )
                 row = cursor.fetchone()
                 if row:
-                    old_wr, old_pnl, old_n = float(row[0]), float(row[1]), int(row[2])
-                    wr = (1 - alpha) * old_wr + alpha * win
+                    old_wr, old_pnl, old_n, last_sig = float(row[0]), float(row[1]), int(row[2]), row[3]
+                    # Skip kalau signal yang sama sudah pernah di-record (multi-user dedup)
+                    if signal_id and last_sig == signal_id:
+                        return
+                    wr  = (1 - alpha) * old_wr  + alpha * win
                     pnl = (1 - alpha) * old_pnl + alpha * float(pnl_usd)
-                    n = old_n + 1
+                    n   = old_n + 1
                 else:
-                    wr = win
+                    wr  = win
                     pnl = float(pnl_usd)
-                    n = 1
+                    n   = 1
                 cursor.execute(
-                    "INSERT OR REPLACE INTO meta_pattern_stats (pattern_key, winrate_ema, pnl_ema, samples, updated_at) VALUES (?, ?, ?, ?, ?)",
-                    (pattern_key, wr, pnl, n, datetime.now(timezone.utc).timestamp())
+                    "INSERT OR REPLACE INTO meta_pattern_stats "
+                    "(pattern_key, winrate_ema, pnl_ema, samples, updated_at, last_signal_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (pattern_key, wr, pnl, n, datetime.now(timezone.utc).timestamp(), signal_id)
                 )
                 conn.commit()
             except Exception as e:
