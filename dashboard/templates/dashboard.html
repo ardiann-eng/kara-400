@@ -1911,7 +1911,8 @@
     // ── Live Decision Feed ────────────────────────────────────────────────────
     async function loadDecisionFeed() {
       try {
-        const d = await api('/api/ml_decision_feed');
+        const qs = S.userId ? `?chat_id=${encodeURIComponent(S.userId)}` : '';
+        const d = await api('/api/ml_decision_feed' + qs);
         const feed  = document.getElementById('ml-decision-feed');
         const empty = document.getElementById('ml-feed-empty');
 
