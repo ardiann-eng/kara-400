@@ -243,20 +243,6 @@ class RiskManager:
         if self._kill_switch or account.kill_switch_active:
             return False, "🚨 KILL SWITCH ACTIVE - trading stopped (max drawdown hit)"
 
-        # ── Intelligence Filter (ML Expected Edge) ────────────────────
-        import config as _cfg
-        from intelligence.intelligence_model import intelligence_model as _im
-        edge = getattr(signal, 'expected_edge', None)
-        # Hanya block jika: intelligence aktif DAN model sudah is_ready (dilatih session ini)
-        # is_ready=False berarti model dari disk stale atau belum ada data cukup
-        if edge is not None and edge < 0.45 and _cfg.ENABLE_INTELLIGENCE and _im.is_ready:
-            return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 45%)"
-        elif edge is not None and edge < 0.45:
-            log.debug(
-                f"[AI] {getattr(signal, 'asset', '?')}: low edge ({edge*100:.1f}%) "
-                f"— passing through (is_ready={getattr(_im, 'is_ready', False)})"
-            )
-
         # ── Paused ────────────────────────────────────────────────────
         if self._paused or account.is_paused:
             return False, "⏸️  Bot is paused by user"
@@ -354,19 +340,10 @@ class RiskManager:
             sl_pct = RISK.default_sl_pct
 
         # ── Leverage: Triple-Cap (Signal vs User vs Exchange) ──────────
-        # Dynamic Risk Sizing using Intelligence Model
-        import config as _cfg
-        if _cfg.ENABLE_INTELLIGENCE:
-            from intelligence.dynamic_risk import calculate_risk_multiplier
-            edge = getattr(signal, 'expected_edge', None)
-            multiplier = calculate_risk_multiplier(edge)
-        else:
-            multiplier = 1.0
-
         # Scale leverage and risk parameter
         cfg = self._cfg()
         default_lev = signal.suggested_leverage
-        actual_lev = min(int(default_lev * multiplier), cfg.max_leverage)
+        actual_lev = min(int(default_lev), cfg.max_leverage)
         user_max_lev = self._get_user_value("max_leverage", cfg.max_leverage)
         
         # Get exchange-allowed max for this specific asset (Market-Aware)
@@ -396,8 +373,7 @@ class RiskManager:
         score = getattr(signal, 'score', 0)
         risk_pct = self.get_risk_pct(score, account_balance)
 
-        # Apply AI Multiplier to Risk!
-        risk_pct = min(risk_pct * multiplier, cfg.max_risk_per_trade_pct)
+        risk_pct = min(risk_pct, cfg.max_risk_per_trade_pct)
 
         # Scalper: gunakan sl_pct sizing terpisah dari SL on-chain.
         # SL on-chain 3% adalah backstop darurat (jarang kena) — bukan exit normal.
@@ -878,6 +854,69 @@ class RiskManager:
                             )
                         }
 
+        # ── Rule F: Early Trailing — profit tapi belum TP1 ───────────────
+        # Aktif saat floating >= threshold (misal +0.5%) tanpa nunggu TP1 flag.
+        # Proteksi profit saat harga balik sebelum mencapai TP1.
+        if not position.tp1_hit:
+            scfg = SCALPER
+            if getattr(scfg, 'early_trail_enabled', True):
+                act_pct  = getattr(scfg, 'early_trail_activation_pct', 0.005)
+                dist_pct = getattr(scfg, 'early_trail_distance_pct', 0.003)
+
+                if floating >= act_pct:
+                    if position.side == Side.LONG:
+                        peak      = max(position.trailing_high, current_price)
+                        retrace   = (peak - current_price) / max(peak, 1e-9)
+                    else:
+                        peak      = min(position.trailing_high, current_price)
+                        retrace   = (current_price - peak) / max(peak, 1e-9)
+
+                    if retrace >= dist_pct:
+                        return {
+                            "action":      "early_trail",
+                            "close_ratio": 1.0,
+                            "price":       current_price,
+                            "pnl":         position.pnl_unrealized,
+                            "position_id": position.position_id,
+                            "message":     (
+                                f"🛡️ Early trail: profit +{floating*100:.2f}% tapi "
+                                f"retraced {retrace*100:.2f}% dari peak. Kunci profit."
+                            ),
+                        }
+
+        # ── Rule G: Volume-spike exit — price turun + volume naik → exit ─
+        # Hanya aktif sebelum TP1 (setelah TP1, SL breakeven + trailing cukup).
+        if not position.tp1_hit:
+            scfg = SCALPER
+            if getattr(scfg, 'vol_spike_exit_enabled', True):
+                vol_mult     = getattr(scfg, 'vol_spike_multiplier', 1.5)
+                vol_history  = getattr(position, 'candle_volumes', [])
+                close_hist   = getattr(position, 'candle_closes', [])
+
+                if len(vol_history) >= 2 and len(close_hist) >= 2:
+                    last_vol  = vol_history[-1]
+                    prev_vol  = vol_history[-2]
+                    last_cls  = close_hist[-1]
+                    prev_cls  = close_hist[-2]
+
+                    if prev_vol > 0 and last_vol >= prev_vol * vol_mult:
+                        bearish_spike = position.side == Side.LONG  and last_cls < prev_cls
+                        bullish_spike = position.side == Side.SHORT and last_cls > prev_cls
+
+                        if bearish_spike or bullish_spike:
+                            direction = "↓ harga turun" if bearish_spike else "↑ harga naik"
+                            return {
+                                "action":      "vol_spike_exit",
+                                "close_ratio": 1.0,
+                                "price":       current_price,
+                                "pnl":         position.pnl_unrealized,
+                                "position_id": position.position_id,
+                                "message":     (
+                                    f"📊 Vol spike exit: {direction} + volume "
+                                    f"{last_vol/prev_vol:.1f}x. Exit sebelum SL."
+                                ),
+                            }
+
         # ── Rule E: Scalper max-hold force exit ──────────────────────────
         if getattr(position, 'trade_mode', 'scalper') == 'scalper':
             scfg = SCALPER
@@ -893,8 +932,8 @@ class RiskManager:
 
             # ── Rule E1: Max-hold force exit ─────────────────────────────
             if hold_minutes >= max_hold:
-                if floating <= soft_floor and hold_minutes < (max_hold + grace):
-                    pass  # grace period — tahan selama loss masih dalam batas soft_floor
+                if floating > soft_floor and hold_minutes < (max_hold + grace):
+                    pass  # grace period — posisi rugi kecil (> -0.15%), beri waktu recovery
                 else:
                     return {
                         "action":      "time_exit",

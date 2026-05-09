@@ -681,8 +681,6 @@
                   </div>
                 </div>
                 <div style="margin-left:auto; text-align:right;">
-                  <div class="num" style="font-size:0.72rem; color:var(--teal);"
-                       x-text="s.expected_edge ? (s.expected_edge * 100).toFixed(0) + '% edge' : ''"></div>
                   <div class="num mute" style="font-size:0.68rem;" x-text="fmtTime(s.timestamp)"></div>
                 </div>
               </div>
@@ -718,11 +716,6 @@
                           x-text="selectedSignal?.strength || ''"></span>
                     <span x-show="selectedSignal?.auto_executed" class="badge badge-live">AUTO</span>
                   </div>
-                </div>
-                <div style="margin-left:auto; text-align:right;">
-                  <div class="section-label" style="font-size:0.60rem;">EXPECTED EDGE</div>
-                  <div class="num profit" style="font-size:1rem; font-weight:600;"
-                       x-text="selectedSignal?.expected_edge ? (selectedSignal.expected_edge * 100).toFixed(1) + '%' : '—'"></div>
                 </div>
               </div>
             </div>

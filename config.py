@@ -246,7 +246,7 @@ class ScalperConfig:
 
     # MTF Score weights
     mtf_score_bonus:         int = 12        # bonus if 1m aligns with 15m trend
-    mtf_score_penalty:       int = -15       # penalty if counter-trend
+    mtf_score_penalty:       int = -10       # penalty if counter-trend
 
     # Scalper momentum reversal exit (PRIMARY protection — menggantikan hard SL)
     # [SL FIX 2026-05-08] Diperketat: aktif dari menit ke-1 (bukan ke-3), 2 candle (bukan 3).
@@ -255,6 +255,15 @@ class ScalperConfig:
     momentum_exit_min_minutes:   float = 1.0    # aktif dari menit ke-1 (was 3.0 — terlambat, SL kena duluan)
     momentum_exit_candles:       int   = 2       # cukup 2 candle bearish berturut (was 3 — terlalu lambat)
     momentum_exit_loss_floor:    float = -0.0030  # exit kalau loss <= -0.30% (was -0.15%, terlalu sensitif noise)
+
+    # Volume-spike exit: price turun + volume naik = exit segera (sebelum SL/time kena)
+    vol_spike_exit_enabled:      bool  = True
+    vol_spike_multiplier:        float = 1.5    # volume last candle harus >= 1.5x candle sebelumnya
+
+    # Early trailing: aktif dari profit threshold tanpa nunggu TP1 flag
+    early_trail_enabled:         bool  = True
+    early_trail_activation_pct:  float = 0.005  # aktif saat profit >= 0.5% (unleveraged)
+    early_trail_distance_pct:    float = 0.003  # exit kalau retraced >= 0.3% dari peak
 
 SCALPER = ScalperConfig()
 
@@ -289,8 +298,8 @@ class SignalConfig:
     # FIX #4: SHORT trades had 57.6% WR and net -$12.55 in audit data.
     # Structural bias: positive funding/basis almost always favors LONG on Hyperliquid.
     # Raise SHORT threshold significantly to only execute highest-conviction SHORT signals.
-    min_score_short_signal:  int   = 62       # SHORT needs 62+ to emit
-    min_score_short_auto:    int   = 62       # SHORT auto-execute needs 62+
+    min_score_short_signal:  int   = 59       # SHORT needs 59+ to emit (was 62, relaxed)
+    min_score_short_auto:    int   = 59       # SHORT auto-execute needs 59+
 
     # Bull-Bear gap (LONG vs SHORT berbeda threshold)
     min_bull_bear_gap:       int   = 18       # LONG: minimum gap bull vs bear pts
@@ -333,12 +342,6 @@ class SignalConfig:
     structure_standard_bonus:int = 6          # trend alignment bonus (cached regime trend)
     structure_mismatch_penalty: int = -4      # against structure direction
 
-    # Meta-Scoring (Outcome-based learning)
-    meta_learning_enabled:   bool = True
-    meta_min_samples:        int = 5           # n=5: aktivasi lebih cepat untuk bootstrap data
-    meta_boost_threshold:    float = 0.68     # winrate > 68% = boost
-    meta_penalty_threshold:  float = 0.35     # winrate < 35% = penalty (tightened from 0.40)
-    meta_max_delta:          int = 10         # reduced from 15: smaller nudge, less noise
 
 
 SIGNAL = SignalConfig()
@@ -358,22 +361,11 @@ ALLOW_SHORT = True   # Re-enabled dengan 3 filter proteksi: funding >= +0.0002, 
 #   - Semua saldo user              (paper_state → reset ke Rp1.000.000)
 #   - Semua journal/trade history   (trade_history)
 #   - Semua sinyal history          (signals_history)
-#   - Meta learning stats           (meta_pattern_stats)
 #   - Volatility cache              (vol_cache)
 #   - Risk state per user           (risk_state)
-#   - Seluruh ML experience buffer  (kara_ml.db dihapus)
-#   - Trained Intelligence model    (kara_intelligence.pkl dihapus)
 # Yang TIDAK dihapus: konfigurasi user, wallet address, akses Telegram.
 # PENTING: Ubah kembali ke false setelah deploy agar tidak reset terus!
 HARD_RESET_ON_DEPLOY = os.getenv("KARA_HARD_RESET", "false").lower() == "true"
-
-# Intelligence ML Layer kill switch
-# Set env KARA_INTELLIGENCE=false untuk matikan tanpa redeploy.
-ENABLE_INTELLIGENCE = os.getenv("KARA_INTELLIGENCE", "true").lower() == "true"
-
-# Retrain schedule
-INTELLIGENCE_RETRAIN_MIN_SAMPLES = 300   # AI boleh block signal hanya setelah 300 trades
-INTELLIGENCE_RETRAIN_INTERVAL_HOURS = 12  # retrain max 2x per hari
 
 # ──────────────────────────────────────────────
 # BLOCKED TRADING HOURS (UTC)

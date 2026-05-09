@@ -197,8 +197,6 @@ class KaraBot:
                 log.warning(
                     f"✨ [RESET SELESAI] "
                     f"users={result.get('users_reset', 0)} | "
-                    f"ML={result.get('kara_ml.db')} | "
-                    f"model={result.get('kara_intelligence.pkl')} | "
                     f"trades_deleted={result.get('trade_history', 0)}"
                 )
                 log.warning("⚠️  Ingat: ubah KARA_HARD_RESET=false di env setelah ini!")
@@ -1117,24 +1115,40 @@ class KaraBot:
             except Exception as e:
                 log.debug(f"Failed to fetch market price for {asset}: {e}")
 
-        # 2b. Fetch 1m candle closes per asset untuk momentum reversal exit
+        # 2b. Fetch 1m candle closes+volumes per asset untuk exit logic
         # Hanya diambil sekali per asset, dishare ke semua user yang hold asset tsb.
         candle_closes_map: dict = {}
+        candle_volumes_map: dict = {}
         for asset in all_open_assets:
             try:
                 candles = await self.hl_client.get_candles(asset, "1m", limit=6)
                 if candles:
-                    candle_closes_map[asset] = [c[4] for c in candles]  # index 4 = close
+                    closes = []
+                    volumes = []
+                    for c in candles:
+                        if isinstance(c, dict):
+                            closes.append(float(c.get("c", 0)))
+                            volumes.append(float(c.get("v", 0)))
+                        elif isinstance(c, (list, tuple)) and len(c) >= 6:
+                            closes.append(float(c[4]))
+                            volumes.append(float(c[5]))
+                    if closes:
+                        candle_closes_map[asset] = closes
+                    if volumes:
+                        candle_volumes_map[asset] = volumes
             except Exception as e:
                 log.debug(f"Candle fetch skipped for {asset}: {e}")
 
-        # 2c. Inject candle_closes ke setiap open scalper position
+        # 2c. Inject candle_closes + candle_volumes ke setiap open scalper position
         for chat_id, session in self.sessions.items():
             if not hasattr(session.executor, 'open_positions'):
                 continue
             for pos in session.executor.open_positions:
-                if pos.trade_mode == 'scalper' and pos.asset in candle_closes_map:
-                    pos.candle_closes = candle_closes_map[pos.asset]
+                if pos.trade_mode == 'scalper':
+                    if pos.asset in candle_closes_map:
+                        pos.candle_closes = candle_closes_map[pos.asset]
+                    if pos.asset in candle_volumes_map:
+                        pos.candle_volumes = candle_volumes_map[pos.asset]
 
         # 3. Apply updates to each user
         for chat_id, session in self.sessions.items():
@@ -1158,7 +1172,7 @@ class KaraBot:
                 continue
 
             actions = await session.executor.update_positions(prices)
-            early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "momentum_exit")]
+            early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "momentum_exit", "vol_spike_exit", "early_trail")]
             other_actions = [a for a in actions if a.get("action") not in ("time_exit", "momentum_exit")]
 
             # Kirim notifikasi personal per posisi (KARA style)
@@ -1333,19 +1347,6 @@ class KaraBot:
 # ──────────────────────────────────────────────
 
 async def main():
-    # Force-hapus model pkl jika DB training belum cukup — cegah model stale dari volume Railway
-    try:
-        import joblib as _jl
-        from intelligence.experience_buffer import experience_buffer as _eb
-        from intelligence.intelligence_model import MODEL_PATH as _MP
-        _n = len(_eb.get_training_data())
-        _min = getattr(config, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 100)
-        if os.path.exists(_MP) and _n < _min:
-            os.remove(_MP)
-            log.info(f"[Intelligence] Startup: hapus model stale (DB={_n} < {_min}). Mulai fresh.")
-    except Exception as _e:
-        log.debug(f"[Intelligence] Startup check skip: {_e}")
-
     bot = KaraBot()
 
     # 1. Start Dashboard FIRST in background to pass Railway Health Checks

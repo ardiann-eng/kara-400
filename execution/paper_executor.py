@@ -177,8 +177,6 @@ class PaperExecutor:
             is_paper=True,
             entry_score=signal.score,
             realized_vol=getattr(signal, 'realized_vol', 0.02),
-            meta_score_delta=getattr(signal, 'meta_score_delta', 0),
-            meta_pattern_key=getattr(signal, 'meta_pattern_key', None),
         )
 
         # Update balances
@@ -217,22 +215,6 @@ class PaperExecutor:
             f"| margin: {format_usd(margin)} | lev: {signal.suggested_leverage}x"
         )
         
-        # 🧠 Intelligence Experience Hook (Async to avoid blocking)
-        import asyncio
-        from intelligence.experience_buffer import experience_buffer
-        
-        bd = getattr(signal, 'breakdown', None)
-        fr = float(getattr(getattr(signal, 'raw_data', None), 'funding_rate', 0.0))  # Best effort if raw_data is available
-        vol = 0.0  # Ideally passed from kwargs, but 0.0 acts as baseline gracefully
-        
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, 
-                             experience_buffer.record_entry,
-                             self.chat_id, pos.position_id, signal.asset, signal.side.value,
-                             signal.score, getattr(signal, 'meta_score_delta', 0),
-                             bd, fr, vol, 0.0, getattr(signal, 'expected_edge', 0.0)
-                            )
-                            
         return pos
 
     # ──────────────────────────────────────────
@@ -320,52 +302,6 @@ class PaperExecutor:
         total_pnl = pos.pnl_realized
         self.risk.record_pnl(total_pnl, self._balance)
 
-        # Meta-scoring feedback loop: update pattern outcome from closed trade.
-        try:
-            if pos.signal_id:
-                sig = user_db.get_signal_by_id(pos.signal_id)
-                if sig and getattr(sig, "meta_pattern_key", None):
-                    user_db.update_meta_pattern_outcome(sig.meta_pattern_key, total_pnl, signal_id=pos.signal_id)
-                    stats = user_db.get_meta_pattern_stats(sig.meta_pattern_key)
-                    n = stats["samples"] if stats else 1
-                    log.info(
-                        f"🧠 [META] {sig.meta_pattern_key} | "
-                        f"pnl={total_pnl:+.2f} | "
-                        f"wr={stats['winrate_ema']*100:.0f}% | "
-                        f"n={n}"
-                        if stats else
-                        f"🧠 [META] {sig.meta_pattern_key} | pnl={total_pnl:+.2f} | n=1"
-                    )
-        except Exception as e:
-            log.debug(f"[META] Failed updating pattern outcome for {pos.signal_id}: {e}")
-            
-        # 🧠 Intelligence Experience Hook (Async labeling)
-        import asyncio
-        import config as _ai_cfg
-        from intelligence.experience_buffer import experience_buffer
-
-        # Pakai pnl_realized (total PnL kumulatif) bukan floating_pct (hanya sisa size)
-        # floating_pct salah untuk trade dengan partial close karena hanya ngitung sisa, bukan total
-        pnl_pct_final = pos.pnl_realized / (pos.size_initial * pos.entry_price) if pos.size_initial > 0 and pos.entry_price > 0 else pos.floating_pct(fill_price)
-        duration_sec = (pos.closed_at - pos.opened_at).total_seconds()
-
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, experience_buffer.update_label, position_id, pnl_pct_final, duration_sec)
-
-        # Retrain hanya saat ENABLE_INTELLIGENCE=True DAN data cukup DAN sudah 24 jam
-        if _ai_cfg.ENABLE_INTELLIGENCE:
-            from intelligence.intelligence_model import intelligence_model
-            from intelligence.experience_buffer import experience_buffer as _eb
-            data = _eb.get_training_data()
-            min_samples = getattr(_ai_cfg, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 300)
-            if len(data) >= min_samples:
-                asyncio.create_task(intelligence_model.retrain_async())
-            else:
-                log.debug(
-                    f"[AI] Retrain skipped — {len(data)}/{min_samples} samples "
-                    f"(ENABLE_INTELLIGENCE=True tapi data belum cukup)"
-                )
-
         log_data = {
             "type":             "close",
             "pos_id":           position_id,
@@ -379,8 +315,6 @@ class PaperExecutor:
             "pnl":              total_pnl,
             "pnl_pct":          pos.roe_pct(fill_price),
             "score":            pos.entry_score,
-            "meta_boost":       getattr(pos, "meta_score_delta", 0),
-            "meta_pattern_key": getattr(pos, "meta_pattern_key", ""),
             "timestamp":        utcnow(),
         }
         self._trade_log.append(log_data)
@@ -420,7 +354,7 @@ class PaperExecutor:
         # Full-close actions (SL, trailing, time, momentum): delegate entirely to
         # close_position() which owns the balance update + meta + ML labeling.
         # Do NOT touch balance/pnl here — close_position handles it all.
-        if action["action"] in ("trailing_stop", "stop_loss", "time_exit", "momentum_exit"):
+        if action["action"] in ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "vol_spike_exit", "early_trail"):
             if pos.status == PositionStatus.OPEN:
                 result = await self.close_position(pos.position_id, fill_price, action["action"])
                 return {**action, "pnl": (result or {}).get("pnl", 0), "position_id": pos.position_id}

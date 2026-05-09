@@ -136,23 +136,6 @@ class UserDB:
                     )
                 """)
 
-                # 7. Meta pattern stats (Outcome-based score learning)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS meta_pattern_stats (
-                        pattern_key    TEXT PRIMARY KEY,
-                        winrate_ema    REAL,
-                        pnl_ema        REAL,
-                        samples        INTEGER,
-                        updated_at     REAL,
-                        last_signal_id TEXT
-                    )
-                """)
-                # Migration: tambah kolom last_signal_id kalau belum ada (DB lama)
-                try:
-                    cursor.execute("ALTER TABLE meta_pattern_stats ADD COLUMN last_signal_id TEXT")
-                except Exception:
-                    pass  # kolom sudah ada
-                
                 # 8. OI Snapshots Cache (Priority 2 Fix - Amnesia)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS oi_snapshots (
@@ -201,8 +184,6 @@ class UserDB:
         Wipe SEMUA data trading — dipanggil saat KARA_HARD_RESET=true di env.
         Yang dihapus:
           - kara_data.db: semua tabel (posisi, balance, journal, sinyal, meta, dll)
-          - kara_ml.db: seluruh experience buffer ML
-          - kara_intelligence.pkl: trained model
           - data/users.json: balance direset ke default, posisi dikosongkan
         Yang TIDAK dihapus:
           - Konfigurasi user (leverage, risk preference, wallet address)
@@ -221,7 +202,6 @@ class UserDB:
                     "paper_state",
                     "signals_history",
                     "risk_state",
-                    "meta_pattern_stats",
                     "vol_cache",
                     "oi_snapshots",
                     "history_snapshots",
@@ -239,25 +219,7 @@ class UserDB:
                 conn.commit()
                 log.warning(f"🧹 [RESET] kara_data.db wiped: {summary}")
 
-                # ── 2. Hapus kara_ml.db (experience buffer ML) ──────────
-                ml_db_path = os.path.join(config.STORAGE_DIR, "kara_ml.db")
-                if os.path.exists(ml_db_path):
-                    os.remove(ml_db_path)
-                    summary["kara_ml.db"] = "deleted"
-                    log.warning(f"🧹 [RESET] kara_ml.db deleted")
-                else:
-                    summary["kara_ml.db"] = "not_found"
-
-                # ── 3. Hapus kara_intelligence.pkl (trained ML model) ───
-                pkl_path = os.path.join(config.STORAGE_DIR, "kara_intelligence.pkl")
-                if os.path.exists(pkl_path):
-                    os.remove(pkl_path)
-                    summary["kara_intelligence.pkl"] = "deleted"
-                    log.warning(f"🧹 [RESET] kara_intelligence.pkl deleted")
-                else:
-                    summary["kara_intelligence.pkl"] = "not_found"
-
-                # ── 4. Reset users.json — balance kembali ke default ────
+                # ── 2. Reset users.json — balance kembali ke default ────
                 reset_count = 0
                 for chat_id, user in self.users.items():
                     user.paper_balance_usd = config.PAPER_BALANCE_USD
@@ -441,83 +403,6 @@ class UserDB:
             except Exception as e:
                 log.error(f"Error loading signal by id {signal_id}: {e}")
         return None
-
-    def update_meta_pattern_outcome(self, pattern_key: str, pnl_usd: float, alpha: float = 0.10, signal_id: str = None):
-        """
-        Rolling pattern outcome stats — satu update per signal_id, bukan per user.
-        Kalau signal_id sudah pernah di-update ke pattern ini, skip (dedup multi-user).
-        """
-        if not pattern_key:
-            return
-        win = 1.0 if pnl_usd > 0 else 0.0
-        with self._lock:
-            try:
-                conn = self._get_conn()
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT winrate_ema, pnl_ema, samples, last_signal_id FROM meta_pattern_stats WHERE pattern_key = ?",
-                    (pattern_key,)
-                )
-                row = cursor.fetchone()
-                if row:
-                    old_wr, old_pnl, old_n, last_sig = float(row[0]), float(row[1]), int(row[2]), row[3]
-                    # Skip kalau signal yang sama sudah pernah di-record (multi-user dedup)
-                    if signal_id and last_sig == signal_id:
-                        return
-                    wr  = (1 - alpha) * old_wr  + alpha * win
-                    pnl = (1 - alpha) * old_pnl + alpha * float(pnl_usd)
-                    n   = old_n + 1
-                else:
-                    wr  = win
-                    pnl = float(pnl_usd)
-                    n   = 1
-                cursor.execute(
-                    "INSERT OR REPLACE INTO meta_pattern_stats "
-                    "(pattern_key, winrate_ema, pnl_ema, samples, updated_at, last_signal_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (pattern_key, wr, pnl, n, datetime.now(timezone.utc).timestamp(), signal_id)
-                )
-                conn.commit()
-            except Exception as e:
-                log.error(f"Error updating meta pattern stats for {pattern_key}: {e}")
-
-    def get_meta_pattern_stats(self, pattern_key: str) -> Optional[Dict[str, Any]]:
-        if not pattern_key:
-            return None
-        with self._lock:
-            try:
-                conn = self._get_conn()
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT winrate_ema, pnl_ema, samples, updated_at FROM meta_pattern_stats WHERE pattern_key = ?",
-                    (pattern_key,)
-                )
-                row = cursor.fetchone()
-                if row:
-                    return {
-                        "winrate_ema": float(row[0]),
-                        "pnl_ema": float(row[1]),
-                        "samples": int(row[2]),
-                        "updated_at": float(row[3]),
-                    }
-            except Exception as e:
-                log.error(f"Error loading meta pattern stats for {pattern_key}: {e}")
-        return None
-
-    def clear_meta_pattern_stats(self) -> int:
-        """Hapus semua meta pattern stats. Returns jumlah row yang dihapus."""
-        with self._lock:
-            try:
-                conn = self._get_conn()
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM meta_pattern_stats")
-                count = cursor.fetchone()[0]
-                cursor.execute("DELETE FROM meta_pattern_stats")
-                conn.commit()
-                return count
-            except Exception as e:
-                log.error(f"Error clearing meta pattern stats: {e}")
-                return 0
 
     # ── PAPER POSITIONS & STATE ───────────────────────────────────────
 

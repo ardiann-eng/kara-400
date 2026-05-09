@@ -142,10 +142,6 @@ class ScoreBreakdown(BaseModel):
     raw_score:             int = 0
     final_score:           int = 0
 
-    # Meta Learning data
-    meta_pattern_key:      Optional[str] = None
-    meta_score_delta:      int = 0
-
     # Explanation strings for Telegram / Dashboard
     reasons:               List[str] = Field(default_factory=list)
     warnings:              List[str] = Field(default_factory=list)
@@ -161,9 +157,6 @@ class TradeSignal(BaseModel):
     breakdown:        ScoreBreakdown
     is_pyramid:       bool = False           # True if scaling into existing position
     auto_executed:    bool = False           # True if bot took the trade automatically
-    meta_pattern_key: Optional[str] = None   # outcome-learning pattern bucket
-    meta_score_delta: int = 0                # score adj from meta winrate
-    expected_edge:    Optional[float] = None # ML predicted probability of win (0.0-1.0)
     trade_mode:       str = "scalper"        # scalper only
 
     # Levels
@@ -319,11 +312,10 @@ class Position(BaseModel):
     is_paper:          bool = True
     entry_score:       int = 50
     realized_vol:      float = 0.02       # daily realized vol at entry — used for trail distance
-    meta_score_delta:  int = 0            # meta-learning score adjustment applied at entry
-    meta_pattern_key:  Optional[str] = None  # pattern bucket for meta outcome tracking
 
-    # Rolling 1m candle closes — diupdate setiap monitor tick untuk momentum reversal exit
+    # Rolling 1m candle closes & volumes — diupdate setiap monitor tick untuk exit logic
     candle_closes:     List[float] = Field(default_factory=list)
+    candle_volumes:    List[float] = Field(default_factory=list)
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:

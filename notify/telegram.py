@@ -311,7 +311,6 @@ class KaraTelegram:
                 # Direct Config Commands
                 CommandHandler("setleverage",  self.cmd_direct_set_config),
                 CommandHandler("setmaxpos",    self.cmd_direct_set_config),
-                CommandHandler("resetml",      self.cmd_reset_ml),
                 CommandHandler("resetdata",    self.cmd_reset_data),
                 CommandHandler("weblogin",     self.cmd_weblogin),
                 # No more manual whatsnew command, it's automatic now
@@ -764,7 +763,6 @@ class KaraTelegram:
             "✨ <b>Update & Info</b>\n"
             "• /whatsnew  — Lihat pembaruan fitur terbaru\n\n"
             "🔧 <b>Reset & Maintenance</b>\n"
-            "• /resetml   — Reset AI/ML intelligence (hapus model & training data)\n"
             "• /resetdata — Reset history trade & journal Excel (saldo & posisi aman)\n\n"
             "<i>Tips: Gunakan menu /settings untuk menyesuaikan bot dengan kenyamanan risiko User.</i>\n\n"
             "⚠️ <b>Not Financial Advice:</b> Seluruh aktivitas trading memiliki risiko. User bertanggung jawab penuh. ✨"
@@ -1665,48 +1663,6 @@ class KaraTelegram:
             "Apakah Anda yakin?",
             reply_markup=keyboard
         )
-
-    async def cmd_reset_ml(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Hapus semua data ML + model pkl dari Railway volume. Mulai fresh."""
-        if not self._is_authorized(update): return
-        chat_id = str(update.effective_chat.id)
-        await update.effective_message.reply_html("⏳ <b>Mereset ML Intelligence...</b>")
-        try:
-            import sqlite3 as _sq, os as _os
-            from intelligence.intelligence_model import intelligence_model as _im, MODEL_PATH as _MP
-            from intelligence.experience_buffer import experience_buffer as _eb
-
-            # 1. Hapus semua data dari DB (pakai path yang sama dengan ExperienceBuffer)
-            db_path = _eb.db_path
-            if _os.path.exists(db_path):
-                conn = _sq.connect(db_path)
-                conn.execute("DELETE FROM ml_experience")
-                conn.commit()
-                conn.close()
-
-            # 2. Hapus pkl dari volume
-            if _os.path.exists(_MP):
-                _os.remove(_MP)
-
-            # 3. Reset state model in-memory
-            _im.model = None
-            _im.is_ready = False
-            _im.last_train_samples = 0
-
-            # 4. Reset meta pattern stats
-            from core.db import user_db as _udb
-            meta_count = _udb.clear_meta_pattern_stats()
-
-            await update.effective_message.reply_html(
-                "✅ <b>ML Intelligence direset!</b>\n\n"
-                "• Database training: <b>kosong</b>\n"
-                "• Model pkl: <b>dihapus</b>\n"
-                f"• Meta patterns: <b>{meta_count} pola dihapus</b>\n"
-                "• AI ABORT: <b>nonaktif</b> sampai 300 trades terkumpul\n\n"
-                "<i>Bot akan mulai kumpulkan data bersih dari sekarang.</i>"
-            )
-        except Exception as e:
-            await update.effective_message.reply_html(f"❌ Reset gagal: <code>{e}</code>")
 
     async def cmd_reset_data(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Hapus semua history trade & journal user (DB + Excel). Saldo & posisi tetap aman."""
@@ -2898,14 +2854,12 @@ class KaraTelegram:
         """KARA dynamic update card with friendly style ✨."""
         if version == "7.1.0":
             bullets = [
-                "<b>SHORT Threshold Aktif</b>: Filter skor SHORT (≥62) kini di-enforce di Scalper Mode — sebelumnya tidak aktif (bug fix kritis).",
-                "<b>Short Squeeze Guard</b>: SHORT otomatis diblok jika harga spike &gt;1% + OI drop &gt;5% dalam 1 menit (anti-squeeze).",
-                "<b>Funding Rate Filter</b>: SHORT diblok jika funding rate terlalu rendah — cegah entry melawan arus pasar.",
-                "<b>Bearish RSI Divergence</b>: Deteksi harga naik tapi RSI turun → bear signal +10 pts (dan sebaliknya untuk LONG).",
-                "<b>Bearish Rejection Wick</b>: Deteksi candle dengan upper wick &gt;1.5× body → bear signal +8 pts.",
-                "<b>AI Fitur is_short</b>: Intelligence model kini bisa bedakan pattern LONG vs SHORT (9→10 fitur).",
-                "<b>Fix Double PnL</b>: Bug double-counting balance pada SL/trailing exit di paper trading sudah diperbaiki.",
-                "<b>Meta Learning n=5</b>: Pattern aktif setelah 5 trade (was 10) — adaptasi lebih cepat.",
+                "<b>Fix Momentum Exit</b>: Bug kritis diperbaiki — candle format mismatch menyebabkan momentum exit tidak pernah aktif. Bot sekarang bisa keluar lebih awal saat harga berbalik.",
+                "<b>Fix Grace Period Logic</b>: Logika time exit terbalik diperbaiki — posisi rugi besar tidak lagi diberi waktu ekstra, posisi rugi kecil yang dapat kesempatan recovery.",
+                "<b>SHORT Lebih Aktif</b>: Threshold SHORT diturunkan 62→59 dan MTF penalty dikurangi -15→-10. Sinyal SHORT lebih sering masuk tanpa mengorbankan kualitas.",
+                "<b>Early Trailing Stop</b>: Fitur baru — trailing aktif saat profit ≥0.5% tanpa nunggu TP1. Kalau harga balik 0.3% dari peak, profit dikunci otomatis.",
+                "<b>Volume Spike Exit</b>: Fitur baru — jika harga turun + volume naik ≥1.5× candle sebelumnya, KARA langsung keluar sebelum SL kena. Konfirmasi bearish dari volume.",
+                "<b>Candle Volume Feed</b>: Data volume 1m kini diambil bersamaan dengan close price (zero API call tambahan) dan digunakan untuk exit intelligence.",
             ]
         elif version == "6.2.0":
             bullets = [

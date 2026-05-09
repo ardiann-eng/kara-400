@@ -28,9 +28,6 @@ from engine.analyzers.liquidation_analyzer import LiquidationAnalyzer
 from engine.analyzers.orderbook_analyzer   import OrderbookAnalyzer
 from config import SIGNAL, SCALPER
 
-# -- Intelligence Layer --
-from intelligence.feature_engine import extract_live_features
-from intelligence.intelligence_model import intelligence_model
 from risk.risk_manager import RiskManager
 from data.hyperliquid_client     import HyperliquidClient
 from data.ws_client              import MarketDataCache
@@ -255,7 +252,7 @@ class ScoringEngine:
             if sig and (now_ts - last_ts >= cooldown_secs):
                 signals["scalper"] = sig
                 self._last_signal_ts[f"{asset}_scalper"] = now_ts
-                log.info(f"⚡ SCALPER SIGNAL: {asset} {sig.side.value.upper()} score={score_scl} (Meta: {getattr(sig, 'meta_score_delta', 0):+d})")
+                log.info(f"⚡ SCALPER SIGNAL: {asset} {sig.side.value.upper()} score={score_scl}")
             elif sig:
                 log.debug(f"{asset} [SCALPER]: cooldown active (score={score_scl} blocked)")
         except RuntimeError as e:
@@ -371,18 +368,9 @@ class ScoringEngine:
                 log.debug(f"[SCALPER] {asset}: SHORT BLOCKED: potential squeeze ({_squeeze_reason})")
                 return None, score
 
-        # 3d. Apply Meta-Learning adjustment
-        meta_delta, meta_reason, pattern_key = self._apply_meta_learning(asset, "scalper", side, score)
-        if meta_delta != 0:
-            score += meta_delta
-            reasons.append(meta_reason)
-        score = max(0, min(score, 100))
-
         # 4. Build signal with scalper TP/SL (now dynamic based on Volatility)
         vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
         signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol, trend_pct)
-        signal.meta_pattern_key = pattern_key
-        signal.meta_score_delta = meta_delta
 
         # Attach last-known funding rate for Telegram warning
         _fr_cache = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
@@ -803,22 +791,6 @@ class ScoringEngine:
             reasons=reasons
         )
 
-        # Compute Expected Edge using ML (hanya saat ENABLE_INTELLIGENCE=True)
-        import config as _cfg
-        if _cfg.ENABLE_INTELLIGENCE:
-            features = extract_live_features(
-                score=score,
-                meta_delta=getattr(breakdown, 'meta_score_delta', 0),
-                bd=breakdown,
-                funding_rate=0.0,   # scalper tidak fetch funding — pakai 0.0 konsisten
-                realized_vol=realized_vol,
-                trend_pct=trend_pct,
-                side=side.value if hasattr(side, 'value') else str(side)
-            )
-            edge = intelligence_model.predict_edge(features)
-        else:
-            edge = None
-
         return TradeSignal(
             signal_id=str(uuid.uuid4())[:8].upper(),
             asset=asset,
@@ -832,9 +804,6 @@ class ScoringEngine:
             tp1=tp1,
             tp2=tp2,
             suggested_leverage=leverage,
-            meta_pattern_key=getattr(breakdown, 'meta_pattern_key', None),
-            meta_score_delta=getattr(breakdown, 'meta_score_delta', 0),
-            expected_edge=edge
         )
 
     # ──────────────────────────────────────────
@@ -1221,15 +1190,6 @@ class ScoringEngine:
                 f"SesThresh:{session_threshold_delta:+d} Mult:{final_multiplier:.2f}x ({vol_regime.value})"
             )
 
-        # ── Apply Meta-Learning adjustment ─────────────────────────────
-        meta_delta, meta_reason, pattern_key = self._apply_meta_learning(asset, "standard", side, final_score)
-        if meta_delta != 0:
-            final_score += meta_delta
-            all_reasons.append(meta_reason)
-        final_score = max(0, min(final_score, 100))
-
-        breakdown.meta_pattern_key = pattern_key
-        breakdown.meta_score_delta = meta_delta
         breakdown.final_score = final_score
 
         # ── FIX #9: OI-tier threshold adjustment ──────────────────────
@@ -1489,22 +1449,6 @@ class ScoringEngine:
         if score >= 75:
             leverage = min(RISK.default_leverage + 2, RISK.max_leverage)
 
-        # Compute Expected Edge via Intelligence Model (sama seperti scalper mode)
-        import config as _cfg
-        if _cfg.ENABLE_INTELLIGENCE:
-            features = extract_live_features(
-                score=score,
-                meta_delta=getattr(breakdown, 'meta_score_delta', 0),
-                bd=breakdown,
-                funding_rate=funding_rate,
-                realized_vol=realized_vol,
-                trend_pct=trend_pct,
-                side=side.value if hasattr(side, 'value') else str(side)
-            )
-            expected_edge = intelligence_model.predict_edge(features)
-        else:
-            expected_edge = None
-
         return TradeSignal(
             signal_id=str(uuid.uuid4())[:8].upper(),
             asset=asset,
@@ -1518,9 +1462,6 @@ class ScoringEngine:
             tp1=tp1,
             tp2=tp2,
             suggested_leverage=leverage,
-            meta_pattern_key=getattr(breakdown, 'meta_pattern_key', None),
-            meta_score_delta=getattr(breakdown, 'meta_score_delta', 0),
-            expected_edge=expected_edge
         )
 
     # ──────────────────────────────────────────
@@ -1581,32 +1522,3 @@ class ScoringEngine:
             log.debug(f"[{asset}] MTF fetch error: {e}")
             return "neutral"
 
-    def _apply_meta_learning(self, asset: str, mode: str, side: Side, raw_score: int) -> Tuple[int, str, Optional[str]]:
-        """
-        Adjust score based on historical pattern winrate.
-        Pattern key: {mode}_{asset}_{side}
-        """
-        if not config.SIGNAL.meta_learning_enabled:
-            return 0, "", None
-            
-        from core.db import user_db
-        pattern_key = f"{mode.lower()}_{asset}_{side.value}"
-        stats = user_db.get_meta_pattern_stats(pattern_key)
-        
-        if not stats or stats["samples"] < config.SIGNAL.meta_min_samples:
-            return 0, "", pattern_key
-            
-        wr = stats["winrate_ema"]
-        delta = 0
-        reason = ""
-        
-        max_d = config.SIGNAL.meta_max_delta
-        if wr >= config.SIGNAL.meta_boost_threshold:
-            delta = max_d
-            reason = f"🧠 Meta-learning: HI-WR pattern ({wr*100:.0f}%) → +{max_d}"
-        elif wr <= config.SIGNAL.meta_penalty_threshold:
-            delta = -max_d
-            reason = f"🧠 Meta-learning: LO-WR pattern ({wr*100:.0f}%) → -{max_d}"
-
-        delta = max(-max_d, min(max_d, delta))
-        return delta, reason, pattern_key
