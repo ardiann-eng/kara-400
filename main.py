@@ -1044,7 +1044,7 @@ class KaraBot:
                 _t0 = time.monotonic()
                 pos = await session.executor.open_position(user_signal)
                 _latency_ms = (time.monotonic() - _t0) * 1000
-                log.info(
+                log.debug(
                     f"[EXEC] {user_signal.asset} {user_signal.side.value.upper()} "
                     f"score={user_signal.score} latency={_latency_ms:.0f}ms"
                 )
@@ -1083,7 +1083,7 @@ class KaraBot:
         _t0 = time.monotonic()
         pos = await session.executor.open_position(signal)
         _latency_ms = (time.monotonic() - _t0) * 1000
-        log.info(
+        log.debug(
             f"[EXEC] {signal.asset} {signal.side.value.upper()} "
             f"score={signal.score} latency={_latency_ms:.0f}ms"
         )

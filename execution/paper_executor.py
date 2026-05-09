@@ -209,7 +209,7 @@ class PaperExecutor:
         # Record per-asset trade for repeat guard
         self.risk.record_asset_trade(signal.asset)
 
-        log.info(
+        log.debug(
             f" [PAPER] Opened {signal.asset} {signal.side.value.upper()} "
             f"@ {fill_price} | {contracts:.4f} contracts "
             f"| margin: {format_usd(margin)} | lev: {signal.suggested_leverage}x"

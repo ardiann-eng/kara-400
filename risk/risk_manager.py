@@ -180,7 +180,7 @@ class RiskManager:
             self._asset_trade_times[key] = []
         self._asset_trade_times[key].append(time.time())
         count = len(self._asset_trade_times[key])
-        log.info(f"[REPEAT GUARD] {asset}: trade ke-{count} hari ini dicatat.")
+        log.debug(f"[REPEAT GUARD] {asset}: trade ke-{count} hari ini dicatat.")
         self._persist_risk_state()   # survive restart
 
     # ──────────────────────────────────────────

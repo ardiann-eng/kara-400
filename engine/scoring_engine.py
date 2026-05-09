@@ -252,7 +252,26 @@ class ScoringEngine:
             if sig and (now_ts - last_ts >= cooldown_secs):
                 signals["scalper"] = sig
                 self._last_signal_ts[f"{asset}_scalper"] = now_ts
-                log.info(f"⚡ SCALPER SIGNAL: {asset} {sig.side.value.upper()} score={score_scl}")
+
+                # OI delta 1m dari snapshot cache
+                _snaps = self._oi_snapshots.get(asset, [])
+                _oi_str = ""
+                if len(_snaps) >= 2:
+                    _snap_now  = [v for t, v in _snaps if t >= now_ts - 90]
+                    _snap_prev = [v for t, v in _snaps if t < now_ts - 90 and t >= now_ts - 180]
+                    if _snap_now and _snap_prev and _snap_prev[-1] > 0:
+                        _oi_delta = (_snap_now[-1] - _snap_prev[-1]) / _snap_prev[-1] * 100
+                        _oi_str = f" | OI_1m={_oi_delta:+.2f}%"
+
+                _fr_str = f" | FR={sig.funding_rate*100:+.4f}%" if sig.funding_rate is not None else ""
+                _reasons = ", ".join(sig.breakdown.reasons) if sig.breakdown.reasons else "-"
+                log.info(
+                    f"⚡ SCALPER SIGNAL: {asset} {sig.side.value.upper()} score={score_scl}"
+                    f" | entry={sig.entry_price} | SL={sig.stop_loss} | TP1={sig.tp1} | TP2={sig.tp2}"
+                    f" | {sig.suggested_leverage}x | regime={sig.regime.value}"
+                    f"{_fr_str}{_oi_str}"
+                    f" | [{_reasons}]"
+                )
             elif sig:
                 log.debug(f"{asset} [SCALPER]: cooldown active (score={score_scl} blocked)")
         except RuntimeError as e:
