@@ -886,36 +886,63 @@ class RiskManager:
 
         # ── Rule G: Volume-spike exit — price turun + volume naik → exit ─
         # Hanya aktif sebelum TP1 (setelah TP1, SL breakeven + trailing cukup).
+        #
+        # [FIX 2026-05-09] 4 perbaikan untuk mencegah false-positive:
+        # 1. Gunakan candle[-3] vs candle[-2] (keduanya CLOSED) — bukan candle berjalan
+        #    yang volumenya belum lengkap dan terlihat "kecil" di tengah menit.
+        # 2. Harga harus sudah turun >= 0.2% dari entry (bukan 1 tick).
+        # 3. Volume candle spike harus >= $10K notional.
+        # 4. Multiplier dinaikkan ke 3.0x (dari 1.5x) via config.
         if not position.tp1_hit:
             scfg = SCALPER
             if getattr(scfg, 'vol_spike_exit_enabled', True):
-                vol_mult     = getattr(scfg, 'vol_spike_multiplier', 1.5)
-                vol_history  = getattr(position, 'candle_volumes', [])
-                close_hist   = getattr(position, 'candle_closes', [])
+                vol_mult         = getattr(scfg, 'vol_spike_multiplier', 3.0)
+                min_price_drop   = getattr(scfg, 'vol_spike_min_price_drop_pct', 0.002)
+                min_volume_usd   = getattr(scfg, 'vol_spike_min_volume_usd', 10_000)
+                vol_history      = getattr(position, 'candle_volumes', [])
+                close_hist       = getattr(position, 'candle_closes', [])
 
-                if len(vol_history) >= 2 and len(close_hist) >= 2:
-                    last_vol  = vol_history[-1]
-                    prev_vol  = vol_history[-2]
-                    last_cls  = close_hist[-1]
-                    prev_cls  = close_hist[-2]
+                # Butuh minimal 3 candle agar bisa pakai 2 candle yang sudah CLOSED
+                # (candle[-1] = berjalan, candle[-2] = baru selesai, candle[-3] = sebelumnya)
+                if len(vol_history) >= 3 and len(close_hist) >= 3:
+                    # Gunakan candle yang sudah CLOSED — [-1] adalah candle yang masih berjalan
+                    spike_vol = vol_history[-2]   # candle closed terbaru
+                    prev_vol  = vol_history[-3]   # candle closed sebelumnya
+                    spike_cls = close_hist[-2]    # close candle baru selesai
+                    prev_cls  = close_hist[-3]    # close candle sebelumnya
 
-                    if prev_vol > 0 and last_vol >= prev_vol * vol_mult:
-                        bearish_spike = position.side == Side.LONG  and last_cls < prev_cls
-                        bullish_spike = position.side == Side.SHORT and last_cls > prev_cls
+                    # Filter 1: Volume harus lonjakan ekstrem (3.0x)
+                    if prev_vol > 0 and spike_vol >= prev_vol * vol_mult:
 
-                        if bearish_spike or bullish_spike:
-                            direction = "↓ harga turun" if bearish_spike else "↑ harga naik"
-                            return {
-                                "action":      "vol_spike_exit",
-                                "close_ratio": 1.0,
-                                "price":       current_price,
-                                "pnl":         position.pnl_unrealized,
-                                "position_id": position.position_id,
-                                "message":     (
-                                    f"📊 Vol spike exit: {direction} + volume "
-                                    f"{last_vol/prev_vol:.1f}x. Exit sebelum SL."
-                                ),
-                            }
+                        # Filter 2: Volume spike harus signifikan secara nominal
+                        # (pakai spike_vol × mark_price sebagai estimasi notional)
+                        spike_notional = spike_vol * current_price
+                        if spike_notional >= min_volume_usd:
+
+                            # Filter 3: Harga harus sudah turun >= min_price_drop dari entry
+                            price_drop_from_entry = (
+                                (position.entry_price - current_price) / position.entry_price
+                                if position.side == Side.LONG
+                                else (current_price - position.entry_price) / position.entry_price
+                            )
+
+                            bearish_spike = position.side == Side.LONG  and spike_cls < prev_cls
+                            bullish_spike = position.side == Side.SHORT and spike_cls > prev_cls
+
+                            if (bearish_spike or bullish_spike) and price_drop_from_entry >= min_price_drop:
+                                direction = "↓ harga turun" if bearish_spike else "↑ harga naik"
+                                return {
+                                    "action":      "vol_spike_exit",
+                                    "close_ratio": 1.0,
+                                    "price":       current_price,
+                                    "pnl":         position.pnl_unrealized,
+                                    "position_id": position.position_id,
+                                    "message":     (
+                                        f"📊 Vol spike exit: {direction} + volume "
+                                        f"{spike_vol/prev_vol:.1f}x "
+                                        f"(${spike_notional:,.0f} notional). Exit sebelum SL."
+                                    ),
+                                }
 
         # ── Rule E: Scalper max-hold force exit ──────────────────────────
         if getattr(position, 'trade_mode', 'scalper') == 'scalper':

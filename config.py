@@ -246,7 +246,7 @@ class ScalperConfig:
 
     # MTF Score weights
     mtf_score_bonus:         int = 12        # bonus if 1m aligns with 15m trend
-    mtf_score_penalty:       int = -10       # penalty if counter-trend
+    mtf_score_penalty:       int = -5        # penalty if counter-trend (was -10, terlalu berat)
 
     # Scalper momentum reversal exit (PRIMARY protection — menggantikan hard SL)
     # [SL FIX 2026-05-08] Diperketat: aktif dari menit ke-1 (bukan ke-3), 2 candle (bukan 3).
@@ -257,8 +257,15 @@ class ScalperConfig:
     momentum_exit_loss_floor:    float = -0.0030  # exit kalau loss <= -0.30% (was -0.15%, terlalu sensitif noise)
 
     # Volume-spike exit: price turun + volume naik = exit segera (sebelum SL/time kena)
+    # [FIX 2026-05-09] Diperketat agar tidak false-positive:
+    # - multiplier 3.0x (was 1.5x) — butuh lonjakan volume yang benar-benar ekstrem
+    # - min_price_drop_pct: harga harus turun >= 0.2% dari entry, bukan cuma 1 tick
+    # - min_volume_usd: filter volume kecil — lonjakan 100x dari $100 ke $10K tidak relevan
+    # - Hanya bandingkan candle yang sudah CLOSED ([-3] vs [-2]), bukan candle berjalan
     vol_spike_exit_enabled:      bool  = True
-    vol_spike_multiplier:        float = 1.5    # volume last candle harus >= 1.5x candle sebelumnya
+    vol_spike_multiplier:        float = 3.0    # volume candle closed harus >= 3.0x candle sebelumnya (was 1.5x)
+    vol_spike_min_price_drop_pct: float = 0.002  # harga harus sudah turun >= 0.2% dari entry (was 0 — 1 tick)
+    vol_spike_min_volume_usd:    float = 10_000  # minimum notional volume candle spike ($10K) untuk filter noise
 
     # Early trailing: aktif dari profit threshold tanpa nunggu TP1 flag
     early_trail_enabled:         bool  = True

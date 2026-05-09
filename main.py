@@ -857,14 +857,14 @@ class KaraBot:
             top_str = ", ".join([f"{a}:{s}" for a, s in top_scorers[:5]])
             scalper_extra = len(scalper_only_assets)
 
-            # Include blocked info in summary when relevant
             blocked_info = f" | Blocked: {blocked_count}" if blocked_count > 0 else ""
             log.info(
-                f" 🏁 Scan complete: {total_scanned} markets "
-                f"({len(self.watched_assets)} standard"
-                f"{f' + {scalper_extra} scalper-only' if scalper_extra else ''}). "
-                f"Signals: {sig_count} | Scored: {scored_count}{blocked_info} | "
-                f"Top: [{top_str or 'None'}] | {scan_elapsed:.1f}s"
+                f"🏁 Scan complete | "
+                f"Markets: {total_scanned} total "
+                f"({len(self.watched_assets)} watched + {scalper_extra} scalper-only) | "
+                f"Scored: {scored_count} | Signals: {sig_count}{blocked_info} | "
+                f"Top: [{top_str or 'None'}] | "
+                f"Elapsed: {scan_elapsed:.1f}s"
             )
             
             # Persist OI snapshots to prevent amnesia
@@ -1030,12 +1030,13 @@ class KaraBot:
                 )
 
                 if not approved:
-                    log.info(
-                        f"⛔ [AUTO_BLOCKED] user={chat_id} mode={user_mode} asset={user_signal.asset} "
-                        f"score={user_signal.score} auto_threshold={effective_auto_threshold} reason={reason}"
-                    )
+                    # Akumulasi, jangan log per user (spam)
+                    if not hasattr(self, '_blocked_log_buffer'):
+                        self._blocked_log_buffer = {}
+                    key = f"{user_signal.asset}:{reason[:60]}"
+                    self._blocked_log_buffer[key] = self._blocked_log_buffer.get(key, 0) + 1
                     continue
-                
+
                 # If approved, proceed to auto-execution
                 user_signal.auto_executed = True
                 user_db.save_signal(user_signal) # v17 Sync
@@ -1057,6 +1058,13 @@ class KaraBot:
                     f"user={chat_id} → NOT executed (FULL_AUTO=off, set KARA_FULL_AUTO=true to enable)"
                 )
                 continue
+
+        # Flush blocked log buffer sebagai 1 baris ringkasan (bukan spam per-user)
+        if hasattr(self, '_blocked_log_buffer') and self._blocked_log_buffer:
+            for reason_key, count in self._blocked_log_buffer.items():
+                asset_part, reason_part = reason_key.split(':', 1)
+                log.info(f"⛔ [AUTO_BLOCKED] {asset_part} ×{count} users — {reason_part}")
+            self._blocked_log_buffer.clear()
 
     async def _on_trade_confirmed(self, signal, chat_id: str):
         session = await self.get_session(chat_id)
@@ -1173,7 +1181,8 @@ class KaraBot:
 
             actions = await session.executor.update_positions(prices)
             early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "momentum_exit", "vol_spike_exit", "early_trail")]
-            other_actions = [a for a in actions if a.get("action") not in ("time_exit", "momentum_exit")]
+            # Exclude semua early_exit dari other_actions agar tidak dikirim dua kali
+            other_actions = [a for a in actions if a.get("action") not in ("time_exit", "momentum_exit", "vol_spike_exit", "early_trail")]
 
             # Kirim notifikasi personal per posisi (KARA style)
             if early_exit_actions:
@@ -1204,11 +1213,23 @@ class KaraBot:
                     outcome = "Profit" if pnl >= 0 else "Loss"
 
                     if a.get("action") == "momentum_exit":
-                        header = f"↩️ <b>Momentum Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
+                        header  = f"↩️ <b>Momentum Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
                         subtext = "<i>Candle berbalik arah — keluar sebelum kena SL.</i>"
-                    else:
-                        header = f"⏱ <b>Time Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
+                        exit_detail = ""
+                    elif a.get("action") == "vol_spike_exit":
+                        header  = f"📊 <b>Vol Spike Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
                         subtext = f"<i>Posisi ditutup otomatis setelah {hold_min} menit~</i>"
+                        # Ambil detail dari message yang dibuat di risk_manager
+                        raw_msg = a.get("message", "")
+                        exit_detail = f"\n📊 <i>{raw_msg}</i>" if raw_msg else ""
+                    elif a.get("action") == "early_trail":
+                        header  = f"🛡️ <b>Early Trail Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
+                        subtext = "<i>Profit dikunci sebelum harga berbalik.</i>"
+                        exit_detail = ""
+                    else:  # time_exit
+                        header  = f"⏱ <b>Time Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
+                        subtext = f"<i>Posisi ditutup otomatis setelah {hold_min} menit~</i>"
+                        exit_detail = ""
 
                     # Akumulasi total PnL: semua partial close (pnl_realized) + final close ini
                     total_pnl   = getattr(pos, "pnl_realized", 0.0) + pnl
@@ -1254,7 +1275,8 @@ class KaraBot:
                         f"{outcome_emoji} <b>{outcome}    {total_sign}{total_roe_pct:.2f}%</b>\n"
                         f"Total PnL : <code>{total_sign}${abs(total_pnl):.2f}</code>  (<code>{total_idr_str}</code>)\n"
                         f"Entry     : <code>${pos.entry_price:,.3f}</code>  →  Exit: <code>${price:,.3f}</code>\n"
-                        f"Durasi    : {hold_min} menit",
+                        f"Durasi    : {hold_min} menit"
+                        f"{exit_detail}",
                         target_chat_id=chat_id,
                         reply_markup=inline_markup
                     )

@@ -327,20 +327,62 @@ class ScoringEngine:
         # 3. Fetch 15m MTF trend
         mtf_trend = await self._fetch_15m_mtf_data(asset)
 
+        # 3b. Fundamental data (OI, Funding, Liquidation) — from cache, zero extra API calls
+        #     [FIX 2026-05-09] Sebelumnya hanya dipakai di standard mode.
+        #     Sekarang scalper juga pakai agar sinyal diperkaya dengan data fundamental.
+        try:
+            funding = await self.client.get_funding_data(asset, meta=meta_data)
+            oi = await self.client.get_oi_data(asset, meta=meta_data)
+        except Exception:
+            funding = FundingData(asset=asset, funding_rate=0, premium=0, predicted_rate=0, hourly_trend=[])
+            oi = OIData(asset=asset, open_interest=0, oi_change_pct=0.0, oi_change_24h=0.0)
+
+        # Spot price for basis calculation (same as standard mode)
+        now_mono = time.monotonic()
+        if not self._spot_prices or (now_mono - self._spot_cache_time) > 10:
+            self._spot_prices = await self.client.get_all_mids()
+            self._spot_cache_time = now_mono
+        spot_price = self._spot_prices.get(f"@{asset}") or getattr(oi, 'oracle_price', 0) or mark_price
+
+        # Price history + OI snapshot tracking (same as standard mode)
+        self._update_price_history(asset, mark_price)
+        price_change_1h = self._get_price_change(asset, minutes=60)
+        _now_ts = time.time()
+        if asset not in self._oi_snapshots:
+            self._oi_snapshots[asset] = []
+        self._oi_snapshots[asset].append((_now_ts, oi.open_interest))
+        one_hour_ago = _now_ts - 3600
+        old_oi = [v for t, v in self._oi_snapshots[asset] if t <= one_hour_ago]
+        if old_oi:
+            oi.oi_change_pct = (oi.open_interest - old_oi[-1]) / max(old_oi[-1], 1)
+        self._oi_snapshots[asset] = [
+            (t, v) for t, v in self._oi_snapshots[asset] if t > _now_ts - 7200
+        ]
+
+        # Run fundamental analyzers (same analyzers as standard mode)
+        funding_history = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
+        oi_bull, oi_bear, oi_reasons, oi_warns = self.oi_funding_analyzer.analyze(
+            asset, funding, oi, funding_history, price_change_1h, mark_price, spot_price
+        )
+        recent_liqs = self.cache.liquidations if hasattr(self.cache, 'liquidations') else []
+        oi_usd = oi.open_interest * mark_price
+        liq_bull, liq_bear, liq_reasons, liq_warns, liq_map = self.liq_analyzer.analyze(
+            asset, mark_price, recent_liqs, oi_usd,
+            funding_rate=funding.funding_rate
+        )
+
         # Short Squeeze Detection: price spike + OI drop dalam 1m = squeeze risk → blok SHORT
         _squeeze_detected = False
         _squeeze_reason = ""
-        _now_ts = time.time()
         _snaps = self._oi_snapshots.get(asset, [])
         if len(_snaps) >= 2:
-            _snap_1m_ago = [v for t, v in _snaps if t >= _now_ts - 90]  # last 90s
+            _snap_1m_ago = [v for t, v in _snaps if t >= _now_ts - 90]
             _snap_prev = [v for t, v in _snaps if t < _now_ts - 90 and t >= _now_ts - 180]
             if _snap_1m_ago and _snap_prev:
                 _oi_now = _snap_1m_ago[-1]
                 _oi_prev = _snap_prev[-1]
                 if _oi_prev > 0:
                     _oi_delta_pct = (_oi_now - _oi_prev) / _oi_prev
-                    # Ambil price change dari candles terakhir 1m
                     _price_1m_ago = None
                     if len(candles) >= 2:
                         try:
@@ -355,8 +397,13 @@ class ScoringEngine:
                                 f"price +{_price_chg*100:.1f}% + OI {_oi_delta_pct*100:.1f}%"
                             )
 
-        # 4. Compute scalper indicators
-        score, side, reasons = self._calculate_scalper_score(asset, mark_price, candles, mtf_trend)
+        # 4. Compute scalper indicators (enriched with fundamental data)
+        score, side, reasons = self._calculate_scalper_score(
+            asset, mark_price, candles, mtf_trend,
+            oi_bull=oi_bull, oi_bear=oi_bear,
+            liq_bull=liq_bull, liq_bear=liq_bear,
+            fund_reasons=oi_reasons[:2], liq_reasons=liq_reasons[:2],
+        )
 
         # FIX #5: Session adjusts entry threshold, not score.
         session_bonus, session_reasons, session_threshold_delta = self._get_session_bonus()
@@ -477,9 +524,15 @@ class ScoringEngine:
             return True, f"🧭 15m confirm OK (EMA9/21, trend {trend*100:.2f}%)", regime
         return False, f"🧭 MTF blocked: 15m trend not aligned ({trend*100:.2f}%)", regime
 
-    def _calculate_scalper_score(self, asset: str, mark_price: float, candles: list, mtf_trend: str = "neutral") -> Tuple[int, Side, List[str]]:
+    def _calculate_scalper_score(
+        self, asset: str, mark_price: float, candles: list, mtf_trend: str = "neutral",
+        oi_bull: float = 0, oi_bear: float = 0,
+        liq_bull: float = 0, liq_bear: float = 0,
+        fund_reasons: list = None, liq_reasons: list = None,
+    ) -> Tuple[int, Side, List[str]]:
         """
-        Fast scalper scoring using technical indicators on 1m candles.
+        Fast scalper scoring using technical indicators on 1m candles
+        + fundamental data (OI, Funding, Liquidation) from standard pipeline.
         Returns (score: int, side: Side, reasons: List[str])
         """
         score = 0
@@ -534,11 +587,39 @@ class ScoringEngine:
                 bear_pts += 8
                 reasons.append(f"🔴 Mild ask pressure ({imb:.2f})")
 
+        # ── OI + Funding Analysis (from standard pipeline — zero API calls) ──────
+        # [FIX 2026-05-09] Sebelumnya scalper hanya pakai teknikal.
+        # Sekarang fundamental data (OI rising+funding, basis, liquidation) juga
+        # diperhitungkan — sama seperti standard mode, di-scale max ±12 pts.
+        if oi_bull > 0 or oi_bear > 0:
+            fund_delta = oi_bull - oi_bear
+            fund_pts = max(-12, min(12, int(fund_delta)))
+            if fund_pts > 0:
+                bull_pts += fund_pts
+                reasons.append(f"📊 OI/Funding bullish (+{fund_pts})")
+            elif fund_pts < 0:
+                bear_pts += abs(fund_pts)
+                reasons.append(f"📊 OI/Funding bearish ({fund_pts})")
+            if fund_reasons:
+                reasons.extend(fund_reasons)
+
+        # ── Liquidation Analysis (from standard pipeline) ────────────────────────
+        if liq_bull > 0 or liq_bear > 0:
+            liq_delta = liq_bull - liq_bear
+            liq_pts = max(-8, min(8, int(liq_delta)))
+            if liq_pts > 0:
+                bull_pts += liq_pts
+                reasons.append(f"💥 Liq bias bullish (+{liq_pts})")
+            elif liq_pts < 0:
+                bear_pts += abs(liq_pts)
+                reasons.append(f"💥 Liq bias bearish ({liq_pts})")
+            if liq_reasons:
+                reasons.extend(liq_reasons)
+
         if len(candles) < 10:
-            # Cannot compute EMA/RSI without data — use only OB score
+            # Cannot compute EMA/RSI without data — use OB + fundamental score
             total = bull_pts + bear_pts
             side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
-            # Skip setting bull_candles/bear_candles — default 0
             bull_candles = 0
             bear_candles = 0
             score = min(total, 100)
@@ -607,11 +688,20 @@ class ScoringEngine:
             else:
                 rsi = 100.0
 
-            if rsi < 35:
+            # [FIX 2026-05-09] RSI zones diperlebar — sebelumnya <35/>65 terlalu ketat
+            # untuk 1m timeframe. RSI 1m jarang menyentuh extreme, jadi zone diperluas
+            # agar RSI lebih sering berkontribusi ke skor.
+            if rsi < 30:
                 bull_pts += 15
+                reasons.append(f"📊 RSI extreme oversold ({rsi:.1f}) → strong buy")
+            elif rsi < 40:
+                bull_pts += 8
                 reasons.append(f"📊 RSI oversold ({rsi:.1f}) → buy signal")
-            elif rsi > 65:
+            elif rsi > 70:
                 bear_pts += 15
+                reasons.append(f"📊 RSI extreme overbought ({rsi:.1f}) → strong sell")
+            elif rsi > 60:
+                bear_pts += 8
                 reasons.append(f"📊 RSI overbought ({rsi:.1f}) → sell signal")
             else:
                 reasons.append(f"📊 RSI neutral ({rsi:.1f})")

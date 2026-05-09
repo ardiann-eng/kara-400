@@ -2572,11 +2572,11 @@ class KaraTelegram:
                 low = r.lower()
                 if any(x in low for x in ["rejection wick", "rsi divergence", "bearish rsi", "bullish rsi", "squeeze"]):
                     shortists.append(row)
-                elif any(x in low for x in ["regime", "vwap", "session", "price", "trend", "mtf", "structure", "momentum"]):
+                elif any(x in low for x in ["regime", "vwap", "session", "price", "trend", "mtf", "structure", "momentum", "rsi", "ema", "volume surge"]):
                     marketists.append(row)
-                elif any(x in low for x in ["funding", "pred", "basis", "flow", "cvd"]):
+                elif any(x in low for x in ["funding", "pred", "basis", "flow", "cvd", "oi/funding"]):
                     fundingists.append(row)
-                elif any(x in low for x in ["oi", "liq ", "imbalance", "depth", "wall", "bid", "ask"]):
+                elif any(x in low for x in ["oi", "liq", "imbalance", "depth", "wall", "bid", "ask"]):
                     liqists.append(row)
                 else:
                     others.append(row)
@@ -2636,14 +2636,15 @@ class KaraTelegram:
 
             # ── System notes ──────────────────────────────────────────
             system_notes = [
-                "🧭 Scalper pakai konfirmasi MTF 15m untuk validasi trend.",
-                "🧩 Market structure (HH/HL + LH/LL) dibobotkan ke skor.",
-                "🕯️ Bearish rejection wick detection aktif (+8 bear pts).",
-                "📉 RSI divergence detection aktif (bearish &amp; bullish, +10 pts).",
-                "🧠 Meta-scoring aktif: skor disesuaikan dari winrate historis pola.",
+                "🧠 Scoring engine: teknikal (EMA, RSI, CVD, Momentum) + fundamental (OI, Funding, Liquidation).",
+                "🧭 MTF 15m confirmation: skor +12 jika aligned, -5 jika counter-trend.",
+                "🧩 Market structure (HH/HL + LH/LL) dan RSI divergence aktif.",
+                "📊 OI/Funding analyzer: OI rising + funding bias + spot-perp basis.",
+                "💥 Liquidation heatmap: cascade risk + liq density analysis.",
+                "🔥 Volume surge + rejection wick detection aktif.",
             ]
             if is_short:
-                system_notes.append("🛡️ SHORT: filter funding rate + short squeeze guard aktif.")
+                system_notes.append("🛡️ SHORT: filter funding rate + squeeze guard + anti-trend aktif.")
             system_text = "⚙️ <b>Sistem KARA Aktif:</b>\n" + "\n".join(f"• {x}" for x in system_notes)
 
             side_label = "SHORT 🔴" if is_short else "LONG 🟢"
