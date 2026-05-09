@@ -20,7 +20,7 @@ COPY requirements.txt .
 
 # Build stage
 FROM base as builder
-RUN pip install --user --no-cache-dir -r requirements.txt
+RUN pip install --user --no-cache-dir --retries 5 --timeout 120 -r requirements.txt
 
 # Runtime stage
 FROM base as runtime
