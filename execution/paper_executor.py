@@ -357,7 +357,7 @@ class PaperExecutor:
         # Full-close actions (SL, trailing, time, momentum): delegate entirely to
         # close_position() which owns the balance update + meta + ML labeling.
         # Do NOT touch balance/pnl here — close_position handles it all.
-        if action["action"] in ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "vol_spike_exit", "early_trail"):
+        if action["action"] in ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "early_trail"):
             if pos.status == PositionStatus.OPEN:
                 result = await self.close_position(pos.position_id, fill_price, action["action"])
                 return {**action, "pnl": (result or {}).get("pnl", 0), "position_id": pos.position_id}

@@ -218,8 +218,8 @@ class ScalperConfig:
 
     # Timing
     max_hold_minutes:        float = 20.0     # force close after 20min if no TP hit (was 12)
-    max_hold_grace_minutes:  float = 8.0      # extra grace if still in deeper loss (was 6)
-    max_hold_soft_floor_pct: float = -0.0015  # allow delay if loss worse than -0.15%
+    max_hold_grace_minutes:  float = 35.0     # 35 min extra grace for losing positions to recover to BEP
+    max_hold_soft_floor_pct: float = -0.020   # grace aktif jika loss ≤ -2.0% (beri waktu recovery)
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold — HARD THRESHOLD SCALPER (TIDAK BISA DIUBAH USER)
@@ -262,39 +262,28 @@ class ScalperConfig:
     # = noise normal crypto), tidak ada confirmation layer, skor masuk ke exit logic.
     # Solusi: ATR-dynamic threshold + 5-layer confirmation, skor TIDAK dipakai di exit.
     momentum_exit_enabled:            bool  = True
-    momentum_exit_min_minutes:        float = 5.0     # min hold 5 menit sebelum exit diizinkan
+    momentum_exit_min_minutes:        float = 3.0     # min hold 3 menit — exit lebih awal saat momentum redup
 
     # Layer 1 — Minimum pullback (anti-noise)
-    momentum_exit_min_pullback_pct:   float = 0.008   # floor absolut 0.8% (never exit < ini)
-    momentum_exit_atr_pullback_mult:  float = 1.5     # threshold = max(0.8%, ATR14% * 1.5)
+    momentum_exit_min_pullback_pct:   float = 0.005   # floor 0.5% — lebih sensitif tangkap reversal awal
+    momentum_exit_atr_pullback_mult:  float = 1.2     # threshold = max(0.5%, ATR14% * 1.2)
 
     # Layer 2 — Volume confirmation
     momentum_exit_volume_mult:        float = 1.3     # current vol harus >= SMA20 * 1.3
 
-    # Layer 3 — Trend structure break (EMA cross)
-    momentum_exit_ema_fast:           int   = 20      # EMA fast period
-    momentum_exit_ema_slow:           int   = 50      # EMA slow period
+    # Layer 3 — Trend structure break (EMA cross) — faster periods to detect fading early
+    momentum_exit_ema_fast:           int   = 9       # EMA fast period (was 20 — too slow)
+    momentum_exit_ema_slow:           int   = 21      # EMA slow period (was 50 — too slow)
 
-    # Layer 4 — Momentum indicators
-    momentum_exit_rsi_threshold:      float = 45.0    # RSI < 45 = momentum fading
+    # Layer 4 — Momentum indicators — more sensitive to catch fading early
+    momentum_exit_rsi_threshold:      float = 48.0    # RSI < 48 = momentum fading (was 45 — too late)
     # MACD histogram < 0 also counts (calculated inline)
 
     # Layer 5 — HTF trend filter (15m EMA)
     momentum_exit_htf_ema_fast:       int   = 20      # 15m EMA fast
     momentum_exit_htf_ema_slow:       int   = 50      # 15m EMA slow
-    # Kalau HTF uptrend intact (ema_fast > ema_slow), threshold pullback dinaikkan ke 3%
-    momentum_exit_htf_uptrend_pullback: float = 0.030  # butuh 3% drop jika HTF masih naik
-
-    # Volume-spike exit: price turun + volume naik = exit segera (sebelum SL/time kena)
-    # [FIX 2026-05-09] Diperketat agar tidak false-positive:
-    # - multiplier 3.0x (was 1.5x) — butuh lonjakan volume yang benar-benar ekstrem
-    # - min_price_drop_pct: harga harus turun >= 0.2% dari entry, bukan cuma 1 tick
-    # - min_volume_usd: filter volume kecil — lonjakan 100x dari $100 ke $10K tidak relevan
-    # - Hanya bandingkan candle yang sudah CLOSED ([-3] vs [-2]), bukan candle berjalan
-    vol_spike_exit_enabled:      bool  = True
-    vol_spike_multiplier:        float = 3.0    # volume candle closed harus >= 3.0x candle sebelumnya (was 1.5x)
-    vol_spike_min_price_drop_pct: float = 0.002  # harga harus sudah turun >= 0.2% dari entry (was 0 — 1 tick)
-    vol_spike_min_volume_usd:    float = 10_000  # minimum notional volume candle spike ($10K) untuk filter noise
+    # Kalau HTF uptrend intact (ema_fast > ema_slow), threshold pullback dinaikkan ke 2%
+    momentum_exit_htf_uptrend_pullback: float = 0.020  # butuh 2% drop jika HTF masih naik (was 3% — too patient)
 
     # Early trailing: aktif dari profit threshold tanpa nunggu TP1 flag
     early_trail_enabled:         bool  = True

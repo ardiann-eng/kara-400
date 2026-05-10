@@ -643,6 +643,8 @@ class ScoringEngine:
             return min(bull_pts + bear_pts, 100), side, reasons
 
         # ── Momentum Confirmation (Institutional Filter) ─────────────────
+        # [FIX 2026-05-10] Dikurangi dari 10→8 pts karena redundan dengan EMA cross.
+        # Keduanya mengukur arah harga terbaru — double counting membuat skor inflasi.
         bull_candles = 0
         bear_candles = 0
         if len(closes) >= 3:
@@ -650,15 +652,17 @@ class ScoringEngine:
             bear_candles = sum(1 for c, o in zip(closes[-3:], opens[-3:]) if c < o)
             
             if bull_candles >= 2:
-                bull_pts += 10
+                bull_pts += 8
                 reasons.append(f"🔥 Momentum 1m Bullish ({bull_candles}/3 Green)")
             elif bear_candles >= 2:
-                bear_pts += 10
+                bear_pts += 8
                 reasons.append(f"🩸 Momentum 1m Bearish ({bear_candles}/3 Red)")
             else:
                 reasons.append("⚖️ Momentum 1m Neutral")
 
         # ── EMA 8 vs EMA 21 ──────────────────────────────────────────
+        # [FIX 2026-05-10] Dikurangi dari 15→10 pts karena redundan dengan
+        # momentum candles dan structure — semuanya mengukur arah harga terbaru.
         def ema(data: list, period: int) -> float:
             k = 2 / (period + 1)
             e = data[0]
@@ -670,10 +674,10 @@ class ScoringEngine:
         ema21 = ema(closes[-21:], 21) if len(closes) >= 21 else closes[-1]
 
         if ema8 > ema21 * 1.0005:   # EMA8 clearly above EMA21
-            bull_pts += 15
+            bull_pts += 10
             reasons.append(f"📈 EMA8 ({ema8:.4f}) > EMA21 ({ema21:.4f}) → bullish")
         elif ema8 < ema21 * 0.9995:
-            bear_pts += 15
+            bear_pts += 10
             reasons.append(f"📉 EMA8 ({ema8:.4f}) < EMA21 ({ema21:.4f}) → bearish")
 
         # ── RSI 14 (1m) ──────────────────────────────────────────────
@@ -721,11 +725,13 @@ class ScoringEngine:
                 price_now = closes[-1]
                 price_5ago = closes[-6]
 
+                # [FIX 2026-05-10] Divergence dikurangi dari 10→7 pts — divergence
+                # pada 1m timeframe sering false signal karena noise.
                 if price_now > price_5ago * 1.002 and rsi_now < rsi_5ago - 3:
-                    bear_pts += 10
+                    bear_pts += 7
                     reasons.append(f"📉 Bearish RSI divergence (price ↑ tapi RSI {rsi_5ago:.0f}→{rsi_now:.0f}) → SHORT")
                 elif price_now < price_5ago * 0.998 and rsi_now > rsi_5ago + 3:
-                    bull_pts += 10
+                    bull_pts += 7
                     reasons.append(f"📈 Bullish RSI divergence (price ↓ tapi RSI {rsi_5ago:.0f}→{rsi_now:.0f}) → LONG")
 
         # ── Bearish Rejection Wick Detection (SHORT signal) ──────────────
@@ -737,14 +743,18 @@ class ScoringEngine:
                 c_close = closes[-1]
                 body = abs(c_close - c_open)
                 upper_wick = c_high - max(c_close, c_open)
+                # [FIX 2026-05-10] Wick detection dikurangi 8→5 pts — single candle
+                # pattern pada 1m terlalu noisy untuk bobot besar.
                 if body > 0 and upper_wick > 1.5 * body and c_close < c_open:
-                    bear_pts += 8
+                    bear_pts += 5
                     reasons.append(f"🕯️ Rejection wick (wick {upper_wick/body:.1f}× body) → SHORT signal")
             except (TypeError, ValueError):
                 pass
 
         # ── Short-term CVD (last 80 trades from cache) ────────────────
         recent_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
+        # [FIX 2026-05-10] CVD: threshold dinaikkan 0.20→0.25 dan poin dikurangi 12→8.
+        # CVD dari 80 trades bisa bias oleh 1-2 large order, bukan indikator kuat.
         if len(recent_trades) >= 20:
             sample = recent_trades[-80:]
             buy_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('B', 'buy', 'Ask'))
@@ -752,22 +762,24 @@ class ScoringEngine:
             total_vol = buy_vol + sell_vol
             if total_vol > 0:
                 cvd_ratio = (buy_vol - sell_vol) / total_vol
-                if cvd_ratio > 0.20:
-                    bull_pts += 12
+                if cvd_ratio > 0.25:
+                    bull_pts += 8
                     reasons.append(f"💚 CVD bullish ({cvd_ratio*100:.0f}% net buy pressure)")
-                elif cvd_ratio < -0.20:
-                    bear_pts += 12
+                elif cvd_ratio < -0.25:
+                    bear_pts += 8
                     reasons.append(f"❤️ CVD bearish ({cvd_ratio*100:.0f}% net sell pressure)")
 
         # ── Volume Surge (2min vs 10min average) ──────────────────────
+        # [FIX 2026-05-10] Threshold diturunkan 2.5→2.0x agar lebih sering berguna
+        # sebagai konfirmasi. Max pts dikurangi 10→8.
         if len(volumes) >= 10:
             avg_10m = sum(volumes[-10:]) / 10
             avg_2m  = sum(volumes[-2:])  / 2
             if avg_10m > 0:
                 surge = avg_2m / avg_10m
-                if surge > 2.5:
+                if surge > 2.0:
                     # High volume surge — follow the direction
-                    extra = min(int((surge - 2.5) * 5), 10)
+                    extra = min(int((surge - 2.0) * 4), 8)
                     reasons.append(f"🔥 Volume surge {surge:.1f}x avg (+{extra} pts momentum)")
                     if bull_pts >= bear_pts:
                         bull_pts += extra

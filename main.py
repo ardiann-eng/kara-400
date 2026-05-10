@@ -1229,9 +1229,9 @@ class KaraBot:
                 continue
 
             actions = await session.executor.update_positions(prices)
-            early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "momentum_exit", "vol_spike_exit", "early_trail")]
+            early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "momentum_exit", "early_trail")]
             # Exclude semua early_exit dari other_actions agar tidak dikirim dua kali
-            other_actions = [a for a in actions if a.get("action") not in ("time_exit", "momentum_exit", "vol_spike_exit", "early_trail")]
+            other_actions = [a for a in actions if a.get("action") not in ("time_exit", "momentum_exit", "early_trail")]
 
             # Kirim notifikasi personal per posisi (KARA style)
             if early_exit_actions:
@@ -1272,12 +1272,6 @@ class KaraBot:
                         if checks.get("momentum"):  detail_parts.append("✅ RSI/MACD")
                         raw_msg = a.get("message", "")
                         exit_detail = f"\n<i>{' · '.join(detail_parts)}</i>" if detail_parts else (f"\n<i>{raw_msg}</i>" if raw_msg else "")
-                    elif a.get("action") == "vol_spike_exit":
-                        header  = f"📊 <b>Vol Spike Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
-                        subtext = f"<i>Posisi ditutup otomatis setelah {hold_min} menit~</i>"
-                        # Ambil detail dari message yang dibuat di risk_manager
-                        raw_msg = a.get("message", "")
-                        exit_detail = f"\n📊 <i>{raw_msg}</i>" if raw_msg else ""
                     elif a.get("action") == "early_trail":
                         header  = f"🛡️ <b>Early Trail Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
                         subtext = "<i>Profit dikunci sebelum harga berbalik.</i>"

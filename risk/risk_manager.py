@@ -966,16 +966,14 @@ class RiskManager:
                             check_pullback = pullback_pct >= htf_override_pct
 
                     # ── Fire: wajib (pullback + trend) + opsional (volume OR momentum)
-                    # Perubahan dari AND-semua: volume sering flat di pasar sepi,
-                    # tapi pullback+struktur rusak sudah cukup bukti reversal.
-                    check_core     = check_pullback and check_trend
-                    check_optional = check_volume or check_momentum
-
-                    if check_core and check_optional:
+                    # [FIX 2026-05-10] Lebih agresif: jika pullback + (trend OR momentum),
+                    # exit langsung. Sebelumnya butuh pullback+trend+optional, terlalu lambat
+                    # saat momentum redup tapi EMA belum cross.
+                    if check_pullback and (check_trend or check_momentum):
                         reasons = []
                         reasons.append(f"drop {pullback_pct*100:.2f}%≥{dyn_threshold*100:.1f}%")
                         if check_volume:   reasons.append(f"vol {cur_vol/vol_sma:.1f}x" if vol_sma > 0 else "vol↑")
-                        reasons.append("EMA break")
+                        if check_trend:    reasons.append("EMA break")
                         if check_momentum: reasons.append(f"RSI {rsi:.0f}" if rsi < rsi_thresh else "MACD↓")
                         return {
                             "action":      "momentum_exit",
@@ -1158,72 +1156,22 @@ class RiskManager:
                             ),
                         }
 
-        # ── Rule G: Volume-spike exit — price turun + volume naik → exit ─
-        # Hanya aktif sebelum TP1 (setelah TP1, SL breakeven + trailing cukup).
-        #
-        # [FIX 2026-05-09] 4 perbaikan untuk mencegah false-positive:
-        # 1. Gunakan candle[-3] vs candle[-2] (keduanya CLOSED) — bukan candle berjalan
-        #    yang volumenya belum lengkap dan terlihat "kecil" di tengah menit.
-        # 2. Harga harus sudah turun >= 0.2% dari entry (bukan 1 tick).
-        # 3. Volume candle spike harus >= $10K notional.
-        # 4. Multiplier dinaikkan ke 3.0x (dari 1.5x) via config.
-        if not position.tp1_hit:
-            scfg = SCALPER
-            if getattr(scfg, 'vol_spike_exit_enabled', True):
-                vol_mult         = getattr(scfg, 'vol_spike_multiplier', 3.0)
-                min_price_drop   = getattr(scfg, 'vol_spike_min_price_drop_pct', 0.002)
-                min_volume_usd   = getattr(scfg, 'vol_spike_min_volume_usd', 10_000)
-                vol_history      = getattr(position, 'candle_volumes', [])
-                close_hist       = getattr(position, 'candle_closes', [])
-
-                # Butuh minimal 3 candle agar bisa pakai 2 candle yang sudah CLOSED
-                # (candle[-1] = berjalan, candle[-2] = baru selesai, candle[-3] = sebelumnya)
-                if len(vol_history) >= 3 and len(close_hist) >= 3:
-                    # Gunakan candle yang sudah CLOSED — [-1] adalah candle yang masih berjalan
-                    spike_vol = vol_history[-2]   # candle closed terbaru
-                    prev_vol  = vol_history[-3]   # candle closed sebelumnya
-                    spike_cls = close_hist[-2]    # close candle baru selesai
-                    prev_cls  = close_hist[-3]    # close candle sebelumnya
-
-                    # Filter 1: Volume harus lonjakan ekstrem (3.0x)
-                    if prev_vol > 0 and spike_vol >= prev_vol * vol_mult:
-
-                        # Filter 2: Volume spike harus signifikan secara nominal
-                        # (pakai spike_vol × mark_price sebagai estimasi notional)
-                        spike_notional = spike_vol * current_price
-                        if spike_notional >= min_volume_usd:
-
-                            # Filter 3: Harga harus sudah turun >= min_price_drop dari entry
-                            price_drop_from_entry = (
-                                (position.entry_price - current_price) / position.entry_price
-                                if position.side == Side.LONG
-                                else (current_price - position.entry_price) / position.entry_price
-                            )
-
-                            bearish_spike = position.side == Side.LONG  and spike_cls < prev_cls
-                            bullish_spike = position.side == Side.SHORT and spike_cls > prev_cls
-
-                            if (bearish_spike or bullish_spike) and price_drop_from_entry >= min_price_drop:
-                                direction = "↓ harga turun" if bearish_spike else "↑ harga naik"
-                                return {
-                                    "action":      "vol_spike_exit",
-                                    "close_ratio": 1.0,
-                                    "price":       current_price,
-                                    "pnl":         position.pnl_unrealized,
-                                    "position_id": position.position_id,
-                                    "message":     (
-                                        f"📊 Vol spike exit: {direction} + volume "
-                                        f"{spike_vol/prev_vol:.1f}x "
-                                        f"(${spike_notional:,.0f} notional). Exit sebelum SL."
-                                    ),
-                                }
+        # ── Rule G: Volume-spike exit — REMOVED (2026-05-10) ────────────────
+        # Dihapus karena: momentum exit (Rule E2) dan emergency exit sudah
+        # menangani kasus yang sama dengan lebih baik. Vol spike sering
+        # false-positive karena perbandingan 2 candle terlalu noisy.
 
         # ── Rule E: Scalper max-hold force exit ──────────────────────────
+        # [FIX 2026-05-10] Grace period diperpanjang dan PnL-aware:
+        # - Posisi loss mendapat grace yang lebih lama (hingga max_hold + grace minutes)
+        # - Grace HANYA aktif jika posisi sedang loss (floating < 0)
+        # - Posisi profit yang sudah lewat max_hold tetap ditutup segera
+        # - Posisi loss yang sangat dalam (> soft_floor) juga tetap ditutup
         if getattr(position, 'trade_mode', 'scalper') == 'scalper':
             scfg = SCALPER
             max_hold   = getattr(scfg, 'max_hold_minutes', 20.0)
-            grace      = getattr(scfg, 'max_hold_grace_minutes', 8.0)
-            soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.0015)
+            grace      = getattr(scfg, 'max_hold_grace_minutes', 35.0)
+            soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.020)
 
             now    = _dt.now(_tz.utc)
             opened = position.opened_at
@@ -1233,9 +1181,23 @@ class RiskManager:
 
             # ── Rule E1: Max-hold force exit ─────────────────────────────
             if hold_minutes >= max_hold:
-                if floating > soft_floor and hold_minutes < (max_hold + grace):
-                    pass  # grace period — posisi rugi kecil (> -0.15%), beri waktu recovery
+                # Grace period: posisi LOSS mendapat waktu ekstra untuk recovery ke BEP
+                # - floating < 0 = sedang loss → beri grace
+                # - floating >= 0 = sudah profit → tutup segera (ambil profit)
+                # - floating < soft_floor = loss terlalu dalam → tutup (cut loss)
+                is_in_loss = floating < 0
+                is_within_grace = hold_minutes < (max_hold + grace)
+                is_recoverable = floating > soft_floor  # loss belum terlalu dalam
+
+                if is_in_loss and is_within_grace and is_recoverable:
+                    # Posisi loss tapi masih dalam batas recovery → tunggu
+                    pass
                 else:
+                    grace_note = ""
+                    if is_in_loss and not is_recoverable:
+                        grace_note = f" (loss {floating*100:.2f}% > floor {soft_floor*100:.1f}%, cut loss)"
+                    elif is_in_loss and not is_within_grace:
+                        grace_note = f" (grace {grace:.0f}m habis, total hold {hold_minutes:.0f}m)"
                     return {
                         "action":      "time_exit",
                         "close_ratio": 1.0,
@@ -1244,7 +1206,7 @@ class RiskManager:
                         "position_id": position.position_id,
                         "message":     (
                             f"⏱️ Scalper max-hold {hold_minutes:.0f}m — exit paksa. "
-                            f"PnL: {floating*100:.2f}%."
+                            f"PnL: {floating*100:.2f}%.{grace_note}"
                         )
                     }
 

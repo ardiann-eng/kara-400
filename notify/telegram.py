@@ -1916,7 +1916,7 @@ class KaraTelegram:
         pnl_sign = "+" if pnl >= 0 else ""
 
         # Action types yang merupakan full/final close (posisi benar-benar selesai)
-        FINAL_EXIT_TYPES = ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "vol_spike_exit", "early_trail")
+        FINAL_EXIT_TYPES = ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "early_trail")
 
         if action_type == "tp1":
             text = (
