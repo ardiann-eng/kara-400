@@ -869,13 +869,16 @@ class KaraBot:
 
             # Near-miss log: asset yang scored tinggi tapi tidak jadi signal (Signals: 0)
             if sig_count == 0 and top_scorers:
-                scl_auto = getattr(config.SIGNAL, 'min_score_to_auto_trade', 57)
-                near_miss = [(a, s) for a, s in top_scorers[:5] if s >= scl_auto - 5]
+                scl_base = getattr(config.SCALPER, 'min_score_to_enter', 57)
+                _, _, _sess_delta = self.scorer._get_session_bonus()
+                effective_entry = scl_base + _sess_delta
+                near_miss = [(a, s) for a, s in top_scorers[:5] if s >= effective_entry - 7]
                 if near_miss:
                     nm_str = ", ".join([f"{a}:{s}" for a, s in near_miss])
+                    sess_tag = f"+{_sess_delta}" if _sess_delta > 0 else (f"{_sess_delta}" if _sess_delta < 0 else "±0")
                     log.info(
-                        f"📊 [NEAR-MISS] Assets scored ≥{scl_auto - 5} but no signal fired: [{nm_str}] "
-                        f"(auto_threshold={scl_auto} — check [BELOW_THRESH] or [AUTO_BLOCKED] above)"
+                        f"📊 [NEAR-MISS] Top scorers vs entry gate {effective_entry} "
+                        f"(base={scl_base} sess={sess_tag}): [{nm_str}]"
                     )
             
             # Persist OI snapshots to prevent amnesia
