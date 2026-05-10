@@ -866,6 +866,17 @@ class KaraBot:
                 f"Top: [{top_str or 'None'}] | "
                 f"Elapsed: {scan_elapsed:.1f}s"
             )
+
+            # Near-miss log: asset yang scored tinggi tapi tidak jadi signal (Signals: 0)
+            if sig_count == 0 and top_scorers:
+                scl_auto = getattr(config.SIGNAL, 'min_score_to_auto_trade', 57)
+                near_miss = [(a, s) for a, s in top_scorers[:5] if s >= scl_auto - 5]
+                if near_miss:
+                    nm_str = ", ".join([f"{a}:{s}" for a, s in near_miss])
+                    log.info(
+                        f"📊 [NEAR-MISS] Assets scored ≥{scl_auto - 5} but no signal fired: [{nm_str}] "
+                        f"(auto_threshold={scl_auto} — check [BELOW_THRESH] or [AUTO_BLOCKED] above)"
+                    )
             
             # Persist OI snapshots to prevent amnesia
             self.scorer.dump_oi_state()
@@ -1014,6 +1025,11 @@ class KaraBot:
             # - anything below threshold is fully skipped (no Telegram signal)
             effective_auto_threshold = auto_threshold
             if user_signal.score < effective_auto_threshold:
+                if chat_id == target_ids[0]:  # log sekali saja, jangan spam per-user
+                    log.info(
+                        f"🔕 [BELOW_THRESH] {user_signal.asset} {user_signal.side.value.upper()} "
+                        f"score={user_signal.score} < auto_threshold={effective_auto_threshold} — skipped"
+                    )
                 continue
 
             # Enrich signal with position sizing for THIS user

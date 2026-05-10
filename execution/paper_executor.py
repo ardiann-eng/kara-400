@@ -64,7 +64,7 @@ class PaperExecutor:
             self._available = state["balance"]
             # Remove direct overwrite of _daily_start_balance to use RiskManager instead
             self._peak_balance = max(state["balance"], state.get("equity", 0))
-            log.info(f" [PAPER] Restored balance from DB: {format_usd(self._balance)}")
+            log.debug(f" [PAPER] Restored balance from DB: {format_usd(self._balance)}")
         
         positions = user_db.load_paper_positions(chat_id)
         for pos in positions:
@@ -72,7 +72,7 @@ class PaperExecutor:
             # Update used margin
             self._used_margin += pos.margin_usd
             self._available   -= pos.margin_usd
-            log.info(f" [PAPER] Restored position: {pos.asset} {pos.side.value}")
+            log.debug(f" [PAPER] Restored position: {pos.asset} {pos.side.value}")
 
     # ──────────────────────────────────────────
     # ACCOUNT STATE

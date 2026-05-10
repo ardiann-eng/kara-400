@@ -103,7 +103,7 @@ class RiskManager:
                 k: v for k, v in raw_att.items() if k.endswith(today)
             }
             if self._asset_trade_times:
-                log.info(f"[REPEAT GUARD] Restored trade times: {list(self._asset_trade_times.keys())}")
+                log.debug(f"[REPEAT GUARD] Restored trade times: {list(self._asset_trade_times.keys())}")
 
             # Validation: if session_start_balance is 0 but we have a peak, use that as fallback
             # to prevent 'amnesia' during mid-day restarts
