@@ -163,13 +163,18 @@ class RiskConfig:
     small_cap_tp2_pct:         float = 0.015       # 1.5%
     vol_tp_multiplier:         float = 0.80        # 20% reduction for high vol
 
-    # Partial TP ratios  (Fix 5: close less at TP1, let winners run)
-    tp1_close_ratio:         float = 0.25     # was 0.40 — close only 25% at TP1
-    tp2_close_ratio:         float = 0.50     # 50% of remaining (37.5% of original)
+    # Partial TP ratios  (4-stage: 25% each at TP1/TP2/TP3, trail last 25%)
+    tp1_close_ratio:         float = 0.25     # close 25% at TP1
+    tp2_close_ratio:         float = 0.333    # close 33% of remaining (~25% original) at TP2
+    tp3_close_ratio:         float = 0.50     # close 50% of remaining (~25% original) at TP3
+    # TP3 target = sl_pct * tp_mult * 1.5 (3:1 R:R on remainder)
+    tp3_pct:                 float = 0.045    # default fallback if not calculated dynamically
     # ATR-Based (Opsi B) Calibration
     enable_atr_sl:           bool  = True     # Use volatility-based SL
     atr_multiplier:          float = 2.0      # ATR lookback buffer
     atr_lookback:            int   = 14       # candles for calculation
+    # ATR-based trailing stop on last position piece
+    atr_trailing_multiplier: float = 2.0      # trail = entry_atr * 2.0 (industry standard)
 
     # Momentum-based time exit thresholds (Fix 6)
     time_exit_pullback_pct:  float = 0.15     # if price retraces 15% of TP1 distance, exit (was 20%)
@@ -229,9 +234,13 @@ class ScalperConfig:
     # Concurrent positions
     max_concurrent_positions: int  = 5        # max 5 scalper positions (was 3)
 
-    # Partial TP ratios
-    tp1_close_ratio:         float = 0.55     # 55% on TP1 (was 0.60)
-    tp2_close_ratio:         float = 0.75     # 75% of remaining on TP2 (was 0.40)
+    # Partial TP ratios (scalper: heavier close at TP1/TP2 given tight hold window)
+    tp1_close_ratio:         float = 0.50     # 50% on TP1 (was 0.55)
+    tp2_close_ratio:         float = 0.667    # 67% of remaining at TP2 (~33% original)
+    tp3_close_ratio:         float = 1.0      # close all remaining at TP3 (scalper: no trail)
+    tp3_pct:                 float = 0.030    # ~2.1x TP2 (scalper tight horizon)
+    # ATR trailing — scalper uses fixed pct (trade too short for ATR trail to matter)
+    atr_trailing_multiplier: float = 2.0
 
     # Pyramid — scale in when profit > 0.4%, REQUIRES CONFIRMATION
     enable_pyramid:          bool  = False    # off by default, Telegram confirm required
@@ -248,13 +257,33 @@ class ScalperConfig:
     mtf_score_bonus:         int = 12        # bonus if 1m aligns with 15m trend
     mtf_score_penalty:       int = -5        # penalty if counter-trend (was -10, terlalu berat)
 
-    # Scalper momentum reversal exit (PRIMARY protection — menggantikan hard SL)
-    # [SL FIX 2026-05-08] Diperketat: aktif dari menit ke-1 (bukan ke-3), 2 candle (bukan 3).
-    # SL on-chain 0.30% hanya backstop kalau bot crash — momentum_exit adalah garis pertahanan utama.
-    momentum_exit_enabled:       bool  = True
-    momentum_exit_min_minutes:   float = 1.0    # aktif dari menit ke-1 (was 3.0 — terlambat, SL kena duluan)
-    momentum_exit_candles:       int   = 2       # cukup 2 candle bearish berturut (was 3 — terlalu lambat)
-    momentum_exit_loss_floor:    float = -0.0030  # exit kalau loss <= -0.30% (was -0.15%, terlalu sensitif noise)
+    # ── Momentum exit — Multi-confirmation refactor (v2) ─────────────────
+    # Root cause analisis 43/43 losses: threshold terlalu kecil (0.43% avg pullback
+    # = noise normal crypto), tidak ada confirmation layer, skor masuk ke exit logic.
+    # Solusi: ATR-dynamic threshold + 5-layer confirmation, skor TIDAK dipakai di exit.
+    momentum_exit_enabled:            bool  = True
+    momentum_exit_min_minutes:        float = 5.0     # min hold 5 menit sebelum exit diizinkan
+
+    # Layer 1 — Minimum pullback (anti-noise)
+    momentum_exit_min_pullback_pct:   float = 0.008   # floor absolut 0.8% (never exit < ini)
+    momentum_exit_atr_pullback_mult:  float = 1.5     # threshold = max(0.8%, ATR14% * 1.5)
+
+    # Layer 2 — Volume confirmation
+    momentum_exit_volume_mult:        float = 1.3     # current vol harus >= SMA20 * 1.3
+
+    # Layer 3 — Trend structure break (EMA cross)
+    momentum_exit_ema_fast:           int   = 20      # EMA fast period
+    momentum_exit_ema_slow:           int   = 50      # EMA slow period
+
+    # Layer 4 — Momentum indicators
+    momentum_exit_rsi_threshold:      float = 45.0    # RSI < 45 = momentum fading
+    # MACD histogram < 0 also counts (calculated inline)
+
+    # Layer 5 — HTF trend filter (15m EMA)
+    momentum_exit_htf_ema_fast:       int   = 20      # 15m EMA fast
+    momentum_exit_htf_ema_slow:       int   = 50      # 15m EMA slow
+    # Kalau HTF uptrend intact (ema_fast > ema_slow), threshold pullback dinaikkan ke 3%
+    momentum_exit_htf_uptrend_pullback: float = 0.030  # butuh 3% drop jika HTF masih naik
 
     # Volume-spike exit: price turun + volume naik = exit segera (sebelum SL/time kena)
     # [FIX 2026-05-09] Diperketat agar tidak false-positive:

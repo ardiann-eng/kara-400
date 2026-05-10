@@ -92,9 +92,18 @@ class HyperliquidClient:
         # Semaphore untuk execution path TIDAK ADA — order harus instan
         self._data_sem: Optional[asyncio.Semaphore] = None   # dibuat di connect()
 
-        # Candle caching (asset -> (timestamp, data))
-        self._candle_cache: Dict[str, Tuple[float, List]] = {}
-        self._candle_ttl = 30  # seconds
+        # Candle caching — key: (asset, interval) supaya 1m dan 15m tidak saling overwrite
+        # TTL berbeda per interval: candle lebih panjang berubah lebih jarang
+        self._candle_cache: Dict[Tuple[str, str], Tuple[float, List]] = {}
+        self._candle_ttl_map: Dict[str, int] = {
+            "1m": 30,    # 30s — siklus monitor 5s, refresh tiap ~6 siklus
+            "5m": 60,    # 60s
+            "15m": 60,   # 60s — cukup untuk HTF filter yang tidak butuh real-time
+            "1h": 120,   # 120s
+            "4h": 300,   # 5 menit
+            "1d": 600,   # 10 menit
+        }
+        self._candle_ttl = 30  # fallback default
 
     # ──────────────────────────────────────────
     # INIT
@@ -450,33 +459,37 @@ class HyperliquidClient:
 
     async def get_candles(self, asset: str, interval: str = "1h", limit: int = 100) -> List[List[Any]]:
         """
-        Fetch historical OHLCV data for an asset with caching.
+        Fetch historical OHLCV data for an asset with per-(asset,interval) caching.
+        Cache key = (asset, interval) — 1m dan 15m disimpan terpisah, tidak saling overwrite.
+        TTL per interval: 1m=30s, 15m=60s, 1h=120s, dst.
         Returns: [[timestamp, open, high, low, close, volume], ... ]
         """
+        cache_key = (asset, interval)
+        ttl = self._candle_ttl_map.get(interval, self._candle_ttl)
+
         # 1. Check Cache
         now = time.time()
-        if asset in self._candle_cache:
-            ts, data = self._candle_cache[asset]
-            if now - ts < self._candle_ttl:
-                log.debug(f"[{asset}] Using cached candles ({int(now-ts)}s old)")
+        if cache_key in self._candle_cache:
+            ts, data = self._candle_cache[cache_key]
+            if now - ts < ttl:
+                log.debug(f"[{asset}/{interval}] Using cached candles ({int(now-ts)}s old)")
                 return data[:limit]
 
         try:
-            log.debug(f"[{asset}] Fetching fresh candles from API...")
+            log.debug(f"[{asset}/{interval}] Fetching fresh candles from API...")
             await self._ensure_info()
-            
+
             # 2. Try SDK
             candles = []
             if self._info:
                 try:
                     candles = await self._run(self._info.candles_snapshot, asset, interval, limit)
                 except Exception as e:
-                    log.debug(f"SDK candles_snapshot failed for {asset}: {e}")
+                    log.debug(f"SDK candles_snapshot failed for {asset}/{interval}: {e}")
 
             # 3. Direct HTTP Fallback if SDK failed
             if not candles:
                 end_ms = int(time.time() * 1000)
-                # interval_ms: map common intervals to milliseconds
                 _interval_map = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
                 interval_ms = _interval_map.get(interval, 3_600_000)
                 start_ms = end_ms - interval_ms * limit
@@ -492,12 +505,12 @@ class HyperliquidClient:
                     candles = result
 
             if candles:
-                self._candle_cache[asset] = (now, candles)
+                self._candle_cache[cache_key] = (now, candles)
                 return candles[:limit]
-                
+
             return []
         except Exception as e:
-            log.error(f"get_candles failed for {asset}: {e}")
+            log.error(f"get_candles failed for {asset}/{interval}: {e}")
             return []
 
     async def get_cached_candles(self, asset: str) -> List[List[Any]]:

@@ -169,8 +169,11 @@ class PaperExecutor:
             stop_loss=signal.stop_loss,
             tp1=signal.tp1,
             tp2=signal.tp2,
+            tp3=getattr(signal, 'tp3', 0.0),
             trailing_active=False,
             trailing_high=fill_price,
+            trailing_stop_price=0.0,
+            entry_atr=getattr(signal, 'entry_atr', 0.0),
             liquidation_price=liq_price,
             signal_id=signal.signal_id,
             trade_mode=getattr(signal, 'trade_mode', 'scalper'),
@@ -394,8 +397,12 @@ class PaperExecutor:
             pos.tp2_hit = True
             log.info(f" [PAPER] TP2 hit on {pos.asset}")
 
-        # Update trailing high
-        if pos.trailing_active and pos.status == PositionStatus.OPEN:
+        elif action["action"] == "tp3":
+            pos.tp3_hit = True
+            log.info(f" [PAPER] TP3 hit on {pos.asset} - ATR trail on last piece")
+
+        # Update trailing high (always, even pre-TP1, so ATR trail has correct peak)
+        if pos.status == PositionStatus.OPEN:
             if pos.side == Side.LONG:
                 pos.trailing_high = max(pos.trailing_high, fill_price)
             else:

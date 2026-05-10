@@ -488,6 +488,101 @@ class RiskManager:
         return sum(trs) / len(trs)
 
     # ──────────────────────────────────────────
+    # LOCAL INDICATOR HELPERS  (zero API calls — semua dari candle list)
+    # ──────────────────────────────────────────
+
+    @staticmethod
+    def _calc_atr_pct_from_closes(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
+        """
+        ATR14 sebagai % dari harga (misal 0.015 = 1.5%).
+        Memakai true range: max(H-L, |H-prevC|, |L-prevC|) / prevC.
+        Butuh min period+1 candle. Return 0.0 jika data kurang.
+        """
+        if len(closes) < period + 1 or len(highs) < period + 1 or len(lows) < period + 1:
+            return 0.0
+        trs = []
+        for i in range(1, len(closes)):
+            h, l, pc = highs[i], lows[i], closes[i - 1]
+            if pc <= 0:
+                continue
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)) / pc)
+        if len(trs) < period:
+            return 0.0
+        return sum(trs[-period:]) / period
+
+    @staticmethod
+    def _calc_ema(values: List[float], period: int) -> float:
+        """EMA dari list nilai. Return 0.0 jika data kurang dari period."""
+        if len(values) < period:
+            return 0.0
+        k = 2.0 / (period + 1)
+        ema = sum(values[:period]) / period
+        for v in values[period:]:
+            ema = v * k + ema * (1 - k)
+        return ema
+
+    @staticmethod
+    def _calc_rsi(closes: List[float], period: int = 14) -> float:
+        """RSI Wilder. Return 50.0 jika data kurang (netral, tidak trigger exit)."""
+        if len(closes) < period + 1:
+            return 50.0
+        gains, losses = [], []
+        for i in range(1, len(closes)):
+            d = closes[i] - closes[i - 1]
+            gains.append(max(d, 0.0))
+            losses.append(max(-d, 0.0))
+        if not gains:
+            return 50.0
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1 + rs))
+
+    @staticmethod
+    def _calc_macd_histogram(closes: List[float], fast: int = 12, slow: int = 26, signal_p: int = 9) -> float:
+        """
+        MACD histogram = MACD_line - Signal_line.
+        Signal line = EMA9 dari MACD line series (bukan MACD line point tunggal).
+        Butuh minimal slow+signal_p candle. Return 0.0 jika data kurang.
+        """
+        if len(closes) < slow + signal_p:
+            return 0.0
+        k_f = 2.0 / (fast + 1)
+        k_s = 2.0 / (slow + 1)
+        k_sig = 2.0 / (signal_p + 1)
+
+        # Bangun MACD line series dari seluruh data
+        ema_f = sum(closes[:fast]) / fast
+        ema_s = sum(closes[:slow]) / slow
+        for v in closes[fast:slow]:
+            ema_f = v * k_f + ema_f * (1 - k_f)
+
+        macd_series: List[float] = []
+        for v in closes[slow:]:
+            ema_f = v * k_f + ema_f * (1 - k_f)
+            ema_s = v * k_s + ema_s * (1 - k_s)
+            macd_series.append(ema_f - ema_s)
+
+        if len(macd_series) < signal_p:
+            return macd_series[-1] if macd_series else 0.0
+
+        # Signal line = EMA dari MACD series
+        sig = sum(macd_series[:signal_p]) / signal_p
+        for m in macd_series[signal_p:]:
+            sig = m * k_sig + sig * (1 - k_sig)
+
+        return macd_series[-1] - sig  # histogram sesungguhnya
+
+    @staticmethod
+    def _calc_volume_sma(volumes: List[float], period: int = 20) -> float:
+        """SMA dari volume. Return 0.0 jika data kurang."""
+        if len(volumes) < period:
+            return sum(volumes) / len(volumes) if volumes else 0.0
+        return sum(volumes[-period:]) / period
+
+    # ──────────────────────────────────────────
     # VOL-AWARE LEVEL CALCULATOR  (Satu-satunya fungsi SL/TP)
     # ──────────────────────────────────────────
 
@@ -600,22 +695,26 @@ class RiskManager:
             tp_mult *= 1.15
 
         # ── Step 6: TP levels ─────────────────────────────────────────────
-        tp1_pct = sl_pct * tp_mult * 0.55   # TP1 = 55% dari target penuh
-        tp2_pct = sl_pct * tp_mult          # TP2 = target penuh
+        tp1_pct = sl_pct * tp_mult * 0.55   # TP1 = 55% dari target penuh (1:1 R:R-ish)
+        tp2_pct = sl_pct * tp_mult          # TP2 = target penuh (2:1 R:R)
+        tp3_pct = sl_pct * tp_mult * 1.50   # TP3 = 3:1 R:R (pro-level extension)
 
         # RR minimum 1.5:1 — tidak mau trade dengan TP < 1.5× SL
         tp2_pct = max(tp2_pct, sl_pct * 1.50)
         tp1_pct = max(tp1_pct, sl_pct * 0.65)
+        tp3_pct = max(tp3_pct, sl_pct * 2.50)  # TP3 minimal 2.5:1 R:R
 
         # ── Step 7: Absolute price levels ────────────────────────────────
         if side == "long":
             sl_price  = round(entry_price * (1 - sl_pct),  8)
             tp1_price = round(entry_price * (1 + tp1_pct), 8)
             tp2_price = round(entry_price * (1 + tp2_pct), 8)
+            tp3_price = round(entry_price * (1 + tp3_pct), 8)
         else:
             sl_price  = round(entry_price * (1 + sl_pct),  8)
             tp1_price = round(entry_price * (1 - tp1_pct), 8)
             tp2_price = round(entry_price * (1 - tp2_pct), 8)
+            tp3_price = round(entry_price * (1 - tp3_pct), 8)
 
         rr = tp2_pct / sl_pct
 
@@ -623,16 +722,18 @@ class RiskManager:
             f"[LEVELS] {asset} {side.upper()} "
             f"vol={realized_vol*100:.2f}% regime={regime} "
             f"sl={sl_pct*100:.2f}% tp1={tp1_pct*100:.2f}% tp2={tp2_pct*100:.2f}% "
-            f"RR={rr:.2f}x score={score}"
+            f"tp3={tp3_pct*100:.2f}% RR={rr:.2f}x score={score}"
         )
 
         return {
             "sl_pct":       sl_pct,
             "tp1_pct":      tp1_pct,
             "tp2_pct":      tp2_pct,
+            "tp3_pct":      tp3_pct,
             "sl_price":     sl_price,
             "tp1_price":    tp1_price,
             "tp2_price":    tp2_price,
+            "tp3_price":    tp3_price,
             "rr_ratio":     rr,
             "regime":       regime,
             "realized_vol": realized_vol,
@@ -700,16 +801,17 @@ class RiskManager:
         current_price: float,
     ) -> Optional[Dict]:
         """
-        Exit hierarchy — Fix 5 (partial ratios) + Fix 6 (momentum time-exit).
+        Exit hierarchy — 4-stage tiered profit-taking + ATR trailing on last piece.
 
-        Distribution after fix:
-          TP1 close 25% (was 40%) — let 75% keep running
-          TP2 close 50% of remaining (37.5% original) — trail last 37.5%
-          Trailing on last piece with vol-aware distance
+        Distribution:
+          TP1 close 25% — lock first profit, SL → breakeven
+          TP2 close 25% of original (~33% of remaining) — add lock
+          TP3 close 25% of original (~50% of remaining) — near full profit
+          Last 25%: ATR-based trailing stop (entry_atr * 2.0), only ratchets up
 
-        92-trade data: time_exit 72.2% WR but only +$0.23 avg because hard
-        12-min cut trades mid-move. New logic: exit on momentum reversal or
-        flatline, NEVER time-exit a trade that's above TP1.
+        ATR trailing: trail_sl = peak - (entry_atr * atr_mult * entry_price)
+        The trail level ONLY moves in the profit direction, never widens.
+        Falls back to vol-based trail when entry_atr not available.
         """
         from datetime import timezone as _tz, datetime as _dt
 
@@ -723,13 +825,18 @@ class RiskManager:
             max_floating = (position.entry_price - new_low) / position.entry_price
 
         cfg = self._cfg()
-        # Fix 5: ratios now come from config (0.25 / 0.50)
         tp1_ratio = getattr(cfg, 'tp1_close_ratio', 0.25)
-        tp2_ratio = getattr(cfg, 'tp2_close_ratio', 0.50)
+        tp2_ratio = getattr(cfg, 'tp2_close_ratio', 0.333)
+        tp3_ratio = getattr(cfg, 'tp3_close_ratio', 0.50)
 
-        # ── Rule E2 (EARLY): Scalper momentum reversal — runs BEFORE hard SL ─
-        # Dipindah ke depan supaya keluar lebih awal sebelum backstop SL 0.30% kena.
-        # SL 0.30% on-chain adalah emergency backstop (bot crash), bukan proteksi utama.
+        # ── Rule E2: Momentum Exit — Multi-Confirmation Engine (v2) ─────────
+        #
+        # Refactor dari 43/43 losses (-$29.53):
+        # Root cause: threshold 0.43% = noise normal, zero confirmation layer.
+        # Solusi: ATR-dynamic pullback threshold + 5 layer confirmation.
+        # Signal Score TIDAK dipakai di exit — hanya untuk ENTRY filter.
+        #
+        # Semua kalkulasi dari local OHLCV — ZERO API CALLS.
         if getattr(position, 'trade_mode', 'scalper') == 'scalper' and not position.tp1_hit:
             scfg = SCALPER
             if getattr(scfg, 'momentum_exit_enabled', True):
@@ -739,32 +846,148 @@ class RiskManager:
                     opened = opened.replace(tzinfo=_tz.utc)
                 hold_minutes = (now - opened).total_seconds() / 60.0
 
-                loss_floor = getattr(scfg, 'momentum_exit_loss_floor', -0.003)
-                n_candles  = getattr(scfg, 'momentum_exit_candles', 2)
-                min_minutes = getattr(scfg, 'momentum_exit_min_minutes', 1.0)
-                candle_history = getattr(position, 'candle_closes', [])
+                min_minutes  = getattr(scfg, 'momentum_exit_min_minutes', 5.0)
+                closes       = getattr(position, 'candle_closes', [])
+                highs        = getattr(position, 'candle_highs', [])
+                lows         = getattr(position, 'candle_lows', [])
+                volumes      = getattr(position, 'candle_volumes', [])
+                htf_closes   = getattr(position, 'htf_candle_closes', [])
 
-                if (
-                    hold_minutes >= min_minutes
-                    and len(candle_history) >= n_candles
-                    and floating <= loss_floor
-                ):
-                    recent = candle_history[-n_candles:]
-                    if position.side == Side.LONG:
-                        reversal = all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
-                    else:
-                        reversal = all(recent[i] > recent[i - 1] for i in range(1, len(recent)))
+                pullback_pct = -floating   # floating negatif = loss = pullback dari entry
 
-                    if reversal:
+                # ── Emergency exit: aktif SEBELUM min_minutes ─────────────
+                # Hanya untuk dump ekstrem (1.5%+ drop + volume 2.5x SMA).
+                # Mencegah kerugian besar di menit 0-5 tanpa mengorbankan noise filter.
+                EMERGENCY_PULLBACK = 0.015
+                EMERGENCY_VOL_MULT = 2.5
+                if hold_minutes < min_minutes and len(closes) >= 3 and len(volumes) >= 3:
+                    emg_vol_sma = self._calc_volume_sma(volumes, period=min(20, len(volumes)))
+                    emg_cur_vol = volumes[-1]
+                    emg_vol_ok  = emg_vol_sma > 0 and emg_cur_vol >= emg_vol_sma * EMERGENCY_VOL_MULT
+                    if pullback_pct >= EMERGENCY_PULLBACK and emg_vol_ok:
                         return {
                             "action":      "momentum_exit",
                             "close_ratio": 1.0,
                             "price":       current_price,
                             "pnl":         position.pnl_unrealized,
                             "position_id": position.position_id,
+                            "checks":      {"pullback": True, "volume": True,
+                                            "trend": False, "momentum": False},
                             "message":     (
-                                f"↩️ Momentum reversal ({n_candles} candle berturut). "
-                                f"Exit pre-SL. PnL: {floating*100:.2f}%."
+                                f"🚨 Emergency exit: dump {pullback_pct*100:.2f}% + vol "
+                                f"{emg_cur_vol/emg_vol_sma:.1f}x dalam {hold_minutes:.1f}m. "
+                                f"PnL: {floating*100:.2f}%."
+                            )
+                        }
+
+                # ── Layer 0: Min hold time (normal flow) ──────────────────
+                if hold_minutes < min_minutes:
+                    pass  # emergency di atas tidak trigger — skip normal flow
+                elif len(closes) < 3:
+                    pass  # belum cukup candle data
+                else:
+                    # ── Layer 1: ATR-dynamic pullback threshold ────────────
+                    floor_pct = getattr(scfg, 'momentum_exit_min_pullback_pct', 0.008)
+                    atr_mult  = getattr(scfg, 'momentum_exit_atr_pullback_mult', 1.5)
+
+                    if len(highs) >= 15 and len(lows) >= 15:
+                        atr_pct = self._calc_atr_pct_from_closes(highs, lows, closes, period=14)
+                    else:
+                        sample = closes[-8:] if len(closes) >= 8 else closes
+                        mean_c = sum(sample) / len(sample) if sample else 1.0
+                        variance = sum((c - mean_c) ** 2 for c in sample) / len(sample)
+                        atr_pct = (variance ** 0.5) / mean_c if mean_c > 0 else 0.0
+
+                    if atr_pct > 0.030:
+                        dyn_threshold = max(floor_pct, atr_pct * 1.2)
+                    elif atr_pct > 0.010:
+                        dyn_threshold = max(floor_pct, atr_pct * atr_mult)
+                    else:
+                        dyn_threshold = max(floor_pct, 0.015)
+
+                    check_pullback = pullback_pct >= dyn_threshold
+
+                    # ── Layer 2: Volume confirmation (opsional) ────────────
+                    vol_mult     = getattr(scfg, 'momentum_exit_volume_mult', 1.3)
+                    vol_sma      = self._calc_volume_sma(volumes, period=20)
+                    cur_vol      = volumes[-1] if volumes else 0.0
+                    check_volume = (vol_sma > 0 and cur_vol >= vol_sma * vol_mult)
+
+                    # ── Layer 3: Trend structure break (wajib) ────────────
+                    ema_fast_p = getattr(scfg, 'momentum_exit_ema_fast', 20)
+                    ema_slow_p = getattr(scfg, 'momentum_exit_ema_slow', 50)
+                    ema_fast   = self._calc_ema(closes, ema_fast_p)
+                    ema_slow   = self._calc_ema(closes, ema_slow_p)
+
+                    if ema_fast > 0 and ema_slow > 0:
+                        # EMA20/50 tersedia — gunakan structure break
+                        if position.side == Side.LONG:
+                            check_trend = (current_price < ema_fast or ema_fast < ema_slow)
+                        else:
+                            check_trend = (current_price > ema_fast or ema_fast > ema_slow)
+                    else:
+                        # EMA20/50 belum cukup data — coba EMA9/20 lebih dulu
+                        ema9  = self._calc_ema(closes, 9)
+                        ema20 = self._calc_ema(closes, 20)
+                        if ema9 > 0 and ema20 > 0:
+                            if position.side == Side.LONG:
+                                check_trend = (current_price < ema9 or ema9 < ema20)
+                            else:
+                                check_trend = (current_price > ema9 or ema9 > ema20)
+                        elif len(closes) >= 3:
+                            # Fallback terakhir: 3 candle berturut arah yang sama
+                            if position.side == Side.LONG:
+                                check_trend = closes[-1] < closes[-2] < closes[-3]
+                            else:
+                                check_trend = closes[-1] > closes[-2] > closes[-3]
+                        else:
+                            check_trend = False
+
+                    # ── Layer 4: Momentum indicators (opsional) ───────────
+                    rsi_thresh     = getattr(scfg, 'momentum_exit_rsi_threshold', 45.0)
+                    rsi            = self._calc_rsi(closes, period=14)
+                    macd_hist      = self._calc_macd_histogram(closes)
+                    if position.side == Side.LONG:
+                        check_momentum = (rsi < rsi_thresh or macd_hist < 0)
+                    else:
+                        check_momentum = (rsi > (100 - rsi_thresh) or macd_hist > 0)
+
+                    # ── Layer 5: HTF trend filter ──────────────────────────
+                    htf_ema_f_p      = getattr(scfg, 'momentum_exit_htf_ema_fast', 20)
+                    htf_ema_s_p      = getattr(scfg, 'momentum_exit_htf_ema_slow', 50)
+                    htf_override_pct = getattr(scfg, 'momentum_exit_htf_uptrend_pullback', 0.030)
+
+                    if len(htf_closes) >= htf_ema_s_p:
+                        htf_ema_fast = self._calc_ema(htf_closes, htf_ema_f_p)
+                        htf_ema_slow = self._calc_ema(htf_closes, htf_ema_s_p)
+                        if position.side == Side.LONG and htf_ema_fast > htf_ema_slow:
+                            check_pullback = pullback_pct >= htf_override_pct
+                        elif position.side == Side.SHORT and htf_ema_fast < htf_ema_slow:
+                            check_pullback = pullback_pct >= htf_override_pct
+
+                    # ── Fire: wajib (pullback + trend) + opsional (volume OR momentum)
+                    # Perubahan dari AND-semua: volume sering flat di pasar sepi,
+                    # tapi pullback+struktur rusak sudah cukup bukti reversal.
+                    check_core     = check_pullback and check_trend
+                    check_optional = check_volume or check_momentum
+
+                    if check_core and check_optional:
+                        reasons = []
+                        reasons.append(f"drop {pullback_pct*100:.2f}%≥{dyn_threshold*100:.1f}%")
+                        if check_volume:   reasons.append(f"vol {cur_vol/vol_sma:.1f}x" if vol_sma > 0 else "vol↑")
+                        reasons.append("EMA break")
+                        if check_momentum: reasons.append(f"RSI {rsi:.0f}" if rsi < rsi_thresh else "MACD↓")
+                        return {
+                            "action":      "momentum_exit",
+                            "close_ratio": 1.0,
+                            "price":       current_price,
+                            "pnl":         position.pnl_unrealized,
+                            "position_id": position.position_id,
+                            "checks":      {"pullback": check_pullback, "volume": check_volume,
+                                            "trend": check_trend, "momentum": check_momentum},
+                            "message":     (
+                                f"↩️ Momentum exit ({', '.join(reasons)}). "
+                                f"PnL: {floating*100:.2f}%."
                             )
                         }
 
@@ -799,7 +1022,7 @@ class RiskManager:
                 )
             }
 
-        # ── Rule C: TP2 hit — close 50% of remaining, trail last piece ──
+        # ── Rule C: TP2 hit — close ~25% of original (33% of remaining) ──
         tp2_hit_now = (
             (position.side == Side.LONG  and current_price >= position.tp2) or
             (position.side == Side.SHORT and current_price <= position.tp2)
@@ -811,48 +1034,99 @@ class RiskManager:
                 "price":       current_price,
                 "message":     (
                     f"🎯 TP2 hit! +{floating*100:.2f}%. "
-                    f"Closing {int(tp2_ratio*100)}% of remaining. Trailing last piece."
+                    f"Closing {int(tp2_ratio*100)}% of remaining (~25% original)."
                 )
             }
 
-        # ── Rule D: Trailing stop on last position piece (post-TP1) ─────
+        # ── Rule C2: TP3 hit — close ~25% of original (50% of remaining) ─
+        tp3_price = getattr(position, 'tp3', 0.0)
+        if tp3_price > 0:
+            tp3_hit_now = (
+                (position.side == Side.LONG  and current_price >= tp3_price) or
+                (position.side == Side.SHORT and current_price <= tp3_price)
+            )
+            if position.tp2_hit and not position.tp3_hit and tp3_hit_now:
+                return {
+                    "action":      "tp3",
+                    "close_ratio": tp3_ratio,
+                    "price":       current_price,
+                    "message":     (
+                        f"🎯 TP3 hit! +{floating*100:.2f}%. "
+                        f"Closing {int(tp3_ratio*100)}% of remaining. "
+                        f"ATR trail on last 25%."
+                    )
+                }
+
+        # ── Rule D: ATR-based trailing stop on last position piece ───────
+        # Standard: trail aktivasi setelah TP1, gunakan ATR × 2.0 dari peak.
+        # Trailing level HANYA naik (ratchet) — tidak pernah dilebarkan.
+        # Fallback ke vol-fraction bila entry_atr tidak tersedia.
         if position.tp1_hit:
             tp1_diff_pct = abs(position.entry_price - position.tp1) / position.entry_price
             activation_threshold = tp1_diff_pct + 0.003
 
             if max_floating >= activation_threshold:
-                vol_est = getattr(position, 'realized_vol', 0.02)
-                if position.tp2_hit:
-                    trail_pct = max(vol_est * 0.30, 0.003)
+                entry_atr = getattr(position, 'entry_atr', 0.0)
+                atr_mult  = getattr(cfg, 'atr_trailing_multiplier', 2.0)
+
+                if entry_atr > 0:
+                    # ATR-based: trail distance = ATR_at_entry × multiplier
+                    # This is the industry-standard approach — buffer scales with
+                    # actual volatility measured at trade open, not current vol.
+                    trail_pct = entry_atr * atr_mult
+                    trail_pct = max(trail_pct, 0.003)   # floor 0.3%
+                    trail_pct = min(trail_pct, 0.060)   # cap 6% (extreme assets)
                 else:
-                    trail_pct = max(vol_est * 0.50, 0.005)
+                    # Fallback when ATR unavailable: tighter after TP2/TP3
+                    vol_est = getattr(position, 'realized_vol', 0.02)
+                    if position.tp2_hit:
+                        trail_pct = max(vol_est * 0.30, 0.003)
+                    else:
+                        trail_pct = max(vol_est * 0.50, 0.005)
 
                 if position.side == Side.LONG:
-                    trail_sl = new_high * (1 - trail_pct)
+                    # Compute fresh trail level from current peak
+                    trail_sl_new = new_high * (1 - trail_pct)
+                    # Ratchet: only move trail up, never down
+                    trail_sl = max(trail_sl_new, getattr(position, 'trailing_stop_price', 0.0))
                     if current_price <= trail_sl:
                         return {
                             "action":      "trailing_stop",
                             "close_ratio": 1.0,
                             "price":       current_price,
                             "trail_price": trail_sl,
+                            "trail_pct":   trail_pct,
                             "message":     (
-                                f"🛡️ Trailing Stop ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
+                                f"🛡️ ATR Trail ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
                                 f"(peak +{max_floating*100:.1f}%)."
                             )
                         }
+                    # Update ratcheted trail level on position (executor persists it)
+                    if trail_sl > getattr(position, 'trailing_stop_price', 0.0):
+                        position.trailing_stop_price = trail_sl
                 else:
-                    trail_sl = new_low * (1 + trail_pct)
+                    trail_sl_new = new_low * (1 + trail_pct)
+                    # Ratchet: for SHORT, trail_sl only moves down (tightens profit lock).
+                    # Use trail_sl_new when no prior level saved (trailing_stop_price == 0).
+                    existing = getattr(position, 'trailing_stop_price', 0.0)
+                    if existing > 0:
+                        trail_sl = min(trail_sl_new, existing)
+                    else:
+                        trail_sl = trail_sl_new
                     if current_price >= trail_sl:
                         return {
                             "action":      "trailing_stop",
                             "close_ratio": 1.0,
                             "price":       current_price,
                             "trail_price": trail_sl,
+                            "trail_pct":   trail_pct,
                             "message":     (
-                                f"🛡️ Trailing Stop ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
+                                f"🛡️ ATR Trail ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
                                 f"(peak +{max_floating*100:.1f}%)."
                             )
                         }
+                    if existing == 0 or trail_sl < existing:
+                        position.trailing_stop_price = trail_sl
 
         # ── Rule F: Early Trailing — profit tapi belum TP1 ───────────────
         # Aktif saat floating >= threshold (misal +0.5%) tanpa nunggu TP1 flag.

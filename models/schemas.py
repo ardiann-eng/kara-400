@@ -164,12 +164,14 @@ class TradeSignal(BaseModel):
     stop_loss:        float
     tp1:              float
     tp2:              float
+    tp3:              float = 0.0   # third target (3:1 R:R); 0 = not set
     suggested_leverage: int
 
     # Position sizing (filled by RiskManager)
     suggested_size_usd: Optional[float] = None
     suggested_contracts: Optional[float] = None
     realized_vol:       float = 0.02             # daily realized vol — used for trail distance
+    entry_atr:          float = 0.0              # ATR% at entry — for ATR trailing stop
     funding_rate:       Optional[float] = None   # last known funding rate at signal time
 
     # Meta
@@ -218,21 +220,27 @@ class TradeSignal(BaseModel):
                 self.stop_loss = round(self.entry_price * (1 + sl_pct), 8)
 
         # ── 2. Take Profit Calculation — ikut sl_pct_atr supaya RR konsisten ──
-        # Kalau ATR SL dipakai, TP juga dihitung dari SL ATR (RR 1.5x dan 2.5x)
         if atr_value > 0 and config.RISK.enable_atr_sl:
             effective_sl = sl_pct_atr
-            tp1_eff = effective_sl * 1.5
-            tp2_eff = effective_sl * 2.5
+            tp1_eff = effective_sl * 1.5   # 1:1 R:R-ish
+            tp2_eff = effective_sl * 2.5   # 2:1 R:R
+            tp3_eff = effective_sl * 3.5   # 3:1 R:R
         else:
             tp1_eff = tp1_pct
             tp2_eff = tp2_pct
+            tp3_eff = getattr(cfg, 'tp3_pct', tp2_pct * 1.5)
+
+        # Store entry ATR so trailing stop can use it later
+        self.entry_atr = atr_value
 
         if self.side == Side.LONG:
             self.tp1 = round(self.entry_price * (1 + tp1_eff), 8)
             self.tp2 = round(self.entry_price * (1 + tp2_eff), 8)
+            self.tp3 = round(self.entry_price * (1 + tp3_eff), 8)
         else:
             self.tp1 = round(self.entry_price * (1 - tp1_eff), 8)
             self.tp2 = round(self.entry_price * (1 - tp2_eff), 8)
+            self.tp3 = round(self.entry_price * (1 - tp3_eff), 8)
 
     @property
     def risk_reward_ratio(self) -> float:
@@ -293,14 +301,18 @@ class Position(BaseModel):
     stop_loss:        float
     tp1:              float
     tp2:              float
+    tp3:              float = 0.0    # third target (3:1 R:R); 0 = not set (trail remainder)
     trailing_active:  bool = False
     trailing_high:    float = 0.0    # highest price reached (for long trailing)
+    trailing_stop_price: float = 0.0  # current ratcheted ATR trailing stop level
+    entry_atr:        float = 0.0    # ATR% at entry — used for ATR trailing stop
     liquidation_price: Optional[float] = None  # estimated or actual liquidation price
 
     # State
     status:           PositionStatus = PositionStatus.OPEN
     tp1_hit:          bool = False
     tp2_hit:          bool = False
+    tp3_hit:          bool = False
     pnl_realized:     float = 0.0
     pnl_unrealized:   float = 0.0
 
@@ -313,9 +325,13 @@ class Position(BaseModel):
     entry_score:       int = 50
     realized_vol:      float = 0.02       # daily realized vol at entry — used for trail distance
 
-    # Rolling 1m candle closes & volumes — diupdate setiap monitor tick untuk exit logic
+    # Rolling 1m candle OHLCV — diupdate setiap monitor tick untuk exit logic
     candle_closes:     List[float] = Field(default_factory=list)
+    candle_highs:      List[float] = Field(default_factory=list)
+    candle_lows:       List[float] = Field(default_factory=list)
     candle_volumes:    List[float] = Field(default_factory=list)
+    # 15m candle closes untuk HTF trend filter (momentum exit Layer 5)
+    htf_candle_closes: List[float] = Field(default_factory=list)
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:

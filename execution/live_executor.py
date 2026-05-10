@@ -287,10 +287,14 @@ class LiveExecutor:
             stop_loss=signal.stop_loss,
             tp1=signal.tp1,
             tp2=signal.tp2,
+            tp3=getattr(signal, 'tp3', 0.0),
             trailing_high=signal.entry_price,
+            trailing_stop_price=0.0,
+            entry_atr=getattr(signal, 'entry_atr', 0.0),
             signal_id=signal.signal_id,
             is_paper=False,
             entry_score=signal.score,
+            realized_vol=getattr(signal, 'realized_vol', 0.02),
         )
         self._positions[pos.position_id] = pos
 
@@ -437,16 +441,17 @@ class LiveExecutor:
             pos.tp1_hit = True
             pos.trailing_active = True
             pos.trailing_high = current_price
-            # SL pindah ke breakeven setelah TP1 — update on-chain SL juga
-            # supaya proteksi on-chain selaras dengan posisi baru.
             breakeven = pos.entry_price
             await self.update_onchain_sl(pos, breakeven)
             log.info(f" [LIVE] TP1 hit on {pos.asset} - SL (software + on-chain) moved to breakeven @ {breakeven}")
         elif action["action"] == "tp2":
             pos.tp2_hit = True
             log.info(f" [LIVE] TP2 hit on {pos.asset}")
+        elif action["action"] == "tp3":
+            pos.tp3_hit = True
+            log.info(f" [LIVE] TP3 hit on {pos.asset} - ATR trail on last piece")
 
-        # Update peak high for trailing
+        # Update peak high for trailing (always, so ATR trail has correct peak)
         if pos.side == Side.LONG:
             pos.trailing_high = max(pos.trailing_high, current_price)
         else:

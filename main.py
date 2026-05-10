@@ -975,7 +975,7 @@ class KaraBot:
                     user_signal.stop_loss = levels["sl_price"]
                     user_signal.tp1       = levels["tp1_price"]
                     user_signal.tp2       = levels["tp2_price"]
-                    # Store realized_vol on signal for trailing stop width
+                    user_signal.tp3       = levels["tp3_price"]
                     user_signal.realized_vol = levels["realized_vol"]
                     log.info(
                         f"[LEVELS] {user_signal.asset} {user_signal.side.value.upper()} "
@@ -983,6 +983,7 @@ class KaraBot:
                         f"sl={levels['sl_pct']*100:.2f}% "
                         f"tp1={levels['tp1_pct']*100:.2f}% "
                         f"tp2={levels['tp2_pct']*100:.2f}% "
+                        f"tp3={levels['tp3_pct']*100:.2f}% "
                         f"RR={levels['rr_ratio']:.2f}x"
                     )
                 except Exception as _e:
@@ -1123,40 +1124,69 @@ class KaraBot:
             except Exception as e:
                 log.debug(f"Failed to fetch market price for {asset}: {e}")
 
-        # 2b. Fetch 1m candle closes+volumes per asset untuk exit logic
+        # 2b. Fetch 1m candle OHLCV penuh per asset untuk exit logic
         # Hanya diambil sekali per asset, dishare ke semua user yang hold asset tsb.
-        candle_closes_map: dict = {}
+        # limit=55: cukup untuk EMA50 (50 candle) + buffer 5 candle, TANPA API call tambahan.
+        candle_closes_map:  dict = {}
+        candle_highs_map:   dict = {}
+        candle_lows_map:    dict = {}
         candle_volumes_map: dict = {}
+        htf_closes_map:     dict = {}   # 15m candles untuk HTF trend filter
+
         for asset in all_open_assets:
             try:
-                candles = await self.hl_client.get_candles(asset, "1m", limit=6)
+                # 1m OHLCV — 55 candle cukup untuk EMA50 + ATR14 + RSI14
+                candles = await self.hl_client.get_candles(asset, "1m", limit=55)
                 if candles:
-                    closes = []
-                    volumes = []
+                    closes, highs, lows, volumes = [], [], [], []
                     for c in candles:
                         if isinstance(c, dict):
                             closes.append(float(c.get("c", 0)))
+                            highs.append(float(c.get("h", c.get("c", 0))))
+                            lows.append(float(c.get("l", c.get("c", 0))))
                             volumes.append(float(c.get("v", 0)))
                         elif isinstance(c, (list, tuple)) and len(c) >= 6:
                             closes.append(float(c[4]))
+                            highs.append(float(c[2]))
+                            lows.append(float(c[3]))
                             volumes.append(float(c[5]))
                     if closes:
-                        candle_closes_map[asset] = closes
-                    if volumes:
+                        candle_closes_map[asset]  = closes
+                        candle_highs_map[asset]   = highs
+                        candle_lows_map[asset]    = lows
                         candle_volumes_map[asset] = volumes
             except Exception as e:
-                log.debug(f"Candle fetch skipped for {asset}: {e}")
+                log.debug(f"1m candle fetch skipped for {asset}: {e}")
 
-        # 2c. Inject candle_closes + candle_volumes ke setiap open scalper position
+            try:
+                # 15m HTF candles — 55 candle untuk EMA50 HTF trend filter
+                htf_candles = await self.hl_client.get_candles(asset, "15m", limit=55)
+                if htf_candles:
+                    htf_closes = []
+                    for c in htf_candles:
+                        if isinstance(c, dict):
+                            htf_closes.append(float(c.get("c", 0)))
+                        elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                            htf_closes.append(float(c[4]))
+                    if htf_closes:
+                        htf_closes_map[asset] = htf_closes
+            except Exception as e:
+                log.debug(f"15m candle fetch skipped for {asset}: {e}")
+
+        # 2c. Inject semua candle data ke setiap open scalper position
         for chat_id, session in self.sessions.items():
             if not hasattr(session.executor, 'open_positions'):
                 continue
             for pos in session.executor.open_positions:
                 if pos.trade_mode == 'scalper':
                     if pos.asset in candle_closes_map:
-                        pos.candle_closes = candle_closes_map[pos.asset]
+                        pos.candle_closes  = candle_closes_map[pos.asset]
+                        pos.candle_highs   = candle_highs_map.get(pos.asset, [])
+                        pos.candle_lows    = candle_lows_map.get(pos.asset, [])
                     if pos.asset in candle_volumes_map:
                         pos.candle_volumes = candle_volumes_map[pos.asset]
+                    if pos.asset in htf_closes_map:
+                        pos.htf_candle_closes = htf_closes_map[pos.asset]
 
         # 3. Apply updates to each user
         for chat_id, session in self.sessions.items():
@@ -1214,8 +1244,15 @@ class KaraBot:
 
                     if a.get("action") == "momentum_exit":
                         header  = f"↩️ <b>Momentum Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
-                        subtext = "<i>Candle berbalik arah — keluar sebelum kena SL.</i>"
-                        exit_detail = ""
+                        subtext = "<i>Multi-confirmation reversal — keluar sebelum kena SL.</i>"
+                        checks  = a.get("checks", {})
+                        detail_parts = []
+                        if checks.get("pullback"):  detail_parts.append("✅ Pullback")
+                        if checks.get("volume"):    detail_parts.append("✅ Volume")
+                        if checks.get("trend"):     detail_parts.append("✅ EMA break")
+                        if checks.get("momentum"):  detail_parts.append("✅ RSI/MACD")
+                        raw_msg = a.get("message", "")
+                        exit_detail = f"\n<i>{' · '.join(detail_parts)}</i>" if detail_parts else (f"\n<i>{raw_msg}</i>" if raw_msg else "")
                     elif a.get("action") == "vol_spike_exit":
                         header  = f"📊 <b>Vol Spike Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
                         subtext = f"<i>Posisi ditutup otomatis setelah {hold_min} menit~</i>"

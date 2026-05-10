@@ -84,8 +84,10 @@ Regime: <code>{regime}</code>
 --------------------
  Entry: <code>${entry}</code>
 🛑 Stop Loss: <code>${sl}</code> ({sl_pct:.1f}%)
- TP1: <code>${tp1}</code> (+{tp1_pct:.1f}%) -> 40%
- TP2: <code>${tp2}</code> (+{tp2_pct:.1f}%) -> 35%
+ TP1: <code>${tp1}</code> (+{tp1_pct:.1f}%) → 25%
+ TP2: <code>${tp2}</code> (+{tp2_pct:.1f}%) → 25%
+ TP3: <code>${tp3}</code> (+{tp3_pct:.1f}%) → 25%
+🛡️ Sisa 25%: ATR Trailing Stop
 ⚡ Leverage: <b>{lev}x isolated</b>
 📐 R:R = <b>{rr:.1f}x</b>
 --------------------
@@ -750,7 +752,7 @@ class KaraTelegram:
         help_text = (
             "📖 <b>KARA 4.0 - User Manual</b> 🌸\n\n"
             "🎛️ <b>Mode Trading & Akun</b>\n"
-            "• /mode     — Info Scalper Mode (SL 0.70% | TP1 1.00% | TP2 1.50%)\n"
+            "• /mode     — Info Scalper Mode (SL backstop | TP1→TP2→TP3→ATR Trail)\n"
             "• /settings — Atur threshold & leverage pribadi\n"
             "• /live     — Aktivasi Live Mode (Risiko Nyata)\n"
             "• /paper    — Kembali ke Paper Mode & Reset saldo\n\n"
@@ -952,6 +954,7 @@ class KaraTelegram:
             # TP status indicators
             tp1_icon = "✅" if pos.tp1_hit  else "⏳"
             tp2_icon = "✅" if pos.tp2_hit  else "⏳"
+            tp3_icon = "✅" if getattr(pos, 'tp3_hit', False) else "⏳"
 
             # SL label — if TP1 already hit, SL moved to breakeven
             sl_note = " <i>(BEP)</i>" if pos.tp1_hit else ""
@@ -959,18 +962,24 @@ class KaraTelegram:
             # Liq row (only show if available)
             liq_part = f" | 💥 Liq: <code>${format_price(pos.liquidation_price)}</code>" if pos.liquidation_price else ""
 
+            # ATR trail level if active
+            trail_price = getattr(pos, 'trailing_stop_price', 0.0)
+            trail_part = f"\n🛡️ ATR Trail: <code>${format_price(trail_price)}</code>" if (pos.tp1_hit and trail_price > 0) else ""
+
             # ── Concise Card ───────────────────────────────────────────────
-            # Clean ticker for Hyperliquid URL (strip 'k' for 1000x assets)
             url_ticker = pos.asset[1:] if pos.asset.startswith('k') and len(pos.asset) > 1 else pos.asset
             hl_link    = f"https://app.hyperliquid.xyz/trade/{url_ticker}"
             asset_html = f"<a href='{hl_link}'>{pos.asset}</a>"
+            tp3_val    = getattr(pos, 'tp3', 0.0)
 
             text += (
                 f"\n"
                 f"<b>{asset_html} {side_str} {pos.leverage}x</b>   {pnl_emoji} {pnl_sign}{float_pct:.2f}% (ROE)\n"
                 f"Entry: ${format_price(pos.entry_price)} → ${format_price(current)}\n"
-                f"🛡️ SL: ${format_price(pos.stop_loss)} | 💥 Liq: ${format_price(pos.liquidation_price) if pos.liquidation_price else '?'}\n"
-                f"🎯 TP1: ${format_price(pos.tp1)}   🎯 TP2: ${format_price(pos.tp2)}   | {duration} lalu\n"
+                f"🛡️ SL: ${format_price(pos.stop_loss)}{sl_note} | 💥 Liq: ${format_price(pos.liquidation_price) if pos.liquidation_price else '?'}\n"
+                f"{tp1_icon} TP1: ${format_price(pos.tp1)}  {tp2_icon} TP2: ${format_price(pos.tp2)}  "
+                f"{tp3_icon} TP3: ${format_price(tp3_val) if tp3_val else '—'}  | {duration} lalu"
+                f"{trail_part}\n"
             )
 
             # Close button per position (2-column grid)
@@ -1045,8 +1054,8 @@ class KaraTelegram:
 
             def fmt_exit_label(key):
                 labels = {
-                    "tp1": "TP1", "tp2": "TP2",
-                    "trailing_stop": "Trailing", "trailing": "Trailing",
+                    "tp1": "TP1 (25%)", "tp2": "TP2 (25%)", "tp3": "TP3 (25%)",
+                    "trailing_stop": "ATR Trail", "trailing": "ATR Trail",
                     "stop_loss": "Stop Loss", "sl": "Stop Loss",
                     "time_exit": "Time Exit", "manual": "Manual",
                     "close_all": "Close All",
@@ -1560,7 +1569,7 @@ class KaraTelegram:
         text = (
             f"🎯 <b>Trading Mode: {mode}</b> {mode_icon}\n\n"
             f"<b>Scalper Mode:</b> Ultra-Agresif. Entry/Exit cepat (maks 20 menit), leverage 25-35x, frekuensi trade tinggi.\n"
-            f"SL: 0.70% | TP1: 1.00% | TP2: 1.50% | Max 5 posisi concurrent.\n\n"
+            f"SL: 3.00% (backstop) | TP1: 1.43% → 50% | TP2: 2.14% → 33% | TP3: 3.0% → close all | Max 5 posisi concurrent.\n\n"
             f"<i>KARA berjalan eksklusif dalam Scalper Mode.</i>"
         )
 
@@ -1808,6 +1817,8 @@ class KaraTelegram:
             tp1_pct=abs(signal.tp1 / signal.entry_price - 1) * 100,
             tp2=format_price(signal.tp2),
             tp2_pct=abs(signal.tp2 / signal.entry_price - 1) * 100,
+            tp3=format_price(signal.tp3) if getattr(signal, 'tp3', 0) else "—",
+            tp3_pct=abs(signal.tp3 / signal.entry_price - 1) * 100 if getattr(signal, 'tp3', 0) else 0.0,
             lev=signal.suggested_leverage,
             rr=signal.risk_reward_ratio,
             sig_id=signal.signal_id[:8]
@@ -1865,8 +1876,10 @@ class KaraTelegram:
             
             f"🛡️ <b>Risk Profile</b>\n"
             f"  • 🛑 SL   : <code>${format_price(pos.stop_loss)}</code>\n"
-            f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code>\n"
-            f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code>\n"
+            f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code> → 25%\n"
+            f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code> → 25%\n"
+            f"  • 🎯 TP3  : <code>${format_price(pos.tp3) if getattr(pos, 'tp3', 0) else '—'}</code> → 25%\n"
+            f"  • 🛡️ Trail : ATR×2 (sisa 25%)\n"
             f"  • 📐 R:R Ratio: <b>{signal.risk_reward_ratio:.2f}x</b>\n"
             f"  • 📊 Score: <b>{signal.score}/100</b>\n\n"
             
@@ -1903,50 +1916,67 @@ class KaraTelegram:
         pnl_sign = "+" if pnl >= 0 else ""
 
         # Action types yang merupakan full/final close (posisi benar-benar selesai)
-        FINAL_EXIT_TYPES = ("trailing_stop", "stop_loss", "time_exit", "momentum_exit")
+        FINAL_EXIT_TYPES = ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "vol_spike_exit", "early_trail")
 
         if action_type == "tp1":
             text = (
-                "🌸 <b>KARA UPDATE: Target Reached</b>\n\n"
-                f"<i>I have secured partial profits for <b>{pos.asset}</b>. Taking some chips off the table.</i>\n\n"
+                "🌸 <b>KARA UPDATE: TP1 Tercapai</b>\n\n"
+                f"<i>Profit pertama diamankan untuk <b>{pos.asset}</b>. 25% posisi ditutup.</i>\n\n"
 
-                f"🎯 <b>TP1 HIT</b>\n"
+                f"🎯 <b>TP1 HIT — 25% Closed</b>\n"
                 f"  • Entry   : <code>${format_price(entry)}</code>\n"
                 f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
 
                 f"🛡️ <b>Risk Adjustment</b>\n"
-                f"  • Status : Sisa posisi masih jalan\n"
-                f"  • Action : SL digeser ke Entry ✅\n\n"
+                f"  • SL digeser ke Entry (breakeven) ✅\n"
+                f"  • Sisa 75% masih berjalan\n\n"
 
-                f"<i>Continuing to monitor for TP2. ✨</i>"
+                f"<i>Monitoring TP2 → TP3 → ATR Trail. ✨</i>"
             )
 
         elif action_type == "tp2":
             text = (
-                "🏁 <b>KARA UPDATE: Final Targets</b>\n\n"
-                f"<i>Excellent progress on <b>{pos.asset}</b>. TP2 has been successfully triggered.</i>\n\n"
+                "🏁 <b>KARA UPDATE: TP2 Tercapai</b>\n\n"
+                f"<i>Target kedua hit pada <b>{pos.asset}</b>. Total 50% posisi sudah dikunci.</i>\n\n"
 
-                f"🎯🎯 <b>TP2 HIT</b>\n"
+                f"🎯🎯 <b>TP2 HIT — 25% Closed</b>\n"
                 f"  • Entry   : <code>${format_price(entry)}</code>\n"
                 f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
 
-                f"🛡️ <b>Trailing Active</b>\n"
-                f"  • Status : Sisa posisi dengan trailing stop\n"
-                f"  • Objective: Maximizing the remainder. 🚀"
+                f"🛡️ <b>Menuju TP3</b>\n"
+                f"  • Sisa 50% masih berjalan\n"
+                f"  • TP3 target: <code>${format_price(getattr(pos, 'tp3', 0) or 0)}</code> 🚀"
+            )
+
+        elif action_type == "tp3":
+            total_pnl  = pos.pnl_realized + pnl
+            total_sign = "+" if total_pnl >= 0 else ""
+            text = (
+                "🏆 <b>KARA UPDATE: TP3 Tercapai</b>\n\n"
+                f"<i>Target ketiga (3:1 R:R) hit pada <b>{pos.asset}</b>. 75% posisi sudah dikunci.</i>\n\n"
+
+                f"🎯🎯🎯 <b>TP3 HIT — 25% Closed</b>\n"
+                f"  • Entry   : <code>${format_price(entry)}</code>\n"
+                f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
+
+                f"🛡️ <b>ATR Trailing Active</b>\n"
+                f"  • Sisa 25% dengan ATR trail\n"
+                f"  • Trail jalan terus — tidak ada target atas. 🚀"
             )
 
         elif action_type == "trailing_stop":
-            trail_px  = action.get("trail_price", current)
-            total_pnl = pos.pnl_realized + pnl
+            trail_px   = action.get("trail_price", current)
+            trail_pct  = action.get("trail_pct", 0.0)
+            total_pnl  = pos.pnl_realized + pnl
             total_sign = "+" if total_pnl >= 0 else ""
+            trail_pct_str = f" ({trail_pct*100:.1f}%)" if trail_pct else ""
             text = (
-                "📍 <b>TRAILING STOP — {asset}</b>\n"
-                "Trailing SL Hit : <code>${trail:,.4f}</code>\n"
-                "Total PnL       : <b>{tsign}{pnl_idr}</b>\n"
-                "Posisi ditutup  : 100% ✅"
-            ).format(
-                asset=pos.asset, trail=trail_px,
-                tsign=total_sign, pnl_idr=format_idr(total_pnl)
+                f"📍 <b>ATR TRAILING STOP — {pos.asset}</b>\n\n"
+                f"<i>Trail level{trail_pct_str} tersentuh. Sisa posisi ditutup di puncak profit.</i>\n\n"
+                f"  • Trail SL : <code>${format_price(trail_px)}</code>\n"
+                f"  • Exit     : <code>${format_price(current)}</code>\n"
+                f"  • Total PnL: <b>{total_sign}{format_idr(total_pnl)}</b>\n"
+                f"  • Posisi   : Ditutup 100% ✅"
             )
 
         elif action_type == "stop_loss":
@@ -1970,7 +2000,7 @@ class KaraTelegram:
             return
 
         # PnL Card button: HANYA pada final exit (posisi benar-benar tutup semua).
-        # TP1 dan TP2 adalah partial close — tidak ada button.
+        # TP1, TP2, TP3 adalah partial close — tidak ada button.
         # Akumulasi total PnL dari semua partial close + final close.
         inline_markup = None
         if action_type in FINAL_EXIT_TYPES and pos:
@@ -2088,9 +2118,9 @@ class KaraTelegram:
             outcome = "Profit" if pnl_usd >= 0 else "Loss"
             hold_min = int(round(hold_minutes))
 
-            if reason_lower in ("tp1", "tp2"):
-                # TP format unchanged (original style)
-                trigger_label = "Take Profit 1 tercapai" if reason_lower == "tp1" else "Take Profit 2 tercapai"
+            if reason_lower in ("tp1", "tp2", "tp3"):
+                _tp_labels = {"tp1": "Take Profit 1 (25%) tercapai", "tp2": "Take Profit 2 (25%) tercapai", "tp3": "Take Profit 3 (25%) tercapai — 3:1 R:R"}
+                trigger_label = _tp_labels.get(reason_lower, f"Take Profit tercapai")
                 caption = (
                     f"🎯 <b>KARA menutup posisi {asset} {side}</b>\n"
                     f"<i>{trigger_label} — posisi ditutup otomatis oleh bot.</i>\n\n"
