@@ -764,9 +764,9 @@ class ScoringEngine:
             sample = recent_trades[-80:]
             buy_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('B', 'buy', 'Ask'))
             sell_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('S', 'sell', 'Bid'))
-            total_vol = buy_vol + sell_vol
-            if total_vol > 0:
-                cvd_ratio = (buy_vol - sell_vol) / total_vol
+            cvd_total = buy_vol + sell_vol
+            if cvd_total > 0:
+                cvd_ratio = (buy_vol - sell_vol) / cvd_total
                 if cvd_ratio > 0.25:
                     bull_pts += 10  # [AUDIT] Microstructure 30%: CVD max 10
                     reasons.append(f"💚 CVD bullish ({cvd_ratio*100:.0f}% net buy pressure)")
@@ -778,7 +778,8 @@ class ScoringEngine:
         # [FIX 2026-05-10] Threshold diturunkan 2.5→2.0x agar lebih sering berguna
         # sebagai konfirmasi. Max pts dikurangi 10→8.
         if len(volumes) >= 10:
-            avg_10m = sum(volumes[-10:]) / 10
+            total_vol = sum(volumes[-10:])
+            avg_10m = total_vol / 10
             avg_2m  = sum(volumes[-2:])  / 2
             if avg_10m > 0:
                 surge = avg_2m / avg_10m
@@ -843,6 +844,21 @@ class ScoringEngine:
                     reasons.append(f"⚠️ Mean-reversion guard: RSI {_rsi_guard:.0f}<40 + price<EMA21 → CAP 60")
 
         score = min(raw, 100)
+
+        # ── Per-coin breakdown log (INFO level, always shown) ─────────
+        _fund_bull = max(0, int(oi_bull - oi_bear)) if oi_bull > oi_bear else 0
+        _fund_bear = max(0, int(oi_bear - oi_bull)) if oi_bear > oi_bull else 0
+        _liq_bull  = max(0, int(liq_bull - liq_bear)) if liq_bull > liq_bear else 0
+        _liq_bear  = max(0, int(liq_bear - liq_bull)) if liq_bear > liq_bull else 0
+        _ob_pts    = bull_pts - _fund_bull - _liq_bull if side == Side.LONG else bear_pts - _fund_bear - _liq_bear
+        log.info(
+            f"[BREAKDOWN] {asset:6} | score={score} {side.value.upper():5} | "
+            f"bull={bull_pts} bear={bear_pts} | "
+            f"OI/Fund: bull={oi_bull:.1f} bear={oi_bear:.1f} | "
+            f"Liq: bull={liq_bull:.1f} bear={liq_bear:.1f} | "
+            f"Tech(OB+EMA+RSI+CVD): ~{_ob_pts}"
+        )
+
         return score, side, reasons
 
     def _infer_hh_hl_structure(self, closes: list) -> str:
