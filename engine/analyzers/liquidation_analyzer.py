@@ -147,20 +147,20 @@ class LiquidationAnalyzer:
 
             # Funding direction: positive = longs crowded = long liq risk = BEARISH signal
             # Negative = shorts crowded = short liq risk = BULLISH signal
-            if funding_rate > 0.000005:
-                tilt = min(int(abs(funding_rate) * 300000), base_points // 2)
-                bull_proxy = max(base_points // 2 - tilt, 0)
-                bear_proxy = base_points // 2 + tilt
+            if funding_rate > 0.00005:
+                tilt = min(int(abs(funding_rate) * 200000), base_points)
+                bull_proxy = 0
+                bear_proxy = tilt
                 reasons.append(f"{risk_label} + positive funding -> BEARISH liq tilt (longs crowded)")
-            elif funding_rate < -0.000005:
-                tilt = min(int(abs(funding_rate) * 300000), base_points // 2)
-                bull_proxy = base_points // 2 + tilt
-                bear_proxy = max(base_points // 2 - tilt, 0)
+            elif funding_rate < -0.00005:
+                tilt = min(int(abs(funding_rate) * 200000), base_points)
+                bull_proxy = tilt
+                bear_proxy = 0
                 reasons.append(f"{risk_label} + negative funding -> BULLISH liq tilt (shorts crowded)")
             else:
-                bull_proxy = base_points // 2
-                bear_proxy = base_points // 2
-                reasons.append(f"{risk_label} (neutral funding, even split)")
+                bull_proxy = 0
+                bear_proxy = 0
+                reasons.append(f"{risk_label} (neutral funding, no liq edge)")
 
             bull += bull_proxy
             bear += bear_proxy

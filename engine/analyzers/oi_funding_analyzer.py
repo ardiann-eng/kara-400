@@ -85,28 +85,9 @@ class OIFundingAnalyzer:
             reasons.append(
                 f"Moderate negative funding {fr*100:.4f}%/8h -> SHORT tilt"
             )
-        elif fr > 0.00001:                                 # slightly positive
-            bull += 3
-            reasons.append(
-                f"Slight positive funding {fr*100:.4f}%/8h -> minor LONG lean"
-            )
-        elif fr < -0.00001:                                # slightly negative
-            bear += 3
-            reasons.append(
-                f"Slight negative funding {fr*100:.4f}%/8h -> minor SHORT lean"
-            )
         else:
-            # Truly flat funding — follow price momentum
-            if price_change_1h > 0.001:
-                bull += 2
-                reasons.append(f"Flat funding + price up -> LONG lean")
-            elif price_change_1h < -0.001:
-                bear += 2
-                reasons.append(f"Flat funding + price down -> SHORT lean")
-            else:
-                bull += 1
-                bear += 1
-                reasons.append(f"Flat funding, flat price -> no direction")
+            # Funding < 0.00005 = noise level, tidak ada sinyal
+            reasons.append(f"Flat/noise funding {fr*100:.4f}%/8h -> no signal")
 
         # ── 2. Funding trend (slope of last 8) ────────────────────────
         if len(funding_history) >= 8:

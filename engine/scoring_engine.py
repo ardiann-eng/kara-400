@@ -845,13 +845,13 @@ class ScoringEngine:
 
         score = min(raw, 100)
 
-        # ── Per-coin breakdown log (INFO level, always shown) ─────────
+        # ── Per-coin breakdown log (debug only) ──────────────────────
         _fund_bull = max(0, int(oi_bull - oi_bear)) if oi_bull > oi_bear else 0
         _fund_bear = max(0, int(oi_bear - oi_bull)) if oi_bear > oi_bull else 0
         _liq_bull  = max(0, int(liq_bull - liq_bear)) if liq_bull > liq_bear else 0
         _liq_bear  = max(0, int(liq_bear - liq_bull)) if liq_bear > liq_bull else 0
         _ob_pts    = bull_pts - _fund_bull - _liq_bull if side == Side.LONG else bear_pts - _fund_bear - _liq_bear
-        log.info(
+        log.debug(
             f"[BREAKDOWN] {asset:6} | score={score} {side.value.upper():5} | "
             f"bull={bull_pts} bear={bear_pts} | "
             f"OI/Fund: bull={oi_bull:.1f} bear={oi_bear:.1f} | "

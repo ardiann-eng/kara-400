@@ -84,10 +84,9 @@ Regime: <code>{regime}</code>
 --------------------
  Entry: <code>${entry}</code>
 🛑 Stop Loss: <code>${sl}</code> ({sl_pct:.1f}%)
- TP1: <code>${tp1}</code> (+{tp1_pct:.1f}%) → 25%
- TP2: <code>${tp2}</code> (+{tp2_pct:.1f}%) → 25%
- TP3: <code>${tp3}</code> (+{tp3_pct:.1f}%) → 25%
-🛡️ Sisa 25%: ATR Trailing Stop
+ TP1: <code>${tp1}</code> (+{tp1_pct:.1f}%)
+ TP2: <code>${tp2}</code> (+{tp2_pct:.1f}%)
+ TP3: <code>${tp3}</code> (+{tp3_pct:.1f}%)
 ⚡ Leverage: <b>{lev}x isolated</b>
 📐 R:R = <b>{rr:.1f}x</b>
 --------------------
@@ -2592,42 +2591,64 @@ class KaraTelegram:
 
         elif action == "reasons" and signal:
             is_short = signal.side == Side.SHORT
+            bd = signal.breakdown
+
+            # ── Score summary line ────────────────────────────────────
+            raw = getattr(bd, 'raw_score', signal.score)
+            final = signal.score
+            mult = getattr(bd, 'regime_multiplier', None)
+            sess = getattr(bd, 'session_bonus', 0)
+            bull_total = getattr(bd, 'total_bull', 0)
+            bear_total = getattr(bd, 'total_bear', 0)
+
+            score_parts = []
+            if bull_total or bear_total:
+                winning = bull_total if not is_short else bear_total
+                losing  = bear_total if not is_short else bull_total
+                score_parts.append(f"Poin {'bull' if not is_short else 'bear'}: <b>{winning}</b> vs lawan: <b>{losing}</b>")
+            if mult and mult != 1.0:
+                score_parts.append(f"Regime multiplier: <b>×{mult:.2f}</b> ({raw}→{final})")
+            if sess and sess != 0:
+                score_parts.append(f"Session adjustment: <b>{sess:+d}</b>")
+
+            score_summary = (
+                f"📊 <b>Kenapa skor {final}/100?</b>\n"
+                + ("\n".join(f"• {p}" for p in score_parts) if score_parts else f"• Raw score: {raw} → Final: {final}")
+            )
 
             # ── Categorize reasons ────────────────────────────────────
-            marketists, fundingists, liqists, shortists, others = [], [], [], [], []
-            for r in signal.breakdown.reasons:
+            tech_list, fund_list, liq_list, pattern_list = [], [], [], []
+            for r in (bd.reasons or []):
                 safe_r = html.escape(r.strip('• '))
                 row = f"• {safe_r}"
                 low = r.lower()
-                if any(x in low for x in ["rejection wick", "rsi divergence", "bearish rsi", "bullish rsi", "squeeze"]):
-                    shortists.append(row)
-                elif any(x in low for x in ["regime", "vwap", "session", "price", "trend", "mtf", "structure", "momentum", "rsi", "ema", "volume surge"]):
-                    marketists.append(row)
-                elif any(x in low for x in ["funding", "pred", "basis", "flow", "cvd", "oi/funding"]):
-                    fundingists.append(row)
-                elif any(x in low for x in ["oi", "liq", "imbalance", "depth", "wall", "bid", "ask"]):
-                    liqists.append(row)
+                if any(x in low for x in ["rejection wick", "rsi divergence", "bearish rsi", "bullish rsi", "squeeze", "divergence"]):
+                    pattern_list.append(row)
+                elif any(x in low for x in ["ema", "rsi", "regime", "mtf", "volume surge", "cvd", "momentum", "session", "trending", "ranging", "volatile", "mean-reversion"]):
+                    tech_list.append(row)
+                elif any(x in low for x in ["funding", "basis", "oi/funding", "pred", "flow"]):
+                    fund_list.append(row)
+                elif any(x in low for x in ["liq", "imbalance", "wall", "bid", "ask", "oi", "cascade"]):
+                    liq_list.append(row)
                 else:
-                    others.append(row)
+                    tech_list.append(row)
 
-            blocks = []
-            if is_short and shortists:
-                blocks.append("🔴 <b>Sinyal SHORT (Bearish Pattern):</b>\n" + "\n".join(shortists))
-            if marketists:
-                blocks.append("📈 <b>Konteks Market:</b>\n" + "\n".join(marketists))
-            if fundingists:
-                blocks.append("💰 <b>Funding &amp; Flow:</b>\n" + "\n".join(fundingists))
-            if liqists:
-                blocks.append("🏦 <b>Likuiditas &amp; Depth:</b>\n" + "\n".join(liqists))
-            if others:
-                blocks.append("📝 <b>Lainnya:</b>\n" + "\n".join(others))
+            blocks = [score_summary]
+            if tech_list:
+                blocks.append("📈 <b>Teknikal &amp; Momentum:</b>\n" + "\n".join(tech_list))
+            if fund_list:
+                blocks.append("💰 <b>OI &amp; Funding:</b>\n" + "\n".join(fund_list))
+            if liq_list:
+                blocks.append("🏦 <b>Orderbook &amp; Likuidasi:</b>\n" + "\n".join(liq_list))
+            if pattern_list:
+                blocks.append("🕯️ <b>Pattern Khusus:</b>\n" + "\n".join(pattern_list))
 
             reasons_text = "\n\n".join(blocks) if blocks else "• <i>Tidak ada detail tersedia.</i>"
 
             # ── De-duplicate warnings ─────────────────────────────────
             uniq_warns = []
             seen_warns = set()
-            for w in (signal.breakdown.warnings or []):
+            for w in (bd.warnings or []):
                 key = (w or "").strip().lower()
                 if not key or key in seen_warns:
                     continue
@@ -2647,44 +2668,24 @@ class KaraTelegram:
                 if fr is not None:
                     fr_pct = fr * 100
                     if fr > 0.00005:
-                        fr_line = f"• 💸 Funding rate <b>{fr_pct:.4f}%/8h</b> — tinggi, SHORT bayar ke LONG. Hold cepat!"
+                        fr_line = f"• 💸 Funding rate <b>{fr_pct:.4f}%/8h</b> — longs crowded, SHORT favorable."
                     elif fr > 0:
                         fr_line = f"• 💸 Funding rate <b>{fr_pct:.4f}%/8h</b> — normal, risiko rendah."
                     else:
                         fr_line = f"• 💸 Funding rate <b>{fr_pct:.4f}%/8h</b> — negatif, SHORT <i>menerima</i> pembayaran."
-
-                threshold_line = "• 🎯 Threshold SHORT scalper: skor ≥ <b>62</b>."
-                squeeze_note = "• 🔥 Squeeze guard aktif: entry diblok jika price spike &gt;1% + OI drop &gt;5% dalam 1m."
-                unlimited_note = "• ⚠️ SHORT punya risiko loss tak terbatas secara teoritis — SL wajib terpasang."
-
-                short_risk_lines = [threshold_line, squeeze_note, unlimited_note]
-                if fr_line:
-                    short_risk_lines.insert(0, fr_line)
-
-                short_risk_text = "\n\n🔴 <b>Analisis Risiko SHORT:</b>\n" + "\n".join(short_risk_lines)
-
-            # ── System notes ──────────────────────────────────────────
-            system_notes = [
-                "🧠 Scoring engine: teknikal (EMA, RSI, CVD, Momentum) + fundamental (OI, Funding, Liquidation).",
-                "🧭 MTF 15m confirmation: skor +12 jika aligned, -5 jika counter-trend.",
-                "🧩 Market structure (HH/HL + LH/LL) dan RSI divergence aktif.",
-                "📊 OI/Funding analyzer: OI rising + funding bias + spot-perp basis.",
-                "💥 Liquidation heatmap: cascade risk + liq density analysis.",
-                "🔥 Volume surge + rejection wick detection aktif.",
-            ]
-            if is_short:
-                system_notes.append("🛡️ SHORT: filter funding rate + squeeze guard + anti-trend aktif.")
-            system_text = "⚙️ <b>Sistem KARA Aktif:</b>\n" + "\n".join(f"• {x}" for x in system_notes)
+                short_risk_lines = [
+                    fr_line,
+                    "• ⚠️ SHORT threshold lebih ketat: skor ≥ <b>62</b>.",
+                    "• 🔥 Squeeze guard aktif — entry diblok jika price spike &gt;1% + OI drop &gt;5% dalam 1m.",
+                ]
+                short_risk_text = "\n\n🔴 <b>Risiko SHORT:</b>\n" + "\n".join(x for x in short_risk_lines if x)
 
             side_label = "SHORT 🔴" if is_short else "LONG 🟢"
             explanation = (
-                f"Tentu! Ini analisis mendalamku untuk <b>{signal.asset} {side_label}</b> "
-                f"(skor <b>{signal.score}/100</b>):\n\n"
+                f"<b>{signal.asset} {side_label}</b> — Skor <b>{signal.score}/100</b>\n\n"
                 f"{reasons_text}"
                 f"{warnings_text}"
-                f"{short_risk_text}\n\n"
-                f"{system_text}\n\n"
-                f"<i>Semoga membantu kamu membuat keputusan yang tepat! 🌸</i>"
+                f"{short_risk_text}"
             )
             await query.message.reply_html(explanation)
 
