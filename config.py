@@ -212,8 +212,8 @@ class ScalperConfig:
     # SL 1% sebelumnya selalu kena noise: 7/8 SL = -25% PnL padahal cuma turun 1%.
     # 3.0% x 25x = -75% per SL on-chain (jarang kena, hanya saat bot crash / flash crash).
     sl_pct:                  float = 0.0300   # 3.0% backstop on-chain (emergency only — di luar jangkauan noise)
-    tp1_pct:                 float = 0.0143   # 1.43% TP1 — close 55% (RR 4.8x vs new SL)
-    tp2_pct:                 float = 0.0214   # 2.14% TP2 — close 75% remaining (RR 7.1x vs new SL)
+    tp1_pct:                 float = 0.0075   # 0.75% TP1 — [ADAPTIVE] Lowered for 20m scalping
+    tp2_pct:                 float = 0.0125   # 1.25% TP2 — [ADAPTIVE] Lowered
     trailing_pct:            float = 0.0050   # 0.50% trailing on remainder
 
     # Timing
@@ -238,7 +238,7 @@ class ScalperConfig:
     tp1_close_ratio:         float = 0.50     # 50% on TP1 (was 0.55)
     tp2_close_ratio:         float = 0.667    # 67% of remaining at TP2 (~33% original)
     tp3_close_ratio:         float = 1.0      # close all remaining at TP3 (scalper: no trail)
-    tp3_pct:                 float = 0.030    # ~2.1x TP2 (scalper tight horizon)
+    tp3_pct:                 float = 0.020    # 2.0% TP3 — [ADAPTIVE] Lowered (was 3.0%)
     # ATR trailing — scalper uses fixed pct (trade too short for ATR trail to matter)
     atr_trailing_multiplier: float = 2.0
 
@@ -287,7 +287,7 @@ class ScalperConfig:
 
     # Early trailing: aktif dari profit threshold tanpa nunggu TP1 flag
     early_trail_enabled:         bool  = True
-    early_trail_activation_pct:  float = 0.005  # aktif saat profit >= 0.5% (unleveraged)
+    early_trail_activation_pct:  float = 0.004  # aktif saat profit >= 0.4% (unleveraged)
     early_trail_distance_pct:    float = 0.003  # exit kalau retraced >= 0.3% dari peak
 
 SCALPER = ScalperConfig()
