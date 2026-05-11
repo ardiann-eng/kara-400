@@ -784,12 +784,20 @@ class ScoringEngine:
                 surge = avg_2m / avg_10m
                 if surge > 2.0:
                     # High volume surge — follow the direction
-                    extra = min(int((surge - 2.0) * 4), 8)
+                    extra = min(int((surge - 2.0) * 4), 10) # [BOOST] Increase surge max to 10
                     reasons.append(f"🔥 Volume surge {surge:.1f}x avg (+{extra} pts momentum)")
                     if bull_pts >= bear_pts:
                         bull_pts += extra
                     else:
                         bear_pts += extra
+            
+            # --- [ADAPTIVE BOOST] Baseline Volume Points (0-5 pts) ---
+            # Coins with high absolute volume relative to market cap / average get a tiny boost
+            # to favor liquid assets where scalping is safer.
+            if total_vol > 500000: # Example $500k/min threshold
+                bull_pts += 3
+                bear_pts += 3
+                reasons.append("💎 High liquidity asset (+3 baseline)")
 
         # ── [AUDIT Phase 1] HH/HL Structure REMOVED — redundant with EMA cross ──
 
