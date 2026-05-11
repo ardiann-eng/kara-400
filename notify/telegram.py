@@ -1876,10 +1876,9 @@ class KaraTelegram:
             
             f"🛡️ <b>Risk Profile</b>\n"
             f"  • 🛑 SL   : <code>${format_price(pos.stop_loss)}</code>\n"
-            f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code> → 25%\n"
-            f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code> → 25%\n"
-            f"  • 🎯 TP3  : <code>${format_price(pos.tp3) if getattr(pos, 'tp3', 0) else '—'}</code> → 25%\n"
-            f"  • 🛡️ Trail : ATR×2 (sisa 25%)\n"
+            f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code>\n"
+            f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code>\n"
+            f"  • 🎯 TP3  : <code>${format_price(pos.tp3) if getattr(pos, 'tp3', 0) else '—'}</code>\n"
             f"  • 📐 R:R Ratio: <b>{signal.risk_reward_ratio:.2f}x</b>\n"
             f"  • 📊 Score: <b>{signal.score}/100</b>\n\n"
             
@@ -2119,7 +2118,7 @@ class KaraTelegram:
             hold_min = int(round(hold_minutes))
 
             if reason_lower in ("tp1", "tp2", "tp3"):
-                _tp_labels = {"tp1": "Take Profit 1 (25%) tercapai", "tp2": "Take Profit 2 (25%) tercapai", "tp3": "Take Profit 3 (25%) tercapai — 3:1 R:R"}
+                _tp_labels = {"tp1": "Take Profit 1 tercapai", "tp2": "Take Profit 2 tercapai", "tp3": "Take Profit 3 tercapai — 3:1 R:R"}
                 trigger_label = _tp_labels.get(reason_lower, f"Take Profit tercapai")
                 caption = (
                     f"🎯 <b>KARA menutup posisi {asset} {side}</b>\n"
