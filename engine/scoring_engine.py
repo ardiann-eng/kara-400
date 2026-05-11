@@ -397,13 +397,31 @@ class ScoringEngine:
                                 f"price +{_price_chg*100:.1f}% + OI {_oi_delta_pct*100:.1f}%"
                             )
 
-        # 4. Compute scalper indicators (enriched with fundamental data)
+        # 4a. Fetch regime BEFORE scoring for regime_multiplier [AUDIT Phase 1]
+        vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
+
+        # 4b. Compute scalper indicators (enriched with fundamental data)
         score, side, reasons = self._calculate_scalper_score(
             asset, mark_price, candles, mtf_trend,
             oi_bull=oi_bull, oi_bear=oi_bear,
             liq_bull=liq_bull, liq_bear=liq_bear,
             fund_reasons=oi_reasons[:2], liq_reasons=liq_reasons[:2],
         )
+
+        # 4c. [AUDIT Phase 1] Regime multiplier: trending=1.2, ranging=1.0, volatile=0.8
+        if vol_regime in (MarketRegime.HIGH_VOL, MarketRegime.EXTREME):
+            _regime_cat = "volatile"
+            _regime_mult = 0.8
+        elif abs(trend_pct) >= 0.015:
+            _regime_cat = "trending"
+            _regime_mult = 1.2
+        else:
+            _regime_cat = "ranging"
+            _regime_mult = 1.0
+        score_pre = score
+        score = int(score * _regime_mult)
+        score = max(0, min(score, 100))
+        reasons.append(f"🌐 Regime: {_regime_cat} (×{_regime_mult}, {score_pre}→{score})")
 
         # FIX #5: Session adjusts entry threshold, not score.
         session_bonus, session_reasons, session_threshold_delta = self._get_session_bonus()
@@ -412,7 +430,7 @@ class ScoringEngine:
 
         effective_threshold = config.SCALPER.min_score_to_enter + session_threshold_delta
         if score < effective_threshold:
-            log.debug(f"[SCALPER] {asset}: score {score} < effective_threshold {effective_threshold}")
+            log.debug(f"[SCALPER] {asset}: score {score} < effective_threshold {effective_threshold} (regime={_regime_cat})")
             return None, score
 
         # SHORT-specific filters: higher threshold + funding rate confirmation + squeeze guard
@@ -434,8 +452,7 @@ class ScoringEngine:
                 log.debug(f"[SCALPER] {asset}: SHORT BLOCKED: potential squeeze ({_squeeze_reason})")
                 return None, score
 
-        # 4. Build signal with scalper TP/SL (now dynamic based on Volatility)
-        vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
+        # 4. Build signal with scalper TP/SL (vol_regime already fetched in step 4a)
         signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol, trend_pct)
 
         # Attach last-known funding rate for Telegram warning
@@ -593,7 +610,7 @@ class ScoringEngine:
         # diperhitungkan — sama seperti standard mode, di-scale max ±12 pts.
         if oi_bull > 0 or oi_bear > 0:
             fund_delta = oi_bull - oi_bear
-            fund_pts = max(-12, min(12, int(fund_delta)))
+            fund_pts = max(-25, min(25, int(fund_delta)))  # [AUDIT] Fundamental 40%: OI/Funding max ±25
             if fund_pts > 0:
                 bull_pts += fund_pts
                 reasons.append(f"📊 OI/Funding bullish (+{fund_pts})")
@@ -606,7 +623,7 @@ class ScoringEngine:
         # ── Liquidation Analysis (from standard pipeline) ────────────────────────
         if liq_bull > 0 or liq_bear > 0:
             liq_delta = liq_bull - liq_bear
-            liq_pts = max(-8, min(8, int(liq_delta)))
+            liq_pts = max(-15, min(15, int(liq_delta)))  # [AUDIT] Fundamental 40%: Liquidation max ±15
             if liq_pts > 0:
                 bull_pts += liq_pts
                 reasons.append(f"💥 Liq bias bullish (+{liq_pts})")
@@ -642,23 +659,11 @@ class ScoringEngine:
             side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
             return min(bull_pts + bear_pts, 100), side, reasons
 
-        # ── Momentum Confirmation (Institutional Filter) ─────────────────
-        # [FIX 2026-05-10] Dikurangi dari 10→8 pts karena redundan dengan EMA cross.
-        # Keduanya mengukur arah harga terbaru — double counting membuat skor inflasi.
-        bull_candles = 0
+        # ── [AUDIT Phase 1] Momentum Candles REMOVED — redundant with EMA cross ──
+        # Triple-counting direction (EMA + momentum + structure) inflated scores.
+        # EMA cross retained as best noise-filtered trend indicator.
+        bull_candles = 0  # kept for backward compat (consensus filter removed below)
         bear_candles = 0
-        if len(closes) >= 3:
-            bull_candles = sum(1 for c, o in zip(closes[-3:], opens[-3:]) if c > o)
-            bear_candles = sum(1 for c, o in zip(closes[-3:], opens[-3:]) if c < o)
-            
-            if bull_candles >= 2:
-                bull_pts += 8
-                reasons.append(f"🔥 Momentum 1m Bullish ({bull_candles}/3 Green)")
-            elif bear_candles >= 2:
-                bear_pts += 8
-                reasons.append(f"🩸 Momentum 1m Bearish ({bear_candles}/3 Red)")
-            else:
-                reasons.append("⚖️ Momentum 1m Neutral")
 
         # ── EMA 8 vs EMA 21 ──────────────────────────────────────────
         # [FIX 2026-05-10] Dikurangi dari 15→10 pts karena redundan dengan
@@ -674,10 +679,10 @@ class ScoringEngine:
         ema21 = ema(closes[-21:], 21) if len(closes) >= 21 else closes[-1]
 
         if ema8 > ema21 * 1.0005:   # EMA8 clearly above EMA21
-            bull_pts += 10
+            bull_pts += 12  # [AUDIT] Teknikal 30%: EMA max 12 (sole trend indicator)
             reasons.append(f"📈 EMA8 ({ema8:.4f}) > EMA21 ({ema21:.4f}) → bullish")
         elif ema8 < ema21 * 0.9995:
-            bear_pts += 10
+            bear_pts += 12  # [AUDIT] Teknikal 30%: EMA max 12
             reasons.append(f"📉 EMA8 ({ema8:.4f}) < EMA21 ({ema21:.4f}) → bearish")
 
         # ── RSI 14 (1m) ──────────────────────────────────────────────
@@ -696,16 +701,16 @@ class ScoringEngine:
             # untuk 1m timeframe. RSI 1m jarang menyentuh extreme, jadi zone diperluas
             # agar RSI lebih sering berkontribusi ke skor.
             if rsi < 30:
-                bull_pts += 15
+                bull_pts += 10  # [AUDIT] Teknikal 30%: RSI max 10
                 reasons.append(f"📊 RSI extreme oversold ({rsi:.1f}) → strong buy")
             elif rsi < 40:
-                bull_pts += 8
+                bull_pts += 5
                 reasons.append(f"📊 RSI oversold ({rsi:.1f}) → buy signal")
             elif rsi > 70:
-                bear_pts += 15
+                bear_pts += 10  # [AUDIT] Teknikal 30%: RSI max 10
                 reasons.append(f"📊 RSI extreme overbought ({rsi:.1f}) → strong sell")
             elif rsi > 60:
-                bear_pts += 8
+                bear_pts += 5
                 reasons.append(f"📊 RSI overbought ({rsi:.1f}) → sell signal")
             else:
                 reasons.append(f"📊 RSI neutral ({rsi:.1f})")
@@ -728,10 +733,10 @@ class ScoringEngine:
                 # [FIX 2026-05-10] Divergence dikurangi dari 10→7 pts — divergence
                 # pada 1m timeframe sering false signal karena noise.
                 if price_now > price_5ago * 1.002 and rsi_now < rsi_5ago - 3:
-                    bear_pts += 7
+                    bear_pts += 5  # [AUDIT] Teknikal 30%: divergence max 5
                     reasons.append(f"📉 Bearish RSI divergence (price ↑ tapi RSI {rsi_5ago:.0f}→{rsi_now:.0f}) → SHORT")
                 elif price_now < price_5ago * 0.998 and rsi_now > rsi_5ago + 3:
-                    bull_pts += 7
+                    bull_pts += 5  # [AUDIT] Teknikal 30%: divergence max 5
                     reasons.append(f"📈 Bullish RSI divergence (price ↓ tapi RSI {rsi_5ago:.0f}→{rsi_now:.0f}) → LONG")
 
         # ── Bearish Rejection Wick Detection (SHORT signal) ──────────────
@@ -746,7 +751,7 @@ class ScoringEngine:
                 # [FIX 2026-05-10] Wick detection dikurangi 8→5 pts — single candle
                 # pattern pada 1m terlalu noisy untuk bobot besar.
                 if body > 0 and upper_wick > 1.5 * body and c_close < c_open:
-                    bear_pts += 5
+                    bear_pts += 3  # [AUDIT] Teknikal 30%: wick max 3
                     reasons.append(f"🕯️ Rejection wick (wick {upper_wick/body:.1f}× body) → SHORT signal")
             except (TypeError, ValueError):
                 pass
@@ -763,10 +768,10 @@ class ScoringEngine:
             if total_vol > 0:
                 cvd_ratio = (buy_vol - sell_vol) / total_vol
                 if cvd_ratio > 0.25:
-                    bull_pts += 8
+                    bull_pts += 10  # [AUDIT] Microstructure 30%: CVD max 10
                     reasons.append(f"💚 CVD bullish ({cvd_ratio*100:.0f}% net buy pressure)")
                 elif cvd_ratio < -0.25:
-                    bear_pts += 8
+                    bear_pts += 10  # [AUDIT] Microstructure 30%: CVD max 10
                     reasons.append(f"❤️ CVD bearish ({cvd_ratio*100:.0f}% net sell pressure)")
 
         # ── Volume Surge (2min vs 10min average) ──────────────────────
@@ -786,19 +791,9 @@ class ScoringEngine:
                     else:
                         bear_pts += extra
 
-        # ── Market Structure HH/HL (cache-first: reuse existing 1m candles) ──
-        trend_state = self._infer_hh_hl_structure(closes)
-        import config
-        if trend_state == "bull":
-            bull_pts += config.SIGNAL.structure_scalper_bonus
-            reasons.append(f"🧩 1m structure HH/HL (+{config.SIGNAL.structure_scalper_bonus})")
-        elif trend_state == "bear":
-            bear_pts += config.SIGNAL.structure_scalper_bonus
-            reasons.append(f"🧩 1m structure LH/LL (+{config.SIGNAL.structure_scalper_bonus})")
-        else:
-            reasons.append("🧩 1m structure neutral")
+        # ── [AUDIT Phase 1] HH/HL Structure REMOVED — redundant with EMA cross ──
 
-        # ── Final tally & Consensus Filter ────────────────────────────
+        # ── Final tally & Direction ────────────────────────────────
         side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
         raw = (bull_pts if side == Side.LONG else bear_pts)
         
@@ -817,15 +812,28 @@ class ScoringEngine:
                     log.debug(f"[{asset}] SCALPER REJECT: Against 15m MTF trend")
                     return 0, side, reasons + ["REJECT: Counter-trend MTF"]
 
-        # Enforce Scalper Consensus: Must have momentum alignment
-        # (Now uses function-level vars set above, not locals())
-        if side == Side.LONG and bear_candles >= 2:
-            log.debug(f"[{asset}] SCALPER REJECT: LONG signal blocked by 1m Bearish Momentum")
-            return 0, side, reasons + ["REJECT: Momentum against trade"]
-        if side == Side.SHORT and bull_candles >= 2:
-            log.debug(f"[{asset}] SCALPER REJECT: SHORT signal blocked by 1m Bullish Momentum")
-            return 0, side, reasons + ["REJECT: Momentum against trade"]
-            
+        # ── [AUDIT Phase 1] Mean-Reversion Guard ─────────────────────
+        # Jika RSI > 60 DAN price > EMA21 → CAP score di 60 (jangan entry di puncak)
+        _mr_capped = False
+        if len(closes) >= 15:
+            # RSI sudah dihitung di atas — recompute singkat untuk guard
+            _gains = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
+            _losses_mr = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
+            _ag = sum(_gains[-14:]) / 14
+            _al = sum(_losses_mr[-14:]) / 14
+            _rsi_guard = (100 - 100 / (1 + _ag / _al)) if _al > 0 else 100.0
+            _price_now = closes[-1]
+            if _rsi_guard > 60 and _price_now > ema21 and side == Side.LONG:
+                if raw > 60:
+                    raw = 60
+                    _mr_capped = True
+                    reasons.append(f"⚠️ Mean-reversion guard: RSI {_rsi_guard:.0f}>60 + price>EMA21 → CAP 60")
+            elif _rsi_guard < 40 and _price_now < ema21 and side == Side.SHORT:
+                if raw > 60:
+                    raw = 60
+                    _mr_capped = True
+                    reasons.append(f"⚠️ Mean-reversion guard: RSI {_rsi_guard:.0f}<40 + price<EMA21 → CAP 60")
+
         score = min(raw, 100)
         return score, side, reasons
 

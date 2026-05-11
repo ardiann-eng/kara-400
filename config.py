@@ -14,7 +14,7 @@ load_dotenv()
 # ──────────────────────────────────────────────
 # ENVIRONMENT
 # ──────────────────────────────────────────────
-KARA_VERSION = "7.1.0"  # Scalper-Only: hapus STANDARD, fix R:R (SL 0.70% TP1 1.00% TP2 1.50%)
+KARA_VERSION = "7.2.0"  # Audit Phase 1: kill momentum_exit, rebuild scoring (Fund 40%/Tech 30%/Micro 30%), regime filter, mean-reversion guard
 DATA_SOURCE = os.getenv("KARA_DATA_SOURCE", "mainnet").lower() # "mainnet" | "testnet"
 TRADE_MODE  = os.getenv("KARA_TRADE_MODE", "paper").lower()    # "paper" | "live"
 FULL_AUTO   = os.getenv("KARA_FULL_AUTO", "true").lower() == "true"
@@ -261,7 +261,7 @@ class ScalperConfig:
     # Root cause analisis 43/43 losses: threshold terlalu kecil (0.43% avg pullback
     # = noise normal crypto), tidak ada confirmation layer, skor masuk ke exit logic.
     # Solusi: ATR-dynamic threshold + 5-layer confirmation, skor TIDAK dipakai di exit.
-    momentum_exit_enabled:            bool  = True
+    momentum_exit_enabled:            bool  = False   # [AUDIT 2026-05-11] DIMATIKAN — 11/11 loss (-$51.97). Root cause: HTF override → fixed 2% threshold × 25x = -50% ROE per trade.
     momentum_exit_min_minutes:        float = 3.0     # min hold 3 menit — exit lebih awal saat momentum redup
 
     # Layer 1 — Minimum pullback (anti-noise)
@@ -323,12 +323,12 @@ class SignalConfig:
     # FIX #4: SHORT trades had 57.6% WR and net -$12.55 in audit data.
     # Structural bias: positive funding/basis almost always favors LONG on Hyperliquid.
     # Raise SHORT threshold significantly to only execute highest-conviction SHORT signals.
-    min_score_short_signal:  int   = 59       # SHORT needs 59+ to emit (was 62, relaxed)
-    min_score_short_auto:    int   = 59       # SHORT auto-execute needs 59+
+    min_score_short_signal:  int   = 57       # [AUDIT Phase 1] SHORT same as LONG threshold (was 59)
+    min_score_short_auto:    int   = 57       # [AUDIT Phase 1] SHORT auto-execute same as LONG
 
     # Bull-Bear gap (LONG vs SHORT berbeda threshold)
     min_bull_bear_gap:       int   = 18       # LONG: minimum gap bull vs bear pts
-    min_bull_bear_gap_short: int   = 20       # SHORT: slightly higher than LONG (was 28 — too restrictive)
+    min_bull_bear_gap_short: int   = 18       # [AUDIT Phase 1] SHORT same gap as LONG (was 20)
 
     # SHORT-specific filters (aktif saat ALLOW_SHORT = True)
     # Solusi 2: Funding rate confirmation

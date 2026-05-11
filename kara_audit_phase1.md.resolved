@@ -1,0 +1,361 @@
+# 🔬 KARA BOT — AUDIT PHASE 1: LAPORAN AUTOPSI
+
+**Tanggal:** 11 Mei 2026  
+**Data:** `KARA_History_20260511.xlsx` — 109 trade (10-11 Mei 2026)  
+**Auditor:** Antigravity AI  
+**Status:** ⚠️ CRITICAL FINDINGS
+
+---
+
+## 📊 RINGKASAN EKSEKUTIF
+
+| Metrik | Nilai |
+|--------|-------|
+| Total Trade | 109 |
+| Overall Win Rate | 63.3% |
+| **Total PnL** | **-$1.77** |
+| Peak PnL (trade #77) | +$45.81 |
+| **Giveback dari Peak** | **-$47.57** |
+| Penyebab Utama | 11 momentum_exit = -$51.97 |
+
+> [!CAUTION]
+> Bot menghasilkan **+$45.81 profit** dari 77 trade pertama, lalu **kehilangan semuanya + lebih** karena 11 momentum_exit beruntun. Tanpa momentum_exit, PnL akhir akan **+$50.20**.
+
+### Exit Reason Breakdown
+
+| Exit Type | Trades | Win Rate | Total PnL | Avg PnL |
+|-----------|--------|----------|-----------|---------|
+| `time_exit` | 94 | 69.1% | **+$38.15** | +$0.41 |
+| `trailing_stop` | 3 | 100% | **+$10.93** | +$3.64 |
+| `manual_close` | 1 | 100% | +$1.12 | +$1.12 |
+| `momentum_exit` | 11 | **0.0%** | **-$51.97** | **-$4.72** |
+
+---
+
+## PART A: AUTOPSI MOMENTUM EXIT
+
+### 🚨 TEMUAN KRITIS #1 — Semua 11 Trade RUGI, 0 Pengecualian
+
+```
+Trade  Asset   Adverse Move   ROE%     PnL       Score  Waktu (UTC)
+─────────────────────────────────────────────────────────────────────
+#1     AZTEC   -2.115%        -52.87%  -$4.91    58     10 May 17:04
+#2     APT     -2.116%        -52.90%  -$5.19    58     10 May 20:05
+#3     ONDO    -2.038%        -50.96%  -$4.81    58     10 May 20:33
+#4     BERA    -2.222%        -55.54%  -$5.45    54     10 May 20:34
+#5     AVAX    -2.082%        -52.05%  -$5.16    54     10 May 20:44
+#6     ALGO    -2.034%        -50.86%  -$4.80    58     10 May 20:45
+#7     TIA     -2.117%        -52.92%  -$5.63    54     10 May 20:48
+#8     ETH     -2.062%        -51.54%  -$4.87    58     10 May 20:49
+#9     BLUR    -2.176%        -54.41%  -$5.78    55     10 May 21:13
+#10    SPX     -2.031%        -50.78%  -$2.50    78     10 May 00:16*
+#11    VVV     -2.308%        -57.71%  -$2.88    67     11 May 00:53
+```
+
+### 🚨 TEMUAN KRITIS #2 — Adverse Move SELALU ~2.0-2.2%
+
+> [!IMPORTANT]
+> Semua 11 trade menunjukkan **adverse price move yang nyaris identik: 2.03% sampai 2.31%**. Ini BUKAN kebetulan — ini adalah **threshold yang di-hardcode di kode**.
+
+**Root cause ditemukan di** [risk_manager.py:958-964](file:///d:/Vibe%20Coding/KARA%20-%20400/risk/risk_manager.py#L955-L966):
+
+```python
+# Layer 5: HTF trend filter
+htf_override_pct = getattr(scfg, 'momentum_exit_htf_uptrend_pullback', 0.030)
+# Config value: 0.020 (2%)
+
+if position.side == Side.LONG and htf_ema_fast > htf_ema_slow:
+    check_pullback = pullback_pct >= htf_override_pct  # ← OVERRIDE!
+```
+
+**Apa yang terjadi:**
+1. Saat 15m trend masih "uptrend" (EMA20 > EMA50), **Layer 5 MENGOVERRIDE seluruh threshold pullback** menjadi `htf_override_pct = 2.0%`
+2. Dynamic ATR threshold dari Layer 1 (`0.5%` floor) **diabaikan sepenuhnya**
+3. Momentum exit baru bisa trigger setelah harga sudah DROP 2%+
+4. Dengan leverage 25x → **2% drop = -50% ROE** — ini sudah FATAL
+
+### 🚨 TEMUAN KRITIS #3 — Clustering: 8 dari 11 Exit Dalam 48 Menit
+
+```
+20:05 APT    -$5.19  ←─┐
+20:33 ONDO   -$4.81     │
+20:34 BERA   -$5.45     │ 8 TRADES DALAM 48 MENIT
+20:44 AVAX   -$5.16     │ Total: -$41.66
+20:45 ALGO   -$4.80     │ = MARKET-WIDE DUMP
+20:48 TIA    -$5.63     │
+20:49 ETH    -$4.87     │
+21:13 BLUR   -$5.78  ←─┘
+```
+
+> [!WARNING]
+> **TIDAK ADA rate-limiter** untuk momentum_exit! Bot membuka 5 posisi LONG bersamaan, lalu market dump menghantam SEMUA secara beruntun. Ini menunjukkan **korelasi risiko tidak dikelola** — semua posisi long terpapar market risk yang sama.
+
+---
+
+### DIAGNOSIS: Mengapa Momentum Exit SELALU Rugi?
+
+#### Mekanisme Kegagalan (Step by Step)
+
+```mermaid
+flowchart TD
+    A["Bot entry LONG\n(momentum masih OK)"] --> B["Market mulai turun\n(-0.5% sampai -1.5%)"]
+    B --> C{"Layer 5: 15m trend\nmasih uptrend?"}
+    C -->|"Ya (EMA20>EMA50)"| D["Override threshold → 2%\n⚠️ MENUNGGU sampai -2%"]
+    C -->|Tidak| E["Pakai dynamic threshold\n~0.5-1.2% (ATR-based)"]
+    D --> F["Harga terus turun...\n-1.5%... -1.8%... -2.0%"]
+    F --> G["Akhirnya trigger di -2.0%\n= ROE -50% 💀"]
+    E --> H["Trigger lebih awal\n= kerugian lebih kecil"]
+    
+    style D fill:#ff4444,color:white
+    style G fill:#ff0000,color:white
+    style H fill:#44aa44,color:white
+```
+
+#### 5 Masalah Arsitektural
+
+| # | Masalah | Dampak | Severity |
+|---|---------|--------|----------|
+| 1 | **HTF override menghapus dynamic threshold** | Momentum exit jadi fixed 2% stop-loss | 🔴 CRITICAL |
+| 2 | **Threshold 2% × 25x leverage = -50% ROE** | Setiap trigger = setengah modal posisi hilang | 🔴 CRITICAL |
+| 3 | **Tidak ada max concurrent position limit** saat exit | 5+ posisi LONG kena dump bersamaan | 🔴 CRITICAL |
+| 4 | **EMA/RSI/MACD pasti sudah bearish** di -2% | Layer 3-4 jadi rubber stamp, bukan filter | 🟡 HIGH |
+| 5 | **Indikator dihitung dari 1m candle close** | Lag 1 menit minimum, di crypto = fatal | 🟡 HIGH |
+
+#### Bukti: Apa yang Terjadi pada 3 Trade Terburuk
+
+**BLUR (-$5.78, adverse -2.18%)**
+- Entry: $0.028023 → Exit: $0.027413
+- Score 55 (low confidence, seharusnya TIDAK di-entry)
+- Notional $266 × 25x leverage = modal kecil tapi kerugian besar
+- 15m EMA masih uptrend → threshold di-override ke 2%
+- Pada saat trigger, harga sudah turun 2.18% = **terlambat ~1.7% dari threshold normal**
+
+**TIA (-$5.63, adverse -2.12%)**
+- Entry: $0.454975 → Exit: $0.445344
+- Score 54 (minimum entry threshold!)
+- Pattern identik: HTF override → tunggu sampai -2% → exit terlambat
+
+**BERA (-$5.45, adverse -2.22%)**
+- Entry: $0.416238 → Exit: $0.406990
+- Adverse move TERTINGGI (2.22%), notional $245
+- Kalau pakai threshold normal (ATR-based ~0.5-1%), exit di ~-0.8% → kerugian cuma ~-$2.00
+
+---
+
+### VERDICT MOMENTUM EXIT
+
+> [!CAUTION]
+> **VERDICT: KILL** — Momentum exit dalam bentuk saat ini **HARUS DIMATIKAN**.
+
+**Alasan:**
+1. **Ini BUKAN momentum exit** — ini stop-loss terselubung di 2% yang LEBIH BURUK dari hard SL (3%)
+2. Nilai tambah = nol. Tujuan "keluar sebelum kena SL" gagal total karena threshold 2% ≈ SL itu sendiri
+3. 100% loss rate bukan bisa diperbaiki dengan tuning parameter — **konsep dasarnya yang salah**
+
+**Masalah konseptual:** Momentum exit seharusnya mendeteksi **perubahan momentum SEBELUM harga turun signifikan** (RSI divergence, volume anomaly, EMA cross). Tapi implementasi saat ini **menunggu harga turun 2% dulu, baru cek indikator** — pada titik itu, indikator PASTI sudah bearish. Ini backward logic.
+
+---
+
+## PART B: AUTOPSI SIGNAL SCORE
+
+### Statistik Dasar
+
+| Metrik | Nilai |
+|--------|-------|
+| Score Range | 52 – 78 |
+| Score Mean | 59.3 |
+| Score Median | 58.0 |
+| **Score-PnL Correlation** | **0.007** (random) |
+| Avg Score Winners | 58.8 |
+| **Avg Score Losers** | **60.3** (LEBIH TINGGI!) |
+
+### Score Bucket Analysis
+
+| Score Bucket | Trades | Win Rate | Total PnL | Avg PnL |
+|-------------|--------|----------|-----------|---------|
+| 50-54 | 25 | 68% | -$1.48 | -$0.06 |
+| 55-59 | 51 | 65% | -$5.20 | -$0.10 |
+| **60-64** | **10** | **80%** | **+$6.27** | **+$0.63** |
+| **65-69** | **16** | **44%** | **-$5.73** | **-$0.36** |
+| 70-74 | 4 | 50% | +$4.69 | +$1.17 |
+| 75-79 | 3 | 67% | -$0.31 | -$0.10 |
+
+> [!WARNING]
+> **Anomali Fatal:** Score 65-69 memiliki win rate TERBURUK (44%) dan PnL TERBURUK (-$5.73). Score yang lebih tinggi ≠ trade yang lebih baik. Score bahkan **counter-predictive** di range tinggi.
+
+### Dekomposisi Feature Signal Score
+
+Berdasarkan analisis [scoring_engine.py](file:///d:/Vibe%20Coding/KARA%20-%20400/engine/scoring_engine.py#L527-L830), scoring terdiri dari:
+
+| Feature | Max Points | Masalah |
+|---------|-----------|---------|
+| **OB Imbalance** | ±20 pts | ⚠️ Orderbook bisa berubah dalam detik, stale data berbahaya |
+| **Momentum 1m** (2/3 green candles) | ±8 pts | ⚠️ Redundan dengan EMA — double counting |
+| **EMA 8/21** | ±10 pts | ⚠️ Redundan dengan momentum candles |
+| **RSI 14 (1m)** | ±15 pts | ⚠️ RSI 1m rarely hits extreme, zone diperlebar terlalu agresif |
+| **RSI Divergence** | ±7 pts | ⚠️ Divergence pada 1m = noise |
+| **Rejection Wick** | ±5 pts | ⚠️ Single candle pattern = unreliable |
+| **CVD** (80 trades) | ±8 pts | ⚠️ Sample terlalu kecil, 1-2 large order = bias |
+| **Volume Surge** | ±8 pts | ⚠️ Amplifies direction, doesn't predict |
+| **Structure HH/HL** | ±8 pts | ⚠️ Redundan lagi dengan EMA & momentum |
+| **MTF 15m** | +12/-5 pts | ✅ Satu-satunya yang somewhat independent |
+| **OI/Funding** | ±12 pts | ✅ Fundamental, tapi capped terlalu rendah |
+| **Liquidation** | ±8 pts | ⚠️ Jarang berkontribusi meaningful |
+
+### Diagnosa: Mengapa Score Tidak Memprediksi PnL
+
+#### Problem 1: Triple-Counting Trend Direction
+
+```
+EMA 8>21 bullish    → +10 pts  ┐
+2/3 green candles   → +8 pts   │ SEMUA mengukur hal SAMA:
+HH/HL structure     → +8 pts   │ "harga naik dalam 21 menit terakhir"
+                                │ Total redundan: sampai +26 pts
+                                ┘
+```
+
+Efeknya: score **inflasi** saat trend jelas, tapi **trend yang jelas = masuk di puncak** (mean reversion trap).
+
+#### Problem 2: Score Compression — 90% Trade di Range Sempit
+
+```
+Score 52-59: 76 trade (70%)
+Score 60-69: 26 trade (24%)
+Score 70+:   7 trade  (6%)
+```
+
+Hampir semua trade scoring 52-59 — artinya scoring engine **tidak bisa membedakan** sinyal bagus dari sinyal buruk. Semua terlihat "sama medioker-nya".
+
+#### Problem 3: Score Tinggi = Masuk di Momentum Exhaustion
+
+Score tinggi (65+) berarti **semua indikator sudah bullish** → ini terjadi di PUNCAK momentum pendek:
+- EMA sudah cross ✅ (+10)
+- 3 candle terakhir green ✅ (+8)
+- RSI sudah tinggi ✅ (–8, tapi di-offset oleh OB/structure)
+- Structure sudah HH/HL ✅ (+8)
+
+**Ironi:** skor tinggi = semua sudah naik = **kita beli di puncak**.
+
+#### Problem 4: Regime Blindness
+
+Bot **hanya trading LONG** di semua kondisi. Tidak ada penyesuaian untuk:
+- Market ranging/choppy (Mei 2026 crypto: low momentum, sideways action)
+- Sesi Asia (volatilitas rendah, gerakan palsu banyak)
+- Pasca dump besar (recovery yang sudah terjadi)
+
+---
+
+## PART C: INTERAKSI CROSS-COMPONENT
+
+### Apakah Signal Score Mempengaruhi Momentum Exit?
+
+**TIDAK** — dan ini masalah.
+
+Dari kode [risk_manager.py:837](file:///d:/Vibe%20Coding/KARA%20-%20400/risk/risk_manager.py#L837):
+```python
+# Signal Score TIDAK dipakai di exit — hanya untuk ENTRY filter.
+```
+
+**Bukti dari data:**
+- SPX score=78 → momentum_exit → -$2.50
+- VVV score=67 → momentum_exit → -$2.88
+- BLUR score=55 → momentum_exit → -$5.78
+
+Score tinggi/rendah **tidak mengubah** threshold exit sama sekali. Semua diperlakukan identik.
+
+### Masalah Korelasi Risiko
+
+8 trade momentum_exit dalam 48 menit berarti bot **membuka 5+ posisi LONG bersamaan** pada aset berbeda. Saat market-wide dump terjadi:
+- Semua posisi kena di waktu yang hampir bersamaan
+- Total exposure: ~$1,400 notional × 25x = $35,000 leveraged exposure
+- Kerugian terakumulasi: -$41.66 dalam 48 menit
+
+**Tidak ada mekanisme:**
+- Portfolio-level correlation check
+- Max concurrent loss limiter  
+- Sector/market exposure cap
+
+---
+
+## DELIVERABLE: REKOMENDASI PHASE 2
+
+### 1. Momentum Exit → **MATIKAN, GANTI ARSITEKTUR**
+
+**Aksi Segera:**
+```python
+# config.py line 264
+momentum_exit_enabled: bool = False  # ← MATIKAN SEGERA
+```
+
+**Arsitektur Pengganti — "Smart Trail" (Proposal):**
+
+Alih-alih menunggu kerugian besar lalu exit, gunakan:
+
+| Mekanisme | Trigger | Aksi |
+|-----------|---------|------|
+| **Early Trail** (sudah ada) | Profit ≥ 0.5% lalu retrace 0.3% | ✅ Sudah bekerja baik |
+| **Break-Even Stop** (baru) | Setelah 10 menit + pernah profit ≥ 0.3% | Pindahkan SL ke entry + fee |
+| **Time-Decay Exit** (baru) | Setiap 5 menit tanpa profit baru → kurangi threshold | Progressive exit |
+| **Hard SL** (sudah ada) | Loss ≥ 3% | ✅ Backstop, jarang kena |
+
+### 2. Signal Score → **REBUILD TOTAL**
+
+**Target: Correlation > 0.3 dengan PnL**
+
+**Roadmap Rebuild:**
+
+| Step | Aksi | Detail |
+|------|------|--------|
+| 1 | **Hapus redundansi** | Pilih SATU dari: EMA cross / Momentum candles / HH-HL structure |
+| 2 | **Rebalance bobot** | Fundamental (OI/Funding) = 40%, Teknikal = 30%, Microstructure (OB/CVD) = 30% |
+| 3 | **Tambah regime filter** | Score × regime_multiplier (trending=1.2, ranging=0.7, volatile=0.5) |
+| 4 | **Naikkan minimum threshold** | min_score → 62 (dari 57). Data: score 60-64 WR=80% |
+| 5 | **Tambah mean-reversion guard** | Jika RSI>60 + price >EMA21 → CAP score di 60 (jangan entry di puncak) |
+| 6 | **Time-decay scoring** | Score berkurang seiring waktu sejak signal dibuat (stale signal = bad signal) |
+
+### 3. Risk Management → **TAMBAH PORTFOLIO-LEVEL GUARD**
+
+| Guard | Parameter | Efek |
+|-------|-----------|------|
+| **Max correlated positions** | Max 2 posisi LONG bersamaan | Cegah 8 posisi kena dump bareng |
+| **Sector exposure cap** | Max $300 notional per "arah" | Limit total kerugian satu arah |
+| **Momentum exit cooldown** | Jika 1 momentum exit terjadi → BLOK entry baru 30 menit | Cegah masuk ke market yang sedang dump |
+| **Dynamic position sizing** | Score 55-59 → 50% size, Score 60+ → 100% size | Kurangi risiko di sinyal lemah |
+
+---
+
+## LAMPIRAN: EQUITY CURVE
+
+```
+Trade #1-72:  Steady climb +$38.95 (time_exit dominan, WR ~70%)
+Trade #73:    APT trailing_stop +$4.20 → CumPnL: $43.15
+Trade #77:    NEAR time_exit +$1.11 → PEAK: $45.81 ←── PUNCAK
+─── MOMENTUM EXIT CASCADE DIMULAI ───
+Trade #78:    APT momentum_exit -$5.19 → $40.62  ↓ -$5.19
+Trade #81:    ONDO momentum_exit -$4.81 → $35.94  ↓ -$9.87
+Trade #82:    BERA momentum_exit -$5.45 → $30.50  ↓ -$15.31
+Trade #83:    AVAX momentum_exit -$5.16 → ↓
+Trade #84:    ALGO momentum_exit -$4.80 → ↓
+Trade #85:    TIA momentum_exit -$5.63 → ↓
+Trade #86:    ETH momentum_exit -$4.87 → ↓
+Trade #87:    BLUR momentum_exit -$5.78 → ~-$5.00  ↓ -$46.89
+─── END CASCADE ───
+Trade #88-109: Partial recovery +$3.16 via time_exit
+Final PnL: -$1.77
+```
+
+---
+
+## KESIMPULAN FINAL
+
+| Komponen | Diagnosis | Aksi |
+|----------|-----------|------|
+| **Momentum Exit** | Cacat fatal — menyamar jadi stop-loss 2% yang terlalu lambat | 🔴 **MATIKAN SEGERA** |
+| **Signal Score** | Tidak prediktif — score tinggi malah lebih sering rugi | 🟡 **REBUILD dari nol** |
+| **Risk Management** | Tidak ada portfolio correlation guard | 🟡 **TAMBAH guard baru** |
+| **time_exit** | Bekerja dengan baik (69% WR, +$38.15) | ✅ **PERTAHANKAN** |
+| **trailing_stop** | Sangat baik (100% WR, +$10.93) | ✅ **PERTAHANKAN** |
+| **early_trail** | Belum banyak data, tapi konsep benar | ✅ **PERTAHANKAN** |
+
+> [!IMPORTANT]
+> **Prioritas #1 yang paling mendesak**: Matikan `momentum_exit_enabled = False` di config.py. Satu baris ini saja bisa mencegah kerugian -$51.97 yang terjadi kemarin. Semua komponen lain (time_exit, trailing_stop, early_trail, hard SL) sudah **bekerja dengan benar** dan cukup untuk mengelola exit.
