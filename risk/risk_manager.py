@@ -375,15 +375,40 @@ class RiskManager:
 
         risk_pct = min(risk_pct, cfg.max_risk_per_trade_pct)
 
-        # Scalper: gunakan sl_pct sizing terpisah dari SL on-chain.
-        # SL on-chain 3% adalah backstop darurat (jarang kena) — bukan exit normal.
-        # Sizing pakai 0.70% (ATR-based expected exit) agar margin tetap proporsional.
-        # Kalau pakai sl_pct on-chain 3%: margin jadi 4x lebih kecil dari seharusnya.
-        if self._is_scalper():
-            sl_pct_for_sizing = 0.007  # 0.70% — expected momentum exit distance, bukan backstop SL
-            size_usd = (account_balance * risk_pct) / max(sl_pct_for_sizing * lev, 0.0001)
-        else:
-            size_usd = (account_balance * risk_pct) / max(sl_pct * lev, 0.0001)
+        # [AUDIT FIX 2026] Volatility-adjusted position sizing.
+        # ONDO (8% vol) and BTC (2% vol) used to get identical risk allocation.
+        # Now scale risk_pct inversely by realized vol — high-vol assets get smaller size.
+        # Reference baseline = 2.0% daily realized vol; assets above scale down.
+        try:
+            _sig_vol = float(getattr(signal, 'realized_vol', 0.02) or 0.02)
+            _baseline_vol = 0.020
+            _vol_scale = min(_baseline_vol / max(_sig_vol, 0.005), 1.0)
+            # Floor at 0.25 so we never shrink below 25% of baseline (sanity)
+            _vol_scale = max(_vol_scale, 0.25)
+            risk_pct = risk_pct * _vol_scale
+            log.debug(
+                f"[SIZE-VOL] {signal.asset}: realized_vol={_sig_vol*100:.2f}% "
+                f"→ vol_scale={_vol_scale:.2f} → risk_pct={risk_pct*100:.3f}%"
+            )
+        except Exception as _vol_err:
+            log.debug(f"[SIZE-VOL] vol scaling skipped: {_vol_err}")
+
+        # [AUDIT FIX 2026 PHASE 3] Sizing uses REAL SL distance (was hardcoded 0.7%).
+        # Old hardcode decoupled sizing from ATR-adaptive SL: when ATR yielded a 2% SL,
+        # the position was sized as if SL = 0.7%, so a stop-out actually risked 2.86×
+        # the configured risk_per_trade_pct. Now sizing reflects the actual stop_loss.
+        # Floor at 0.4% to prevent runaway position size when SL is unusually tight
+        # (e.g. ATR collapse during dead market) — caps risk_per_trade exposure.
+        actual_sl_pct = abs(signal.entry_price - signal.stop_loss) / max(signal.entry_price, 1e-9)
+        SL_SIZING_FLOOR = 0.004   # 0.4% — protects against tiny-SL → oversized position
+        sl_pct_for_sizing = max(actual_sl_pct, SL_SIZING_FLOOR)
+
+        size_usd = (account_balance * risk_pct) / max(sl_pct_for_sizing * lev, 0.0001)
+        log.debug(
+            f"[SIZE-SL] {signal.asset}: actual_sl={actual_sl_pct*100:.3f}% "
+            f"floored→{sl_pct_for_sizing*100:.3f}% lev={lev}x "
+            f"risk_pct={risk_pct*100:.3f}% → size_usd=${size_usd:.2f}"
+        )
 
         # Drawdown guard: if we are >15% below peak, cut risk in half!
         # Find drawdown:
@@ -794,6 +819,67 @@ class RiskManager:
     # ──────────────────────────────────────────
     # PARTIAL TP & TRAILING STOP
     # ──────────────────────────────────────────
+
+    @staticmethod
+    async def refresh_position_candles(position, hl_client) -> None:
+        """
+        Populate position.candle_closes/highs/lows/volumes (1m, last 30) and
+        htf_candle_closes (15m, last 60) from the exchange.
+
+        Called from executor.update_positions() before check_tp_trail() so that
+        momentum_exit / emergency_exit / HTF override layers have actual data.
+        Silent-failure-tolerant: if fetch fails, leaves existing arrays untouched.
+        """
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        now = _dt.now(_tz.utc)
+        last = getattr(position, 'candles_refreshed_at', None)
+        if last is not None:
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=_tz.utc)
+            # Refresh at most once every 30 seconds per position
+            if (now - last) < _td(seconds=30):
+                return
+        position.candles_refreshed_at = now
+
+        import logging
+        _log = logging.getLogger("kara.risk_manager")
+        try:
+            candles_1m = await hl_client.get_candles(position.asset, "1m", limit=30)
+            if candles_1m and isinstance(candles_1m, list):
+                closes, highs, lows, volumes = [], [], [], []
+                for c in candles_1m:
+                    if not isinstance(c, dict):
+                        continue
+                    try:
+                        closes.append(float(c.get("c", 0)))
+                        highs.append(float(c.get("h", 0)))
+                        lows.append(float(c.get("l", 0)))
+                        volumes.append(float(c.get("v", 0)))
+                    except (TypeError, ValueError):
+                        continue
+                if closes:
+                    position.candle_closes  = closes
+                    position.candle_highs   = highs
+                    position.candle_lows    = lows
+                    position.candle_volumes = volumes
+        except Exception as e:
+            _log.debug(f"[REFRESH] {position.asset} 1m candle refresh failed: {e}")
+
+        try:
+            candles_15m = await hl_client.get_candles(position.asset, "15m", limit=60)
+            if candles_15m and isinstance(candles_15m, list):
+                htf_closes = []
+                for c in candles_15m:
+                    if not isinstance(c, dict):
+                        continue
+                    try:
+                        htf_closes.append(float(c.get("c", 0)))
+                    except (TypeError, ValueError):
+                        continue
+                if htf_closes:
+                    position.htf_candle_closes = htf_closes
+        except Exception as e:
+            _log.debug(f"[REFRESH] {position.asset} 15m candle refresh failed: {e}")
 
     def check_tp_trail(
         self,

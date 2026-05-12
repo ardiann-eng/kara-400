@@ -244,21 +244,19 @@ class TradeSignal(BaseModel):
 
     @property
     def risk_reward_ratio(self) -> float:
+        """
+        True risk:reward based on actual stop_loss distance.
+        [AUDIT FIX 2026] Removed hardcoded 0.7% scalper risk that masked the real
+        SL distance and made all RR displays fictitious. With ATR-adaptive SL now
+        in place (sl_pct_min 0.6%, sl_pct_max 2.0%), the real distance is
+        meaningful and should be shown directly.
+        """
         if self.side == Side.LONG:
             reward = self.tp2 - self.entry_price
+            risk   = self.entry_price - self.stop_loss
         else:
             reward = self.entry_price - self.tp2
-
-        # Scalper: SL on-chain (3%) adalah backstop darurat, bukan exit normal.
-        # Expected exit distance (0.70%) adalah risk sesungguhnya per trade.
-        # Pakai expected exit untuk RR display supaya angka mencerminkan realita.
-        if getattr(self, 'trade_mode', None) == 'scalper':
-            risk = self.entry_price * 0.007
-        else:
-            if self.side == Side.LONG:
-                risk = self.entry_price - self.stop_loss
-            else:
-                risk = self.stop_loss - self.entry_price
+            risk   = self.stop_loss - self.entry_price
 
         if risk <= 0 or risk < self.entry_price * 0.001:
             return 0.0
@@ -332,6 +330,7 @@ class Position(BaseModel):
     candle_volumes:    List[float] = Field(default_factory=list)
     # 15m candle closes untuk HTF trend filter (momentum exit Layer 5)
     htf_candle_closes: List[float] = Field(default_factory=list)
+    candles_refreshed_at: Optional[datetime] = None  # timestamp of last OHLCV refresh
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:

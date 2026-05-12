@@ -308,9 +308,10 @@ class ScoringEngine:
             return None, 0
 
         # 2. Fetch 1-minute candles (last 30 for EMA/RSI)
+        # Hybrid: REST gives closed candles, WS trades cache patches the current (in-progress) minute.
+        # Eliminates 0-60s lag on the live bar (critical for EMA8/RSI/CVD on 20-min scalping).
         candles = []
         try:
-            # Use candle_semaphore (3) as requested
             async with self.candle_sem:
                 import time as _time
                 now_ms = int(_time.time() * 1000)
@@ -323,6 +324,25 @@ class ScoringEngine:
                     candles = resp
         except Exception as e:
             log.debug(f"[SCALPER] {asset} candle fetch failed: {e}")
+
+        # Patch in the LIVE in-progress minute from WS trades cache (real-time, no API call).
+        try:
+            import time as _time
+            current_min_ms = (int(_time.time()) // 60) * 60 * 1000
+            live_candle = self._build_live_candle_from_trades(asset, current_min_ms)
+            if live_candle:
+                if candles and isinstance(candles[-1], dict):
+                    last_t = int(candles[-1].get("t", 0) or candles[-1].get("T", 0))
+                    if last_t == current_min_ms:
+                        # Replace stale REST snapshot of current minute with fresh WS-built one
+                        candles[-1] = live_candle
+                    else:
+                        # Append the in-progress minute (REST didn't include it yet)
+                        candles.append(live_candle)
+                else:
+                    candles = [live_candle]
+        except Exception as e:
+            log.debug(f"[SCALPER] {asset} live candle overlay failed: {e}")
 
         # 3. Fetch 15m MTF trend
         mtf_trend = await self._fetch_15m_mtf_data(asset)
@@ -351,10 +371,17 @@ class ScoringEngine:
         if asset not in self._oi_snapshots:
             self._oi_snapshots[asset] = []
         self._oi_snapshots[asset].append((_now_ts, oi.open_interest))
-        one_hour_ago = _now_ts - 3600
-        old_oi = [v for t, v in self._oi_snapshots[asset] if t <= one_hour_ago]
-        if old_oi:
-            oi.oi_change_pct = (oi.open_interest - old_oi[-1]) / max(old_oi[-1], 1)
+        # [SCALPER FIX] Use 5-min OI delta — 1h delta is irrelevant for 20-min hold window.
+        # Falls back to oldest available snapshot if 5min history not yet built up.
+        five_min_ago = _now_ts - 300
+        recent_old = [v for t, v in self._oi_snapshots[asset] if t <= five_min_ago]
+        if recent_old:
+            oi.oi_change_pct = (oi.open_interest - recent_old[-1]) / max(recent_old[-1], 1)
+        elif len(self._oi_snapshots[asset]) >= 2:
+            # Bootstrap: use oldest snapshot we have (better than zero)
+            oldest_v = self._oi_snapshots[asset][0][1]
+            oi.oi_change_pct = (oi.open_interest - oldest_v) / max(oldest_v, 1)
+        # Retain 2h of snapshots for other consumers / debugging
         self._oi_snapshots[asset] = [
             (t, v) for t, v in self._oi_snapshots[asset] if t > _now_ts - 7200
         ]
@@ -408,13 +435,22 @@ class ScoringEngine:
             fund_reasons=oi_reasons[:2], liq_reasons=liq_reasons[:2],
         )
 
-        # 4c. [AUDIT Phase 1] Regime multiplier: trending=1.2, ranging=1.0, volatile=0.8
+        # 4c. [AUDIT FIX 2026] Regime multiplier — late-entry downgrade.
+        # Original logic boosted ×1.2 for trending markets, but data showed this
+        # caused FOMO entries on ONDO/VVV/WLFI mid-spike. New logic:
+        #   |trend_1h| >= 3.0%  → ×0.7 (LATE — avoid chasing)
+        #   |trend_1h| >= 1.5%  → ×1.0 (neutral, don't reward extension)
+        #   else                → ×1.0 (ranging — keep score as-is)
+        # Volatile regime keeps ×0.8 floor.
         if vol_regime in (MarketRegime.HIGH_VOL, MarketRegime.EXTREME):
             _regime_cat = "volatile"
             _regime_mult = 0.8
+        elif abs(trend_pct) >= 0.030:
+            _regime_cat = "late_trend"
+            _regime_mult = 0.7
         elif abs(trend_pct) >= 0.015:
             _regime_cat = "trending"
-            _regime_mult = 1.2
+            _regime_mult = 1.0
         else:
             _regime_cat = "ranging"
             _regime_mult = 1.0
@@ -452,8 +488,47 @@ class ScoringEngine:
                 log.debug(f"[SCALPER] {asset}: SHORT BLOCKED: potential squeeze ({_squeeze_reason})")
                 return None, score
 
+        # ── EXTREME FUNDING VETO ─────────────────────────────────────
+        # [AUDIT FIX 2026] Block entries when funding LEVEL is extreme on the
+        # SAME side as the trade direction (= over-crowded positioning).
+        # Empirical: score 65-69 bucket was 44% WR vs 60-64 bucket 80% WR
+        # because the bot piled into already-crowded LONGs at funding peaks.
+        # This veto prevents top-of-crowding entries; mean-reversion edge is
+        # captured by the contrarian scoring in oi_funding_analyzer.
+        try:
+            veto_threshold = getattr(config.SIGNAL, 'funding_extreme_threshold', 0.0003)
+            fr_now = funding.funding_rate if funding else 0.0
+            if side == Side.LONG and fr_now > veto_threshold:
+                log.info(
+                    f"[SCALPER] {asset}: LONG VETOED — extreme positive funding "
+                    f"{fr_now*100:.4f}%/8h > {veto_threshold*100:.4f}% (longs over-crowded)"
+                )
+                return None, score
+            if side == Side.SHORT and fr_now < -veto_threshold:
+                log.info(
+                    f"[SCALPER] {asset}: SHORT VETOED — extreme negative funding "
+                    f"{fr_now*100:.4f}%/8h < {-veto_threshold*100:.4f}% (shorts over-crowded)"
+                )
+                return None, score
+        except Exception as _veto_err:
+            log.debug(f"[SCALPER] {asset}: funding veto check skipped: {_veto_err}")
+
         # 4. Build signal with scalper TP/SL (vol_regime already fetched in step 4a)
-        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol, trend_pct)
+        # Compute ATR% from the same candles used for scoring — avoids re-fetch.
+        _highs, _lows, _closes = [], [], []
+        for _c in candles:
+            if isinstance(_c, dict):
+                try:
+                    _highs.append(float(_c.get("h", 0)))
+                    _lows.append(float(_c.get("l", 0)))
+                    _closes.append(float(_c.get("c", 0)))
+                except (TypeError, ValueError):
+                    pass
+        atr_pct_now = self._compute_atr_pct(_highs, _lows, _closes, period=14)
+        signal = self._build_scalper_signal(
+            asset, side, score, mark_price, reasons, vol_regime,
+            session_bonus, realized_vol, trend_pct, atr_pct=atr_pct_now,
+        )
 
         # Attach last-known funding rate for Telegram warning
         _fr_cache = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
@@ -540,6 +615,72 @@ class ScoringEngine:
         if confirmed:
             return True, f"🧭 15m confirm OK (EMA9/21, trend {trend*100:.2f}%)", regime
         return False, f"🧭 MTF blocked: 15m trend not aligned ({trend*100:.2f}%)", regime
+
+    @staticmethod
+    def _compute_atr_pct(highs: list, lows: list, closes: list, period: int = 14) -> float:
+        """
+        Compute ATR as percentage of last close. Returns 0.0 if insufficient data.
+        TR = max(high-low, |high-prev_close|, |low-prev_close|)
+        """
+        n = min(len(highs), len(lows), len(closes))
+        if n < period + 1:
+            return 0.0
+        try:
+            trs = []
+            for i in range(n - period, n):
+                if i == 0:
+                    continue
+                h = float(highs[i])
+                l = float(lows[i])
+                pc = float(closes[i - 1])
+                tr = max(h - l, abs(h - pc), abs(l - pc))
+                trs.append(tr)
+            if not trs:
+                return 0.0
+            atr = sum(trs) / len(trs)
+            last_close = float(closes[-1])
+            if last_close <= 0:
+                return 0.0
+            return atr / last_close
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 0.0
+
+    def _build_live_candle_from_trades(self, asset: str, minute_ms: int) -> dict | None:
+        """
+        Build a single 1m candle for the current (in-progress) minute from
+        the WS trades cache. Returns None if no trades available.
+        """
+        trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
+        if not trades:
+            return None
+        # Filter trades belonging to the requested minute bucket
+        bucket_start = minute_ms
+        bucket_end   = minute_ms + 60_000
+        bucket = []
+        for t in trades:
+            try:
+                ts = float(t.get("time", 0))
+            except (TypeError, ValueError):
+                continue
+            if bucket_start <= ts < bucket_end:
+                bucket.append(t)
+        if not bucket:
+            return None
+        try:
+            prices = [float(t.get("px", 0)) for t in bucket if float(t.get("px", 0)) > 0]
+            sizes  = [float(t.get("sz", 0)) for t in bucket]
+        except (TypeError, ValueError):
+            return None
+        if not prices:
+            return None
+        return {
+            "t": bucket_start,
+            "o": prices[0],
+            "h": max(prices),
+            "l": min(prices),
+            "c": prices[-1],
+            "v": sum(sizes),
+        }
 
     def _calculate_scalper_score(
         self, asset: str, mark_price: float, candles: list, mtf_trend: str = "neutral",
@@ -821,8 +962,10 @@ class ScoringEngine:
                     log.debug(f"[{asset}] SCALPER REJECT: Against 15m MTF trend")
                     return 0, side, reasons + ["REJECT: Counter-trend MTF"]
 
-        # ── [AUDIT Phase 1] Mean-Reversion Guard ─────────────────────
-        # Jika RSI > 60 DAN price > EMA21 → CAP score di 60 (jangan entry di puncak)
+        # ── [AUDIT Phase 1+3] Mean-Reversion Guard (CANONICAL) ───────
+        # Jika RSI > 60 DAN price > EMA21 → CAP score di 60 (jangan entry di puncak).
+        # Empirical: score 65-69 bucket was 44% WR vs 60-64 = 80% WR — caps top-of-momentum entries.
+        # Symmetric for SHORT at RSI<40 + price<EMA21.
         _mr_capped = False
         if len(closes) >= 15:
             # RSI sudah dihitung di atas — recompute singkat untuk guard
@@ -893,37 +1036,63 @@ class ScoringEngine:
         session_bonus: int,
         realized_vol: float,
         trend_pct: float = 0.0,
+        atr_pct: float = 0.0,
     ) -> TradeSignal:
         """Build a TradeSignal with scalper-specific dynamic TP/SL levels."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
-        
+
         import config
         scfg = config.SCALPER
 
-        # ATR-Based Dynamic SL: SL = 1.5 × ATR14
-        # ATR14 diturunkan dari realized_vol (1h annualized) yang sudah di-cache:
-        #   realized_vol = std_dev(1h_returns) × sqrt(24)  →  per-1h vol = realized_vol / sqrt(24)
-        #   ATR14 (1h candle) ≈ per-1h vol × entry_price
-        # Zero API call — pakai vol_cache yang sudah ada dari scan sebelumnya.
-        # SL floor dinaikkan per regime karena vol_cache bisa stale (TTL 60m),
-        # sehingga realized_vol rendah tidak membuat SL terlalu ketat saat regime HIGH_VOL.
-        if regime in (MarketRegime.HIGH_VOL, MarketRegime.EXTREME):
-            SL_FLOOR = max(scfg.sl_pct, 0.0150)   # min 1.5% di high/extreme vol
+        # ── SL Computation: ATR-adaptive with vol-based fallback ─────────────
+        # [AUDIT FIX 2026] Use real ATR(14) from 1m candles when available.
+        # Fallback: vol-based proxy (realized_vol / sqrt(24)) — same as before.
+        if getattr(scfg, 'atr_sl_enabled', True) and atr_pct > 0 and atr_pct >= 0.001:
+            mult = getattr(scfg, 'atr_sl_multiplier', 1.5)
+            sl_min = getattr(scfg, 'sl_pct_min', 0.006)
+            sl_max = getattr(scfg, 'sl_pct_max', 0.020)
+            sl_pct = max(min(atr_pct * mult, sl_max), sl_min)
+            log.debug(
+                f"[ATR-SL] {asset} atr={atr_pct*100:.3f}% × {mult} → sl={sl_pct*100:.3f}%"
+            )
         else:
-            SL_FLOOR = scfg.sl_pct                  # 1.0% di normal/low vol
-        SL_CEILING = 0.0200               # 2.0% hard cap
-        ATR_MULT   = 1.5                  # SL = 1.5 × ATR14
+            # Fallback: vol-based proxy (original logic)
+            if regime in (MarketRegime.HIGH_VOL, MarketRegime.EXTREME):
+                SL_FLOOR = max(scfg.sl_pct, 0.0150)   # min 1.5% di high/extreme vol
+            else:
+                SL_FLOOR = scfg.sl_pct
 
-        if realized_vol > 0:
-            atr14_pct = realized_vol / (24 ** 0.5)   # per-candle (1h) ATR sebagai pct
-            sl_pct = max(SL_FLOOR, min(atr14_pct * ATR_MULT, SL_CEILING))
-        else:
-            sl_pct = SL_FLOOR
+            SL_CEILING = getattr(scfg, 'sl_pct_max', 0.0200)
+            ATR_MULT   = getattr(scfg, 'atr_sl_multiplier', 1.5)
+
+            if realized_vol > 0:
+                atr14_pct = realized_vol / (24 ** 0.5)
+                sl_pct = max(SL_FLOOR, min(atr14_pct * ATR_MULT, SL_CEILING))
+            else:
+                sl_pct = SL_FLOOR
 
         # TP pakai nilai fixed dari config — level realistis untuk hold time 20 menit.
-        # TP1=1.43%, TP2=2.14% dirancang untuk expected exit 0.70%, bukan SL on-chain 3%.
         tp1_pct = scfg.tp1_pct
         tp2_pct = scfg.tp2_pct
+
+        # ── RR Enforcement: TP1/TP2 must be at least N× SL distance, BUT capped ──
+        # [AUDIT FIX 2026 PHASE 3] Original RR enforcement could push TP2 to 3.0%
+        # when SL=2.0% (×1.5 RR), well above the 20-min hold window's reachable target.
+        # Cap TP2 absolute at 2.0% (TP1 at 1.2%) so partial-close ladder stays
+        # achievable within max_hold_minutes; widen TP only when configured TP is
+        # actually below the RR floor.
+        tp1_min_rr = getattr(scfg, 'tp1_min_rr_to_sl', 0.6)
+        tp2_min_rr = getattr(scfg, 'tp2_min_rr_to_sl', 1.5)
+        TP1_ABS_CAP = 0.012   # 1.2% — keep TP1 reachable in 20m hold
+        TP2_ABS_CAP = 0.020   # 2.0% — keep TP2 reachable in 20m hold
+        tp1_floor = min(sl_pct * tp1_min_rr, TP1_ABS_CAP)
+        tp2_floor = min(sl_pct * tp2_min_rr, TP2_ABS_CAP)
+        tp1_pct = max(tp1_pct, tp1_floor)
+        tp2_pct = max(tp2_pct, tp2_floor)
+        log.debug(
+            f"[RR-CAP] {asset} sl={sl_pct*100:.2f}% → tp1_floor={tp1_floor*100:.2f}% "
+            f"tp2_floor={tp2_floor*100:.2f}% (final tp1={tp1_pct*100:.2f}% tp2={tp2_pct*100:.2f}%)"
+        )
 
         leverage = min(scfg.default_leverage, scfg.max_leverage)
 
@@ -944,6 +1113,11 @@ class ScoringEngine:
             reasons=reasons
         )
 
+        # [AUDIT FIX 2026 PHASE 3] Propagate realized_vol + entry_atr to signal
+        # so RiskManager.calculate_position_size can apply vol-scaling and
+        # downstream consumers (trailing stop, dashboards) see real values.
+        # Without this, signal.realized_vol falls back to default 0.02 = baseline,
+        # making vol-adjusted sizing a no-op.
         return TradeSignal(
             signal_id=str(uuid.uuid4())[:8].upper(),
             asset=asset,
@@ -957,6 +1131,8 @@ class ScoringEngine:
             tp1=tp1,
             tp2=tp2,
             suggested_leverage=leverage,
+            realized_vol=realized_vol if realized_vol > 0 else 0.02,
+            entry_atr=atr_pct if atr_pct > 0 else 0.0,
         )
 
     # ──────────────────────────────────────────

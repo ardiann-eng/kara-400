@@ -23,10 +23,13 @@ log = logging.getLogger("kara.oi_funding")
 class OIFundingAnalyzer:
     """
     Analyzes Open Interest + Funding Rate to detect:
-    - Crowded longs/shorts (extreme funding -> mean reversion signal)
+    - CROWDED longs/shorts via extreme funding LEVEL -> CONTRARIAN signal
+      (extreme positive funding adds BEAR points; extreme negative adds BULL points)
+    - Funding SLOPE (recent trend) -> directional momentum signal (LONG-friendly when rising)
     - OI expansion with price move (trend confirmation)
-    - OI magnitude -> market conviction amplifier
-    - Funding rate divergence vs market direction
+    - Predicted-vs-actual funding shift -> contrarian (where positioning is heading)
+    - Spot-Perp basis -> directional premium signal
+    - OI magnitude -> threshold modifier (handled by scoring engine)
 
     Returns (bull, bear, reasons, warnings) — NO pre-determined direction.
     """
@@ -49,44 +52,46 @@ class OIFundingAnalyzer:
         fr = funding.funding_rate
         log.debug(f"[FUNDING] {asset}: rate={fr:.6f} (is this 0.0? then API fetch failed)")
 
-        # ── 1. Funding Rate Analysis ──────────────────────────────────
-        # Real HL funding rates are typically +-0.00002 range
-        # Extreme is around 0.0001+ (0.01%/8h)
-        # Very extreme is 0.0003+ (0.03%/8h)
-        
-        # POSITIVE funding = extreme momentum = LONG signal
+        # ── 1. Funding Rate — CONTRARIAN interpretation ──────────────
+        # [AUDIT FIX 2026] Extreme funding LEVEL = crowded positioning, not momentum.
+        # Empirical evidence (Phase 1 109-trade audit): score bucket 65-69 was
+        # counter-predictive (44% WR) precisely because absolute funding bias
+        # pushed the bot into trades AT the top of crowding. Reverse the bias:
+        # extreme positive funding -> LONGS already crowded -> mean-reversion BEARISH.
+        # Mild funding still gives a small same-side tilt (positioning still building).
+        # Funding SLOPE (Section 2 below) keeps its directional meaning — slope IS
+        # a real momentum signal, LEVEL is a positioning indicator only.
         if fr > SIGNAL.funding_extreme_threshold * 2:     # > 0.0006
-            bull += 18  # reduced from 20 to temper inflation
+            bear += 12   # contrarian: crowded longs
             reasons.append(
-                f"EXTREME positive funding {fr*100:.4f}%/8h - massive upside momentum -> LONG"
+                f"⚠️ EXTREME positive funding {fr*100:.4f}%/8h - longs over-crowded -> contrarian BEARISH"
             )
         elif fr > SIGNAL.funding_extreme_threshold:        # > 0.0003
-            bull += 12  # reduced from 14
+            bear += 8    # contrarian: heavy long positioning
             reasons.append(
-                f"HIGH positive funding {fr*100:.4f}%/8h -> STRONG LONG momentum"
+                f"⚠️ HIGH positive funding {fr*100:.4f}%/8h -> longs crowded, contrarian SHORT bias"
             )
-        elif fr > 0.00005:                                 # > 0.005%/8h - meaningful positive
-            bull += 6   # reduced from 8
+        elif fr > 0.00005:                                 # > 0.005%/8h - mild positive
+            bull += 3    # mild positive = some demand still building (small same-side tilt)
             reasons.append(
-                f"Moderate positive funding {fr*100:.4f}%/8h -> LONG tilt"
+                f"Mild positive funding {fr*100:.4f}%/8h -> minor LONG tilt"
             )
         elif fr < -SIGNAL.funding_extreme_threshold * 2:   # < -0.0006
-            bear += 18  # reduced from 20 to temper inflation
+            bull += 12   # contrarian: crowded shorts -> squeeze potential
             reasons.append(
-                f"EXTREME negative funding {fr*100:.4f}%/8h - massive downside momentum -> SHORT"
+                f"⚠️ EXTREME negative funding {fr*100:.4f}%/8h - shorts over-crowded -> SQUEEZE / contrarian LONG"
             )
         elif fr < -SIGNAL.funding_extreme_threshold:       # < -0.0003
-            bear += 12  # reduced from 14
+            bull += 8    # contrarian: heavy short positioning
             reasons.append(
-                f"HIGH negative funding {fr*100:.4f}%/8h -> STRONG SHORT momentum"
+                f"⚠️ HIGH negative funding {fr*100:.4f}%/8h -> shorts crowded, contrarian LONG bias"
             )
-        elif fr < -0.00005:                                # < -0.005%/8h - meaningful negative
-            bear += 6   # reduced from 8
+        elif fr < -0.00005:                                # < -0.005%/8h - mild negative
+            bear += 3
             reasons.append(
-                f"Moderate negative funding {fr*100:.4f}%/8h -> SHORT tilt"
+                f"Mild negative funding {fr*100:.4f}%/8h -> minor SHORT tilt"
             )
         else:
-            # Funding < 0.00005 = noise level, tidak ada sinyal
             reasons.append(f"Flat/noise funding {fr*100:.4f}%/8h -> no signal")
 
         # ── 2. Funding trend (slope of last 8) ────────────────────────
@@ -122,20 +127,22 @@ class OIFundingAnalyzer:
                 else:
                     reasons.append(f"• Funding trend: ⚖️ STABLE (slope {slope:.6f}) -> Neutral")
 
-        # ── 3. Predicted vs actual ────────────────────────────────────
+        # ── 3. Predicted vs actual — CONTRARIAN ──────────────────────
+        # [AUDIT FIX 2026] Predicted funding = where positioning is HEADING.
+        # Predicted shifting MORE positive = longs getting MORE crowded = contrarian bear.
+        # Aligned with Section 1 reversal above.
         if funding.predicted_rate is not None:
             pred_diff = funding.predicted_rate - fr
-            if abs(pred_diff) > 0.00005:  # lowered from 0.0003
+            if abs(pred_diff) > 0.00005:
                 if pred_diff > 0:
-                    # Predicted funding more positive = momentum confirming LONG
-                    bull += 3
-                    reasons.append(
-                        f"Predicted funding shifting positive -> LONG pressure building"
-                    )
-                else:
                     bear += 3
                     reasons.append(
-                        f"Predicted funding shifting negative -> SHORT pressure building"
+                        f"Predicted funding shifting positive -> longs crowding further -> contrarian bear"
+                    )
+                else:
+                    bull += 3
+                    reasons.append(
+                        f"Predicted funding shifting negative -> shorts crowding further -> contrarian bull"
                     )
 
         # ── 4. OI Change Analysis ─────────────────────────────────────

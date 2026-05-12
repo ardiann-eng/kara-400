@@ -247,6 +247,16 @@ class PaperExecutor:
             # Update unrealized PnL
             pos.pnl_unrealized = pos.unrealized_pnl(current)
 
+            # Refresh OHLCV history so check_tp_trail has data for momentum/HTF/emergency exits.
+            # Without this, those exit layers silently no-op (Position OHLCV fields stay empty).
+            try:
+                from data.hyperliquid_client import get_client as _get_hl_client
+                _hl_client = _get_hl_client()
+                if _hl_client is not None:
+                    await self.risk.refresh_position_candles(pos, _hl_client)
+            except Exception as _refresh_err:
+                log.debug(f"[PAPER] Candle refresh skipped for {pos.asset}: {_refresh_err}")
+
             # Check TP/SL
             action = self.risk.check_tp_trail(pos, current)
             if action:

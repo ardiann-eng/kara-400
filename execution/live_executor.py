@@ -407,6 +407,12 @@ class LiveExecutor:
             # Update shadow PnL
             pos.pnl_unrealized = pos.unrealized_pnl(current)
 
+            # Refresh OHLCV history so check_tp_trail has data for momentum/HTF/emergency exits.
+            try:
+                await self.risk.refresh_position_candles(pos, self.client)
+            except Exception as _refresh_err:
+                log.debug(f"[LIVE] Candle refresh skipped for {pos.asset}: {_refresh_err}")
+
             # Check Risk Manager for triggers (Time-based, TP, Trailing)
             action = self.risk.check_tp_trail(pos, current)
             if action:

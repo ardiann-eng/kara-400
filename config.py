@@ -207,11 +207,18 @@ class ScalperConfig:
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # Scalper SL/TP (Calibrated for 25x leverage, 20-min max hold)
-    # [SL FIX 2026-05-08] SL on-chain diperlebar ke 3.0% sebagai BACKSTOP DARURAT saja.
-    # Proteksi utama adalah momentum_exit (menit ke-1, 2 candle).
-    # SL 1% sebelumnya selalu kena noise: 7/8 SL = -25% PnL padahal cuma turun 1%.
-    # 3.0% x 25x = -75% per SL on-chain (jarang kena, hanya saat bot crash / flash crash).
-    sl_pct:                  float = 0.0300   # 3.0% backstop on-chain (emergency only — di luar jangkauan noise)
+    # [SL FIX 2026 PHASE 2] ATR-adaptive SL.
+    # Old fixed 3.0% × 25x = -75% ROE per hit — wipes 5 winners with 1 loss.
+    # New: SL = ATR × multiplier, clamped between [sl_pct_min, sl_pct_max].
+    # `sl_pct` below is now ONLY a fallback when ATR is unavailable.
+    sl_pct:                  float = 0.0200   # fallback when ATR not computed (was 0.0300)
+    atr_sl_enabled:          bool  = True     # enable ATR-adaptive SL for scalper
+    atr_sl_multiplier:       float = 1.5      # SL = ATR(14) × 1.5
+    sl_pct_min:              float = 0.006    # floor 0.6% (BTC-grade tight SL)
+    sl_pct_max:              float = 0.020    # ceiling 2.0% (down from 3.0% backstop)
+    # RR enforcement: TP1 minimum = sl_pct × tp1_min_rr ; TP2 minimum = sl_pct × tp2_min_rr
+    tp1_min_rr_to_sl:        float = 0.6      # TP1 ≥ 0.6× SL distance
+    tp2_min_rr_to_sl:        float = 1.5      # TP2 ≥ 1.5× SL distance (positive RR enforcement)
     tp1_pct:                 float = 0.0075   # 0.75% TP1 — [ADAPTIVE] Lowered for 20m scalping
     tp2_pct:                 float = 0.0125   # 1.25% TP2 — [ADAPTIVE] Lowered
     trailing_pct:            float = 0.0050   # 0.50% trailing on remainder
