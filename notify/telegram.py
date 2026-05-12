@@ -2734,224 +2734,22 @@ class KaraTelegram:
 
         return True
 
-    def _extract_changelog_items(self, version: str, max_items: int = 6) -> list[str]:
-        """
-        Read latest items from CHANGELOG.md for a given version.
-        Supports headings like:
-          ## v6.0.1
-          ## 6.0.1
-        """
-        changelog_path = os.path.join(os.getcwd(), "CHANGELOG.md")
-        if not os.path.exists(changelog_path):
-            return []
-
-        try:
-            with open(changelog_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-        except Exception:
-            return []
-
-        target = version.strip().lower().lstrip("v")
-        start_idx = -1
-        for i, ln in enumerate(lines):
-            m = re.match(r"^\s*##\s+\[?v?([0-9][0-9A-Za-z\.\-\_]*)\]?", ln.strip())
-            if not m:
-                continue
-            heading_ver = m.group(1).lower().lstrip("v")
-            if heading_ver == target:
-                start_idx = i + 1
-                break
-
-        if start_idx < 0:
-            return []
-
-        items = []
-        for ln in lines[start_idx:]:
-            s = ln.strip()
-            if s.startswith("## "):
-                break
-            if s.startswith("- ") or s.startswith("* "):
-                items.append(s[2:].strip())
-                if len(items) >= max_items:
-                    break
-        return items
-
-    def _build_dynamic_update_items(self, version: str) -> list[str]:
-        """
-        Build update bullets with priority:
-        1) ENV KARA_UPDATE_NOTES (newline / '||' separated)
-        2) CHANGELOG.md section matching version
-        3) Auto-generate from latest git commit/diff
-        4) Runtime fallback summary from current config
-        """
-        env_notes = os.getenv("KARA_UPDATE_NOTES", "").strip()
-        if env_notes:
-            raw = env_notes.replace("||", "\n").splitlines()
-            notes = [x.strip(" -\t") for x in raw if x.strip()]
-            if notes:
-                return notes[:8]
-
-        changelog_items = self._extract_changelog_items(version=version, max_items=8)
-        if changelog_items:
-            return changelog_items
-
-        # 1. Try reading from AI-generated changelog.json
-        changelog_path = os.path.join(os.getcwd(), "data", "changelog.json")
-        if os.path.exists(changelog_path):
-            try:
-                import json
-                with open(changelog_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if "features" in data and isinstance(data["features"], list):
-                        return data["features"]
-            except Exception as e:
-                log.warning(f"Failed to read AI changelog: {e}")
-
-        # 2. Auto-generate from latest commit (fallback)
-        git_items = self._build_git_auto_notes()
-        if git_items:
-            return git_items
-
-        # 3. Static fallback (Final safety)
-        return [
-            "Live Mode kini lebih aman: Stop Loss order dikirim langsung ke exchange saat posisi dibuka.",
-            "Posisi terbuka dipulihkan otomatis saat bot restart — tidak ada posisi yang 'hilang' lagi.",
-            "WebSocket tidak lagi mati permanen — notifikasi Telegram dikirim jika koneksi bermasalah.",
-            "Risk limit Live Mode diperketat: max drawdown 25% & daily loss 15% (paper tetap seperti biasa).",
-            "Kill-switch di Live Mode kini hanya bisa di-reset manual oleh admin, bukan auto-reset.",
-            "Perbaikan keamanan konfigurasi: enkripsi key tidak lagi tertimpa saat startup.",
-        ]
-
-    def _build_git_auto_notes(self) -> list[str]:
-        """
-        Generate friendly release bullets from the latest git commit.
-        Safe fallback: returns [] if git is unavailable in runtime.
-        """
-        try:
-            subject = subprocess.check_output(
-                ["git", "log", "-1", "--pretty=%s"],
-                cwd=os.getcwd(),
-                text=True,
-                timeout=2
-            ).strip()
-            body = subprocess.check_output(
-                ["git", "log", "-1", "--pretty=%b"],
-                cwd=os.getcwd(),
-                text=True,
-                timeout=2
-            ).strip()
-            changed = subprocess.check_output(
-                ["git", "show", "--name-only", "--pretty=", "HEAD"],
-                cwd=os.getcwd(),
-                text=True,
-                timeout=2
-            )
-        except Exception:
-            return []
-
-        files = [x.strip() for x in changed.splitlines() if x.strip()]
-        if not subject and not files:
-            return []
-
-        bullets = []
-        if subject:
-            bullets.append(f"Update utama: {subject}.")
-
-        # High-level grouping by area to keep message readable for users.
-        if any(f.startswith("engine/") for f in files):
-            bullets.append("Peningkatan logika analisa sinyal dan akurasi scoring market.")
-        if any(f.startswith("risk/") for f in files):
-            bullets.append("Perbaikan proteksi risiko: limit drawdown Live Mode diperketat dan kill-switch lebih aman.")
-        if any(f.startswith("execution/") for f in files):
-            bullets.append("Live Mode: Stop Loss order dikirim ke exchange + posisi pulih otomatis saat restart.")
-        if any(f.startswith("data/") for f in files):
-            bullets.append("Koneksi WebSocket kini tidak mati permanen — notif Telegram jika koneksi bermasalah.")
-        if any(f.startswith("core/") for f in files):
-            bullets.append("Perbaikan inisialisasi sesi Live Mode agar koneksi dan sinkronisasi berjalan benar.")
-        if any(f.startswith("notify/") for f in files):
-            bullets.append("Penyempurnaan pengalaman notifikasi Telegram supaya lebih informatif dan rapi.")
-        if any(f.startswith("dashboard/") for f in files):
-            bullets.append("Pembaruan tampilan/monitoring dashboard untuk visibilitas yang lebih baik.")
-        if any(f.startswith("config") for f in files):
-            bullets.append("Perbaikan keamanan konfigurasi: enkripsi key dan validasi startup Live Mode.")
-
-        if body:
-            # Pick up to two meaningful lines from commit body.
-            body_lines = [ln.strip("- ").strip() for ln in body.splitlines() if ln.strip()]
-            for ln in body_lines[:2]:
-                bullets.append(ln if ln.endswith(".") else f"{ln}.")
-
-        # Deduplicate while preserving order, cap to 8 items.
-        uniq = []
-        seen = set()
-        for b in bullets:
-            key = b.lower()
-            if key in seen:
-                continue
-            uniq.append(b)
-            seen.add(key)
-            if len(uniq) >= 8:
-                break
-        return uniq
-
-    def _get_changelog_text(self, version: str, release_tag: str = "", extra_notes: Optional[list[str]] = None) -> str:
-        """KARA dynamic update card with friendly style ✨."""
-        if version == "7.1.0":
-            bullets = [
-                "<b>Fix Momentum Exit</b>: Bug kritis diperbaiki — candle format mismatch menyebabkan momentum exit tidak pernah aktif. Bot sekarang bisa keluar lebih awal saat harga berbalik.",
-                "<b>Fix Grace Period Logic</b>: Logika time exit terbalik diperbaiki — posisi rugi besar tidak lagi diberi waktu ekstra, posisi rugi kecil yang dapat kesempatan recovery.",
-                "<b>SHORT Lebih Aktif</b>: Threshold SHORT diturunkan 62→59 dan MTF penalty dikurangi -15→-10. Sinyal SHORT lebih sering masuk tanpa mengorbankan kualitas.",
-                "<b>Early Trailing Stop</b>: Fitur baru — trailing aktif saat profit ≥0.5% tanpa nunggu TP1. Kalau harga balik 0.3% dari peak, profit dikunci otomatis.",
-                "<b>Volume Spike Exit</b>: Fitur baru — jika harga turun + volume naik ≥1.5× candle sebelumnya, KARA langsung keluar sebelum SL kena. Konfirmasi bearish dari volume.",
-                "<b>Candle Volume Feed</b>: Data volume 1m kini diambil bersamaan dengan close price (zero API call tambahan) dan digunakan untuk exit intelligence.",
-            ]
-        elif version == "6.2.0":
-            bullets = [
-                "<b>Arsitektur Multi-User</b>: KARA kini mendukung banyak pengguna dengan dompet terpisah secara sirkular.",
-                "<b>Secure Agent Wallet</b>: Sistem L1 Agent yang terverifikasi on-chain untuk keamanan maksimal.",
-                "<b>Enkripsi Tingkat Tinggi (Fernet)</b>: Semua private key agen kini dienkripsi secara militer di database.",
-                "<b>Locked-Down Onboarding</b>: Alur aktivasi Live Mode yang jauh lebih aman dan teratur.",
-                "<b>Smart Multi-Step Verification</b>: Verifikasi izin agen langsung ke blockchain Hyperliquid.",
-                "<b>Maintenance Script</b>: Fitur hard-reset saldo untuk simulasi ulang yang bersih."
-            ]
-        else:
-            bullets = self._build_dynamic_update_items(version=version)
-
-        if extra_notes:
-            bullets = list(extra_notes) + bullets
-        items = "\n".join([f"• {b}" for b in bullets]) if bullets else "• Perbaikan stabilitas dan optimasi sistem."
-        
-        # Build dynamic tag line
-        rel_tag = release_tag or f"v{version}"
-        
-        return (
-            f"✨ <b>KARA System Update v{version}</b> 🌸\n"
-            f"Release: <code>{rel_tag}</code>\n"
-            "──────────────────────────\n"
-            "Hai, User! Aku baru selesai update sistem. Ini perubahan terbaru dari KARA:\n\n"
-            f"{items}\n\n"
-            "Terima kasih sudah tetap bareng KARA 💜\n"
-            "Aku siap lanjut pantau market dengan performa terbaru~"
-        )
-
     async def send_update_notification(
         self,
         chat_id: str,
         silent: bool = True,
-        release_tag: str = "",
         extra_notes: Optional[list[str]] = None
     ):
-        """Send the stylized update notification to a specific user."""
+        """Send the stylized update notification to a specific user using ChangelogGenerator."""
         if not self._app: return False
         try:
-            text = self._get_changelog_text(
-                config.KARA_VERSION,
-                release_tag=release_tag,
-                extra_notes=extra_notes
-            )
+            gen = ChangelogGenerator(repo_path=".")
+            custom = "\n".join(extra_notes) if extra_notes else None
+            message = gen.generate_telegram_message(custom_notes=custom)
+            
             await self._app.bot.send_message(
                 chat_id=chat_id,
-                text=text,
+                text=message,
                 parse_mode=ParseMode.HTML,
                 disable_notification=silent
             )
@@ -2959,6 +2757,7 @@ class KaraTelegram:
         except Exception as e:
             log.error(f"Failed to send update to {chat_id}: {e}")
             return False
+
 
     def _is_throttled(self, chat_id: str, threshold: Optional[float] = None, action_key: str = "generic") -> bool:
         """

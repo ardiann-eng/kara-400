@@ -332,7 +332,6 @@ class KaraBot:
                         )
                     success = await self.telegram.send_update_notification(
                         chat_id,
-                        release_tag=release_tag,
                         extra_notes=extra_notes
                     )
                     if success:
