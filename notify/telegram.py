@@ -30,6 +30,7 @@ from models.schemas import (
     ExecutionMode
 )
 from utils.helpers import format_usd, format_idr, format_pct, format_price, utcnow
+from utils.changelog_generator import ChangelogGenerator
 
 log = logging.getLogger("kara.telegram")
 
@@ -308,6 +309,7 @@ class KaraTelegram:
                 CommandHandler("paper",    self.cmd_paper),
                 CommandHandler("settings", self.cmd_settings),
                 CommandHandler("signal",   self.cmd_signal),
+                CommandHandler("whatsnew", self.cmd_whatsnew),
                 
                 # Direct Config Commands
                 CommandHandler("setleverage",  self.cmd_direct_set_config),
@@ -344,6 +346,7 @@ class KaraTelegram:
                         BotCommand("settings", "Pusat Kendali (Threshold & Leverage)"),
                         BotCommand("help",     "Daftar instruksi lengkap"),
                         BotCommand("export",   "Export riwayat trade ke Excel"),
+                        BotCommand("whatsnew", "Lihat pembaruan fitur terbaru"),
                     ],
                     scope=BotCommandScopeDefault()
                 )
@@ -351,11 +354,9 @@ class KaraTelegram:
             except Exception as e:
                 log.warning(f"Could not register command menu: {e}")
 
-            await self.send_text(
-                f"✨ <b>KARA Online!</b> 🌸\n\n"
-                f"Intelligence Trading Partner Anda siap memantau 100+ aset.\n"
-                f"Mode: <code>{'PAPER ' if config.HL_TESTNET else 'LIVE '}</code>\n"
-            )
+            # Startup message is now handled dynamically by main.py (_send_startup_notification)
+            # to avoid blocking the main init flow.
+            pass
 
         except Exception as e:
             log.warning(f"  Telegram initialization failed: {e}")
@@ -762,7 +763,7 @@ class KaraTelegram:
             "• /pnl      — Ringkasan keuntungan/kerugian\n"
             "• /export   — Download riwayat trade Excel\n\n"
             "✨ <b>Update & Info</b>\n"
-            "• /whatsnew  — Lihat pembaruan fitur terbaru\n\n"
+            "• /whatsnew  — Lihat pembaruan fitur terbaru secara dinamis\n\n"
             "🔧 <b>Reset & Maintenance</b>\n"
             "• /resetdata — Reset history trade & journal Excel (saldo & posisi aman)\n\n"
             "<i>Tips: Gunakan menu /settings untuk menyesuaikan bot dengan kenyamanan risiko User.</i>\n\n"
@@ -2182,6 +2183,18 @@ class KaraTelegram:
     async def send_trade_update(self, message: str):
         """Send a plain trade update (fallback)."""
         await self.send_text(message)
+
+    async def cmd_whatsnew(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Show dynamic changelog on demand."""
+        if not self._is_authorized(update): return
+        if self._is_throttled(str(update.effective_chat.id), threshold=3, action_key="whatsnew"): return
+        
+        try:
+            gen = ChangelogGenerator(repo_path=".")
+            message = gen.generate_telegram_message()
+            await update.effective_message.reply_html(message)
+        except Exception as e:
+            await update.effective_message.reply_text(f"❌ Gagal mengambil data changelog: {e}")
 
     async def send_text(self, message: str, target_chat_id: str = None, reply_markup=None):
         """Send a message. If target_chat_id is set, only to that user. Else broadcast."""

@@ -295,6 +295,10 @@ class LiveExecutor:
             is_paper=False,
             entry_score=signal.score,
             realized_vol=getattr(signal, 'realized_vol', 0.02),
+            original_entry_price=signal.entry_price,  # [QUANT AGGRESSION] breakeven reference
+            # [POST-MORTEM] Entry context for autopsy
+            entry_funding_rate=getattr(signal, 'funding_rate', 0.0) or 0.0,
+            atr_pct=getattr(signal, 'entry_atr', 0.0),
         )
         self._positions[pos.position_id] = pos
 
@@ -447,14 +451,28 @@ class LiveExecutor:
             pos.tp1_hit = True
             pos.trailing_active = True
             pos.trailing_high = current_price
-            breakeven = pos.entry_price
+            # [QUANT AGGRESSION] SL → breakeven+0.1%
+            be_ref = getattr(pos, 'original_entry_price', pos.entry_price) or pos.entry_price
+            breakeven = be_ref * 1.001 if pos.side == Side.LONG else be_ref * 0.999
             await self.update_onchain_sl(pos, breakeven)
-            log.info(f" [LIVE] TP1 hit on {pos.asset} - SL (software + on-chain) moved to breakeven @ {breakeven}")
+            if not hasattr(pos, 'partial_exits_done') or pos.partial_exits_done is None:
+                pos.partial_exits_done = []
+            if 'tp1' not in pos.partial_exits_done:
+                pos.partial_exits_done.append('tp1')
+            log.info(f" [LIVE] TP1 hit on {pos.asset} - SL (software + on-chain) moved to breakeven @ {breakeven:.4f}")
         elif action["action"] == "tp2":
             pos.tp2_hit = True
+            if not hasattr(pos, 'partial_exits_done') or pos.partial_exits_done is None:
+                pos.partial_exits_done = []
+            if 'tp2' not in pos.partial_exits_done:
+                pos.partial_exits_done.append('tp2')
             log.info(f" [LIVE] TP2 hit on {pos.asset}")
         elif action["action"] == "tp3":
             pos.tp3_hit = True
+            if not hasattr(pos, 'partial_exits_done') or pos.partial_exits_done is None:
+                pos.partial_exits_done = []
+            if 'tp3' not in pos.partial_exits_done:
+                pos.partial_exits_done.append('tp3')
             log.info(f" [LIVE] TP3 hit on {pos.asset} - ATR trail on last piece")
 
         # Update peak high for trailing (always, so ATR trail has correct peak)
@@ -502,9 +520,38 @@ class LiveExecutor:
                 pos.status   = PositionStatus.CLOSED
                 pos.closed_at= utcnow()
                 # Batalkan on-chain SL saat posisi penuh tertutup.
-                # Jika tidak dibatalkan, SL order tetap di orderbook (meski reduce_only
-                # mencegah posisi baru, lebih bersih dan menghindari confusion di UI).
                 await self._cancel_onchain_sl(pos)
+
+                # [POST-MORTEM] Generate autopsy on full close
+                try:
+                    from memory.autopsy_engine import autopsy_engine
+                    time_held = (pos.closed_at - pos.opened_at).total_seconds() / 60 if pos.closed_at and pos.opened_at else 0
+                    autopsy_data = {
+                        "trade_id": position_id,
+                        "asset": pos.asset,
+                        "side": pos.side.value,
+                        "score": getattr(pos, 'entry_score', 0),
+                        "entry_price": pos.entry_price,
+                        "exit_price": current_price,
+                        "pnl": pos.pnl_realized,
+                        "pnl_pct": pos.roe_pct(current_price),
+                        "exit_reason": reason,
+                        "max_drawdown": pos.max_unrealized_loss,
+                        "time_held_min": time_held,
+                        "regime": pos.trade_mode,
+                        "trend_pct": pos.trend_pct,
+                        "funding_rate": pos.entry_funding_rate,
+                        "realized_vol": pos.realized_vol,
+                        "sl_distance_pct": abs(pos.stop_loss - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0,
+                        "tp2_distance_pct": abs(pos.tp2 - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0,
+                        "atr_pct": pos.atr_pct,
+                        "candle_count": len(pos.candle_closes),
+                        "notional": pos.size_initial * pos.entry_price,
+                    }
+                    pos.autopsy = autopsy_engine.generate(autopsy_data)
+                    log.info(f"[AUTOPSY] {position_id} | {pos.autopsy}")
+                except Exception as _ae:
+                    log.debug(f"[AUTOPSY] Failed for {position_id}: {_ae}")
 
             self.risk.record_pnl(pnl, (await self.get_account_state()).balance)
 
@@ -522,6 +569,7 @@ class LiveExecutor:
                 "pnl_pct":   pos.roe_pct(current_price),
                 "score":     getattr(pos, 'entry_score', 0),
                 "timestamp": utcnow(),
+                "autopsy":   getattr(pos, 'autopsy', ''),
             }
             from core.db import user_db
             user_db.save_trade(self.chat_id, log_data)

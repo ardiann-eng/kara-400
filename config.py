@@ -14,7 +14,7 @@ load_dotenv()
 # ──────────────────────────────────────────────
 # ENVIRONMENT
 # ──────────────────────────────────────────────
-KARA_VERSION = "7.2.0"  # Audit Phase 1: kill momentum_exit, rebuild scoring (Fund 40%/Tech 30%/Micro 30%), regime filter, mean-reversion guard
+KARA_VERSION = "8.0.1"  # Observability Protocol: Railway telemetry, rule-based autopsy, dynamic changelog generator
 DATA_SOURCE = os.getenv("KARA_DATA_SOURCE", "mainnet").lower() # "mainnet" | "testnet"
 TRADE_MODE  = os.getenv("KARA_TRADE_MODE", "paper").lower()    # "paper" | "live"
 FULL_AUTO   = os.getenv("KARA_FULL_AUTO", "true").lower() == "true"
@@ -296,6 +296,16 @@ class ScalperConfig:
     early_trail_enabled:         bool  = True
     early_trail_activation_pct:  float = 0.004  # aktif saat profit >= 0.4% (unleveraged)
     early_trail_distance_pct:    float = 0.003  # exit kalau retraced >= 0.3% dari peak
+
+    # [QUANT AGGRESSION] Partial profit & breakeven layers
+    partial_tp1_at_sl_multiple: float = 1.0    # close 40% at 1.0× SL distance
+    partial_tp2_at_sl_multiple: float = 1.5    # close 30% at 1.5× SL distance
+    partial_tp3_trail_at: float = 2.0          # trail remaining 30% at 2.0× SL
+    breakeven_trigger_at_sl_multiple: float = 0.8  # move SL to entry+0.1% at 0.8× SL
+    scale_in_threshold_pct: float = 0.005      # +0.5% in 3min = scale in 50%
+    scale_in_threshold_sec: int = 180           # 3 min window for scale-in check
+    max_scale_ins: int = 1                     # max 1 add per position
+    reentry_window_sec: int = 180              # 3 min window for stop-out re-entry
 
 SCALPER = ScalperConfig()
 

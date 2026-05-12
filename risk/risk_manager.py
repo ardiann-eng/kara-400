@@ -862,8 +862,12 @@ class RiskManager:
                     position.candle_highs   = highs
                     position.candle_lows    = lows
                     position.candle_volumes = volumes
+                    _log.info(
+                        f"[CANDLE-REFRESH] {position.asset} | pos_id={position.position_id} | "
+                        f"1m_candles={len(closes)} | last_close={closes[-1]:.6f}"
+                    )
         except Exception as e:
-            _log.debug(f"[REFRESH] {position.asset} 1m candle refresh failed: {e}")
+            _log.info(f"[CANDLE-REFRESH] {position.asset} | 1m refresh FAILED | reason={e}")
 
         try:
             candles_15m = await hl_client.get_candles(position.asset, "15m", limit=60)
@@ -887,16 +891,17 @@ class RiskManager:
         current_price: float,
     ) -> Optional[Dict]:
         """
-        Exit hierarchy — 4-stage tiered profit-taking + ATR trailing on last piece.
+        [QUANT AGGRESSION v8] Exit hierarchy:
 
-        Distribution:
-          TP1 close 25% — lock first profit, SL → breakeven
-          TP2 close 25% of original (~33% of remaining) — add lock
-          TP3 close 25% of original (~50% of remaining) — near full profit
-          Last 25%: ATR-based trailing stop (entry_atr * 2.0), only ratchets up
+        1. Hard SL (backstop)
+        2. Breakeven trigger at 0.8× SL distance
+        3. TP1: close 40% at 1.0× SL distance, move SL → breakeven+0.1%
+        4. TP2: close 30% at 1.5× SL distance
+        5. Trail: remaining 30% with ATR trailing at 2.0× SL distance activation
+        6. Early trail (pre-TP1 profit lock)
+        7. Score-driven time exit with grace period for runners
 
         ATR trailing: trail_sl = peak - (entry_atr * atr_mult * entry_price)
-        The trail level ONLY moves in the profit direction, never widens.
         Falls back to vol-based trail when entry_atr not available.
         """
         from datetime import timezone as _tz, datetime as _dt
@@ -911,9 +916,20 @@ class RiskManager:
             max_floating = (position.entry_price - new_low) / position.entry_price
 
         cfg = self._cfg()
-        tp1_ratio = getattr(cfg, 'tp1_close_ratio', 0.25)
-        tp2_ratio = getattr(cfg, 'tp2_close_ratio', 0.333)
-        tp3_ratio = getattr(cfg, 'tp3_close_ratio', 0.50)
+
+        # [QUANT AGGRESSION] SL-distance-based partial layers
+        sl_distance = abs(position.entry_price - position.stop_loss) / max(position.entry_price, 1e-9)
+        if sl_distance <= 0:
+            sl_distance = 0.008  # fallback 0.8%
+
+        tp1_at_mult = getattr(cfg, 'partial_tp1_at_sl_multiple', 1.0)
+        tp2_at_mult = getattr(cfg, 'partial_tp2_at_sl_multiple', 1.5)
+        tp3_at_mult = getattr(cfg, 'partial_tp3_trail_at', 2.0)
+        be_at_mult  = getattr(cfg, 'breakeven_trigger_at_sl_multiple', 0.8)
+
+        tp1_ratio = 0.40   # close 40% at TP1
+        tp2_ratio = 0.50   # close 50% of remaining (≈30% of original) at TP2
+        tp3_ratio = 1.0    # trail remaining 30% — full close on trail trigger
 
         # ── Rule E2: Momentum Exit — Multi-Confirmation Engine (v2) ─────────
         #
@@ -1075,9 +1091,7 @@ class RiskManager:
                             )
                         }
 
-        # ── Rule A: Hard SL (backstop — emergency only untuk scalper) ────────
-        # Untuk scalper: SL 0.30% adalah backstop kalau bot crash/momentum exit gagal.
-        # Untuk standard: SL normal seperti biasa.
+        # ── Rule A: Hard SL (backstop — emergency only) ───────────────────
         if (position.side == Side.LONG and current_price <= position.stop_loss) or \
            (position.side == Side.SHORT and current_price >= position.stop_loss):
             return {
@@ -1090,56 +1104,75 @@ class RiskManager:
                 )
             }
 
-        # ── Rule B: TP1 hit — close 25%, move SL to breakeven+0.1% ──────
-        tp1_hit_now = (
-            (position.side == Side.LONG  and current_price >= position.tp1) or
-            (position.side == Side.SHORT and current_price <= position.tp1)
-        )
+        # ── Rule A2: [QUANT AGGRESSION] Breakeven trigger ────────────────
+        # Move SL to entry+0.1% when price reaches 0.8× SL distance.
+        be_target = sl_distance * be_at_mult
+        partial_done = getattr(position, 'partial_exits_done', [])
+        if floating >= be_target and not position.tp1_hit and 'breakeven' not in partial_done:
+            # Just move SL, don't close anything
+            old_sl = position.stop_loss
+            if position.side == Side.LONG:
+                new_sl = position.entry_price * 1.001  # entry + 0.1%
+            else:
+                new_sl = position.entry_price * 0.999  # entry - 0.1%
+            position.stop_loss = new_sl
+            if not hasattr(position, 'partial_exits_done') or position.partial_exits_done is None:
+                position.partial_exits_done = []
+            position.partial_exits_done.append('breakeven')
+            log.info(
+                f"[BREAKEVEN] {position.asset} | pos_id={position.position_id} | "
+                f"old_sl={old_sl:.6f} | new_sl={new_sl:.6f} | "
+                f"trigger_dist={be_at_mult} | floating=+{floating*100:.2f}%"
+            )
+            # Don't return — continue checking for TP1
+
+        # ── Rule B: [QUANT AGGRESSION] TP1 — close 40% at 1.0× SL distance ──
+        tp1_target = sl_distance * tp1_at_mult
+        tp1_hit_now = floating >= tp1_target
         if not position.tp1_hit and tp1_hit_now:
+            log.info(
+                f"[PARTIAL] {position.asset} | pos_id={position.position_id} | label=TP1 | "
+                f"close_frac={tp1_ratio:.2f} | price={current_price:.6f} | floating=+{floating*100:.2f}%"
+            )
             return {
                 "action":      "tp1",
                 "close_ratio": tp1_ratio,
                 "price":       current_price,
                 "message":     (
-                    f"🎯 TP1 hit! +{floating*100:.2f}%. "
+                    f"🎯 TP1 hit! +{floating*100:.2f}% (target {tp1_target*100:.2f}%). "
                     f"Closing {int(tp1_ratio*100)}%, SL → breakeven+0.1%."
                 )
             }
 
-        # ── Rule C: TP2 hit — close ~25% of original (33% of remaining) ──
-        tp2_hit_now = (
-            (position.side == Side.LONG  and current_price >= position.tp2) or
-            (position.side == Side.SHORT and current_price <= position.tp2)
-        )
+        # ── Rule C: [QUANT AGGRESSION] TP2 — close 30% at 1.5× SL distance ──
+        tp2_target = sl_distance * tp2_at_mult
+        tp2_hit_now = floating >= tp2_target
         if position.tp1_hit and not position.tp2_hit and tp2_hit_now:
+            log.info(
+                f"[PARTIAL] {position.asset} | pos_id={position.position_id} | label=TP2 | "
+                f"close_frac={tp2_ratio:.2f} | price={current_price:.6f} | floating=+{floating*100:.2f}%"
+            )
             return {
                 "action":      "tp2",
                 "close_ratio": tp2_ratio,
                 "price":       current_price,
                 "message":     (
-                    f"🎯 TP2 hit! +{floating*100:.2f}%. "
-                    f"Closing {int(tp2_ratio*100)}% of remaining (~25% original)."
+                    f"🎯 TP2 hit! +{floating*100:.2f}% (target {tp2_target*100:.2f}%). "
+                    f"Closing {int(tp2_ratio*100)}% of remaining."
                 )
             }
 
-        # ── Rule C2: TP3 hit — close ~25% of original (50% of remaining) ─
-        tp3_price = getattr(position, 'tp3', 0.0)
-        if tp3_price > 0:
-            tp3_hit_now = (
-                (position.side == Side.LONG  and current_price >= tp3_price) or
-                (position.side == Side.SHORT and current_price <= tp3_price)
+        # ── Rule C2: [QUANT AGGRESSION] Trail activation at 2.0× SL distance ─
+        tp3_target = sl_distance * tp3_at_mult
+        if position.tp2_hit and not position.tp3_hit and floating >= tp3_target:
+            # Don't close — activate aggressive trailing on remaining position
+            position.tp3_hit = True
+            position.trailing_active = True
+            log.info(
+                f"🚀 [TRAIL] {position.asset}: Trail activated at +{floating*100:.2f}% "
+                f"(2.0× SL). ATR trail on last {int(100-int(tp1_ratio*100)-int(tp2_ratio*50))}%."
             )
-            if position.tp2_hit and not position.tp3_hit and tp3_hit_now:
-                return {
-                    "action":      "tp3",
-                    "close_ratio": tp3_ratio,
-                    "price":       current_price,
-                    "message":     (
-                        f"🎯 TP3 hit! +{floating*100:.2f}%. "
-                        f"Closing {int(tp3_ratio*100)}% of remaining. "
-                        f"ATR trail on last 25%."
-                    )
-                }
+            # Fall through to Rule D to apply trail immediately
 
         # ── Rule D: ATR-based trailing stop on last position piece ───────
         # Standard: trail aktivasi setelah TP1, gunakan ATR × 2.0 dari peak.
@@ -1247,15 +1280,25 @@ class RiskManager:
         # menangani kasus yang sama dengan lebih baik. Vol spike sering
         # false-positive karena perbandingan 2 candle terlalu noisy.
 
-        # ── Rule E: Scalper max-hold force exit ──────────────────────────
-        # [FIX 2026-05-10] Grace period diperpanjang dan PnL-aware:
-        # - Posisi loss mendapat grace yang lebih lama (hingga max_hold + grace minutes)
-        # - Grace HANYA aktif jika posisi sedang loss (floating < 0)
-        # - Posisi profit yang sudah lewat max_hold tetap ditutup segera
-        # - Posisi loss yang sangat dalam (> soft_floor) juga tetap ditutup
+        # ── Rule E: [QUANT AGGRESSION] Score-driven time exit ──────────────
+        # Time exit is NO LONGER the primary exit. Variable based on conviction:
+        #   score >= 66: 25min | score >= 61: 20min | score >= 56: 15min | else: 10min
+        # Grace period for runners: if TP1 already hit, extend by 50%.
+        # If in profit and near TP, don't force exit.
         if getattr(position, 'trade_mode', 'scalper') == 'scalper':
             scfg = SCALPER
-            max_hold   = getattr(scfg, 'max_hold_minutes', 20.0)
+            entry_score = getattr(position, 'entry_score', 50)
+
+            # Score-driven max_hold (FIX 3 from scoring engine sets this)
+            if entry_score >= 66:
+                max_hold = 25.0
+            elif entry_score >= 61:
+                max_hold = 20.0
+            elif entry_score >= 56:
+                max_hold = 15.0
+            else:
+                max_hold = 10.0
+
             grace      = getattr(scfg, 'max_hold_grace_minutes', 35.0)
             soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.020)
 
@@ -1265,25 +1308,27 @@ class RiskManager:
                 opened = opened.replace(tzinfo=_tz.utc)
             hold_minutes = (now - opened).total_seconds() / 60.0
 
-            # ── Rule E1: Max-hold force exit ─────────────────────────────
-            if hold_minutes >= max_hold:
-                # Grace period: posisi LOSS mendapat waktu ekstra untuk recovery ke BEP
-                # - floating < 0 = sedang loss → beri grace
-                # - floating >= 0 = sudah profit → tutup segera (ambil profit)
-                # - floating < soft_floor = loss terlalu dalam → tutup (cut loss)
+            # [QUANT AGGRESSION] Runner grace: if TP1 already hit, extend deadline 50%
+            effective_max = max_hold
+            if position.tp1_hit:
+                effective_max = max_hold * 1.5
+            # If in profit and near TP2, don't time-exit at all
+            if position.tp1_hit and floating > 0:
+                # Runner in profit — let ATR trail handle it, skip time exit
+                pass
+            elif hold_minutes >= effective_max:
                 is_in_loss = floating < 0
-                is_within_grace = hold_minutes < (max_hold + grace)
-                is_recoverable = floating > soft_floor  # loss belum terlalu dalam
+                is_within_grace = hold_minutes < (effective_max + grace)
+                is_recoverable = floating > soft_floor
 
                 if is_in_loss and is_within_grace and is_recoverable:
-                    # Posisi loss tapi masih dalam batas recovery → tunggu
-                    pass
+                    pass  # loss tapi masih dalam batas recovery → tunggu
                 else:
                     grace_note = ""
                     if is_in_loss and not is_recoverable:
                         grace_note = f" (loss {floating*100:.2f}% > floor {soft_floor*100:.1f}%, cut loss)"
                     elif is_in_loss and not is_within_grace:
-                        grace_note = f" (grace {grace:.0f}m habis, total hold {hold_minutes:.0f}m)"
+                        grace_note = f" (grace habis, total hold {hold_minutes:.0f}m)"
                     return {
                         "action":      "time_exit",
                         "close_ratio": 1.0,
@@ -1291,8 +1336,8 @@ class RiskManager:
                         "pnl":         position.pnl_unrealized,
                         "position_id": position.position_id,
                         "message":     (
-                            f"⏱️ Scalper max-hold {hold_minutes:.0f}m — exit paksa. "
-                            f"PnL: {floating*100:.2f}%.{grace_note}"
+                            f"⏱️ Time exit {hold_minutes:.0f}m/{effective_max:.0f}m "
+                            f"(score={entry_score}). PnL: {floating*100:.2f}%.{grace_note}"
                         )
                     }
 

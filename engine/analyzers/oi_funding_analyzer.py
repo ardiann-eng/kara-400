@@ -62,14 +62,22 @@ class OIFundingAnalyzer:
         # Funding SLOPE (Section 2 below) keeps its directional meaning — slope IS
         # a real momentum signal, LEVEL is a positioning indicator only.
         if fr > SIGNAL.funding_extreme_threshold * 2:     # > 0.0006
-            bear += 12   # contrarian: crowded longs
+            bear += 18   # [QUANT AGGRESSION] contrarian: crowded longs → strong fade signal
             reasons.append(
-                f"⚠️ EXTREME positive funding {fr*100:.4f}%/8h - longs over-crowded -> contrarian BEARISH"
+                f"⚠️ EXTREME positive funding {fr*100:.4f}%/8h - longs over-crowded -> contrarian BEARISH +18"
+            )
+            log.info(
+                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | threshold={SIGNAL.funding_extreme_threshold:.6f} | "
+                f"bias=bear | pts=18 | direction=contrarian"
             )
         elif fr > SIGNAL.funding_extreme_threshold:        # > 0.0003
-            bear += 8    # contrarian: heavy long positioning
+            bear += 12   # [QUANT AGGRESSION] contrarian: heavy long positioning
             reasons.append(
-                f"⚠️ HIGH positive funding {fr*100:.4f}%/8h -> longs crowded, contrarian SHORT bias"
+                f"⚠️ HIGH positive funding {fr*100:.4f}%/8h -> longs crowded, contrarian SHORT bias +12"
+            )
+            log.info(
+                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | threshold={SIGNAL.funding_extreme_threshold:.6f} | "
+                f"bias=bear | pts=12 | direction=contrarian"
             )
         elif fr > 0.00005:                                 # > 0.005%/8h - mild positive
             bull += 3    # mild positive = some demand still building (small same-side tilt)
@@ -77,14 +85,22 @@ class OIFundingAnalyzer:
                 f"Mild positive funding {fr*100:.4f}%/8h -> minor LONG tilt"
             )
         elif fr < -SIGNAL.funding_extreme_threshold * 2:   # < -0.0006
-            bull += 12   # contrarian: crowded shorts -> squeeze potential
+            bull += 18   # [QUANT AGGRESSION] contrarian: crowded shorts → squeeze potential
             reasons.append(
-                f"⚠️ EXTREME negative funding {fr*100:.4f}%/8h - shorts over-crowded -> SQUEEZE / contrarian LONG"
+                f"⚠️ EXTREME negative funding {fr*100:.4f}%/8h - shorts over-crowded -> SQUEEZE / contrarian LONG +18"
+            )
+            log.info(
+                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | threshold={SIGNAL.funding_extreme_threshold:.6f} | "
+                f"bias=bull | pts=18 | direction=contrarian"
             )
         elif fr < -SIGNAL.funding_extreme_threshold:       # < -0.0003
-            bull += 8    # contrarian: heavy short positioning
+            bull += 12   # [QUANT AGGRESSION] contrarian: heavy short positioning
             reasons.append(
-                f"⚠️ HIGH negative funding {fr*100:.4f}%/8h -> shorts crowded, contrarian LONG bias"
+                f"⚠️ HIGH negative funding {fr*100:.4f}%/8h -> shorts crowded, contrarian LONG bias +12"
+            )
+            log.info(
+                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | threshold={SIGNAL.funding_extreme_threshold:.6f} | "
+                f"bias=bull | pts=12 | direction=contrarian"
             )
         elif fr < -0.00005:                                # < -0.005%/8h - mild negative
             bear += 3

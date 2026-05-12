@@ -4,6 +4,61 @@ Semua perubahan teknis dan pembaruan arsitektur pada bot KARA dicatat di sini.
 
 ---
 
+## [8.0.1] — 2026-05-12 — OBSERVABILITY & AUTOPSY PROTOCOL
+
+> **"If you can't measure it, you can't improve it. If you can't explain it, you can't trust it."**
+
+### 📊 FIX 1 — Railway Telemetry & Structured Logging
+- **JSON Logger**: Activated for cloud drains (`RAILWAY_ENVIRONMENT=true`).
+- **Heartbeat Monitoring**: Structured logs for Quant Aggression features (ATR-SL, Partial Exit, Funding Contra).
+- **Signal Audit Trail**: Skip reason counters (`skip_counters`) and 5min summary logs.
+- **Enhanced Health API**: `/api/health` dashboard endpoint now exposes telemetry metrics.
+
+### 🧠 FIX 2 — Rule-Based Autopsy Engine
+- **Deterministic Post-Mortem**: 16 templates mapping trade data to human-readable insights (No AI dependency).
+- **Max Drawdown Tracking**: Captures `max_unrealized_loss` per position for risk auditing.
+- **Excel Export**: New "Autopsy" column in trade logs.
+- **Top Insight Aggregator**: Analyzes last 20 trades to identify recurring strategic failure/success patterns.
+
+### 🌸 FIX 3 — Dynamic Git-Based Changelog
+- **Generator Engine**: Automatically parses conventional commits and keywords from git history.
+- **Telegram Notification**: Automatic pretty-formatted update messages sent to Admin on deploy.
+- **Command /whatsnew**: Users can manually trigger the dynamic changelog display.
+
+---
+
+## [8.0.0] — 2026-05-12 — QUANT AGGRESSION PROTOCOL
+
+> **"Frequency is the Asset. Exit is the Edge."**
+
+### 🔓 FIX 1 — Entry Gates Unlocked
+- **Funding veto → fade_mode**: Extreme funding no longer blocks entries. Flagged as `fade_mode` for contrarian tuning (tighter SL 0.8×, wider TP 1.5×, max 12min)
+- **Mean-reversion guard REMOVED**: Score cap at 60 deleted. High scores get runner-mode exit treatment
+- **Regime multiplier restored**: Trending ×1.2 (was ×1.0). Late-trend ×1.15 with flag instead of punitive ×0.7
+
+### 🎯 FIX 2 — Layered Partial Profit & Breakeven Engine
+- **SL-distance TP layers**: TP1 @1.0× SL (close 40%), TP2 @1.5× SL (close 30%), Trail @2.0× SL (remaining 30%)
+- **Breakeven trigger**: SL → entry+0.1% at 0.8× SL distance
+- **Partial tracking**: `partial_exits_done` field prevents double-firing
+
+### 📊 FIX 3 — Score-Driven Exit Matrix
+- **Variable time exit**: ≥66=25min | ≥61=20min | ≥56=15min | <56=10min
+- **Dynamic SL/TP**: High score=wider SL/TP (runner). Low score=tight SL/TP (quick scalp)
+- **Late-trend**: -5min time, +30% TP2. **Fade mode**: 0.8× SL, 1.5× TP2, max 12min
+
+### 📈 FIX 5 — Funding Contrarianism
+- Extreme funding points: 12→18. High funding: 8→12
+
+### ⏱️ FIX 6 — Time Exit Grace for Runners
+- TP1 hit → deadline extends 50%. TP1 hit + profit → time_exit skipped (ATR trail handles)
+
+### 🏗️ Schema & Config
+- Position: `partial_exits_done`, `scaled_in`, `original_entry_price`, `scale_in_count`, `extended_deadline`
+- ScalperConfig: partial TP multipliers, breakeven threshold, scale-in/re-entry configs
+- Both executors updated for new partial ratios and breakeven SL
+
+---
+
 ## [7.1.0] — 2026-05-08
 
 ### 🔴 SHORT Signal Improvements

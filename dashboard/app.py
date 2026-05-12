@@ -521,6 +521,30 @@ async def health():
         except Exception:
             pass
 
+    # [RAILWAY TELEMETRY] Enriched health response
+    total_open = 0
+    skip_summary = {}
+    last_signal_at = None
+    if _sessions:
+        for _s in _sessions.values():
+            try:
+                total_open += len(_s.executor.open_positions)
+            except Exception:
+                pass
+        # Get scoring engine from first session's scorer if available
+        try:
+            from engine.scoring_engine import ScoringEngine
+            # Access scorer via any session's parent bot — fallback gracefully
+            for _s in _sessions.values():
+                if hasattr(_s, 'scorer'):
+                    skip_summary = dict(getattr(_s.scorer, 'skip_counters', {}))
+                    _lst = getattr(_s.scorer, '_last_signal_time', None)
+                    if _lst:
+                        last_signal_at = datetime.fromtimestamp(_lst, tz=timezone.utc).isoformat()
+                    break
+        except Exception:
+            pass
+
     return {
         "status":       "ok",
         "mode":         config.MODE,
@@ -528,6 +552,16 @@ async def health():
         "bot_username": bot_username,
         "bot_id":       bot_id,
         "time":         datetime.now(timezone.utc).isoformat(),
+        "open_positions": total_open,
+        "last_signal_at": last_signal_at,
+        "skip_summary": skip_summary,
+        "features_active": {
+            "atr_sl": getattr(config.SCALPER, 'atr_sl_enabled', True),
+            "live_candle": True,
+            "funding_contrarian": True,
+            "partial_exit": True,
+            "breakeven": True,
+        },
     }
 
 

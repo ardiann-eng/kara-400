@@ -21,7 +21,8 @@ class TradeExcelLogger:
         self._columns = [
             "Timestamp", "Chat ID", "Asset", "Side", "Action", 
             "Price", "Size", "Notional (USD)", "PnL ($)", 
-            "PnL (%)", "Score", "Reason", "Mode", "Position ID"
+            "PnL (%)", "Score", "Reason", "Mode", "Position ID",
+            "Autopsy"
         ]
         self._ensure_file_exists()
 
@@ -63,7 +64,8 @@ class TradeExcelLogger:
                 "Score": data.get("score", 0),
                 "Reason": data.get("reason", ""),
                 "Mode": config.TRADE_MODE.upper(),
-                "Position ID": data.get("pos_id", "")
+                "Position ID": data.get("pos_id", ""),
+                "Autopsy": data.get("autopsy", ""),
             }
 
             try:
@@ -80,10 +82,32 @@ class TradeExcelLogger:
             if not new_row_df.empty:
                 df = pd.concat([df, new_row_df], ignore_index=True)
                 df.to_excel(self.file_path, index=False, engine='openpyxl')
-                log.debug(f"Logged trade to Excel for {chat_id}: {row['Asset']} {row['Action']}")
+                if row["Action"] == "CLOSE":
+                    self._log_top_insights(chat_id)
 
         except Exception as e:
             log.debug(f"Excel log skipped: {e}")
+
+    def _log_top_insights(self, chat_id: str):
+        """Analyze last 20 trades and log the top actionable insight."""
+        try:
+            if not os.path.exists(self.file_path):
+                return
+            
+            df = pd.read_excel(self.file_path, engine='openpyxl', header=0)
+            user_trades = df[df["Chat ID"].astype(str) == str(chat_id)].tail(20)
+            
+            if len(user_trades) < 5: # Need a minimum sample
+                return
+                
+            from memory.autopsy_engine import autopsy_engine
+            # Convert DF rows to objects or dicts for the engine
+            trades_list = user_trades.to_dict('records')
+            insight = autopsy_engine.get_top_insight(trades_list)
+            
+            log.info(f"🔥 [INSIGHT] {chat_id} | {insight}")
+        except Exception as e:
+            log.debug(f"Failed to generate top insight: {e}")
 
     def clear_trades_for_user(self, chat_id: str) -> int:
         """Hapus semua baris trade milik chat_id dari Excel. Returns jumlah baris dihapus."""

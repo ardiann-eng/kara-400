@@ -323,6 +323,13 @@ class Position(BaseModel):
     entry_score:       int = 50
     realized_vol:      float = 0.02       # daily realized vol at entry — used for trail distance
 
+    # [QUANT AGGRESSION] Partial exit & scale-in tracking
+    partial_exits_done: List[float] = Field(default_factory=list)  # track which SL-multiples already hit
+    scaled_in:         bool = False
+    original_entry_price: float = 0.0  # untuk breakeven reference
+    scale_in_count:    int = 0         # track berapa kali scaled in
+    extended_deadline:  Optional[datetime] = None  # time_exit grace for runners
+
     # Rolling 1m candle OHLCV — diupdate setiap monitor tick untuk exit logic
     candle_closes:     List[float] = Field(default_factory=list)
     candle_highs:      List[float] = Field(default_factory=list)
@@ -331,6 +338,13 @@ class Position(BaseModel):
     # 15m candle closes untuk HTF trend filter (momentum exit Layer 5)
     htf_candle_closes: List[float] = Field(default_factory=list)
     candles_refreshed_at: Optional[datetime] = None  # timestamp of last OHLCV refresh
+
+    # [POST-MORTEM] Autopsy context — populated at entry, updated during hold
+    max_unrealized_loss: float = 0.0          # deepest unrealized PnL (negative = loss)
+    entry_funding_rate: float = 0.0           # funding rate at entry time
+    trend_pct: float = 0.0                    # 1h trend % at entry
+    atr_pct: float = 0.0                      # ATR(14) % at entry
+    autopsy: str = ""                         # rule-based autopsy text after close
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:

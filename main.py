@@ -16,6 +16,7 @@ import os
 import signal
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 # Ensure root directory is in path for module discovery (Railway/Docker Fix)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +36,7 @@ from core.mode_manager import mode_manager
 from utils.helpers import utcnow
 from core.db import user_db
 from core.user_session import UserSession
+from utils.changelog_generator import ChangelogGenerator
 
 # ──────────────────────────────────────────────
 # LOGGING SETUP
@@ -46,14 +48,19 @@ if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(config.LOG_FILE, encoding="utf-8"),
-    ],
-)
+# [RAILWAY TELEMETRY] Activate JSON logging for cloud environments
+if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("LOG_FORMAT") == "json":
+    from utils.logging_config import setup_json_logging
+    setup_json_logging()
+else:
+    logging.basicConfig(
+        level=getattr(logging, config.LOG_LEVEL, logging.INFO),
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(config.LOG_FILE, encoding="utf-8"),
+        ],
+    )
 log = logging.getLogger("kara.main")
 
 
@@ -614,9 +621,14 @@ class KaraBot:
         Pemisahan ini krusial: saat scan sedang throttled oleh data_sem,
         position monitor tetap jalan dan TP/SL tetap tereksekusi tepat waktu.
         """
+        # [TELEGRAM] Send dynamic update notification once at startup
+        asyncio.create_task(self._send_startup_notification())
+
         asyncio.create_task(self._position_monitor_loop(), name="position_monitor")
         asyncio.create_task(self._ws_watchdog_loop(), name="ws_watchdog")
         asyncio.create_task(self._scan_loop(), name="scan_loop")
+        asyncio.create_task(self._health_logger_loop(), name="health_logger")
+        asyncio.create_task(self._skip_summary_loop(), name="skip_summary")
 
         # Loop ini hanya tetap hidup untuk menjaga bot tidak exit
         while self._running:
@@ -680,6 +692,45 @@ class KaraBot:
                 log.error(f"[WS] Watchdog error: {e}")
 
             await asyncio.sleep(30)
+
+    async def _health_logger_loop(self):
+        """[RAILWAY TELEMETRY] Log bot health status every 60 seconds."""
+        log.info("[HEALTH] Health logger loop started (60s interval)")
+        while self._running:
+            try:
+                total_open = 0
+                for session in self.sessions.values():
+                    try:
+                        total_open += len(session.executor.open_positions)
+                    except Exception:
+                        pass
+
+                last_sig = self.scorer._last_signal_time
+                last_sig_str = (
+                    datetime.fromtimestamp(last_sig, tz=timezone.utc).strftime("%H:%M:%S")
+                    if last_sig else "never"
+                )
+                skip_total = sum(self.scorer.skip_counters.values())
+
+                log.info(
+                    f"[HEALTH] open_pos={total_open} | last_signal={last_sig_str} | "
+                    f"skip_total={skip_total} | markets={len(self.watched_assets)} | "
+                    f"features=atr_sl={getattr(config.SCALPER, 'atr_sl_enabled', True)},"
+                    f"partial_exit=True,breakeven=True,funding_contra=True"
+                )
+            except Exception as e:
+                log.error(f"[HEALTH] Health logger error: {e}")
+            await asyncio.sleep(60)
+
+    async def _skip_summary_loop(self):
+        """[RAILWAY TELEMETRY] Log skip summary every 5 minutes."""
+        log.info("[SKIP-SUMMARY] Skip summary loop started (5min interval)")
+        while self._running:
+            await asyncio.sleep(300)  # 5 minutes
+            try:
+                self.scorer.log_skip_summary()
+            except Exception as e:
+                log.error(f"[SKIP-SUMMARY] Error: {e}")
 
     async def _scan_loop(self):
         """
@@ -1355,6 +1406,39 @@ class KaraBot:
         # In live mode, sync position fills
         # We trigger a background update of positions to pull latest states
         asyncio.create_task(self._update_positions())
+
+    async def _send_startup_notification(self):
+        """[RAILWAY] Generate and send dynamic changelog to Admin on deploy."""
+        try:
+            # Wait a few seconds for Telegram to initialize
+            await asyncio.sleep(10)
+            
+            gen = ChangelogGenerator(repo_path=".")
+            
+            # Check for custom notes
+            custom = os.getenv("KARA_DEPLOY_NOTES", "")
+            if not custom and os.path.exists("DEPLOY_NOTES.txt"):
+                try:
+                    with open("DEPLOY_NOTES.txt", "r") as f:
+                        custom = f.read().strip()
+                except Exception:
+                    pass
+            
+            message = gen.generate_telegram_message(custom_notes=custom or None)
+            
+            # Send to main admin
+            if config.TELEGRAM_CHAT_ID:
+                await self.telegram.send_text(
+                    message=message,
+                    target_chat_id=config.TELEGRAM_CHAT_ID
+                )
+                log.info("[TELEGRAM] Startup update notification sent to Admin")
+            else:
+                log.warning("[TELEGRAM] TELEGRAM_CHAT_ID not set, skipping startup notification")
+                
+        except Exception as e:
+            log.warning(f"[TELEGRAM] Failed to send startup notification: {e}")
+
 
     # ──────────────────────────────────────────
     # SHUTDOWN

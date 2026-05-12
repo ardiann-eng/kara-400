@@ -180,6 +180,10 @@ class PaperExecutor:
             is_paper=True,
             entry_score=signal.score,
             realized_vol=getattr(signal, 'realized_vol', 0.02),
+            original_entry_price=signal.entry_price,  # [QUANT AGGRESSION] breakeven reference
+            # [POST-MORTEM] Entry context for autopsy
+            entry_funding_rate=getattr(signal, 'funding_rate', 0.0) or 0.0,
+            atr_pct=getattr(signal, 'entry_atr', 0.0),
         )
 
         # Update balances
@@ -246,6 +250,10 @@ class PaperExecutor:
 
             # Update unrealized PnL
             pos.pnl_unrealized = pos.unrealized_pnl(current)
+
+            # [POST-MORTEM] Track deepest unrealized loss for autopsy
+            if pos.pnl_unrealized < pos.max_unrealized_loss:
+                pos.max_unrealized_loss = pos.pnl_unrealized
 
             # Refresh OHLCV history so check_tp_trail has data for momentum/HTF/emergency exits.
             # Without this, those exit layers silently no-op (Position OHLCV fields stay empty).
@@ -315,6 +323,37 @@ class PaperExecutor:
         total_pnl = pos.pnl_realized
         self.risk.record_pnl(total_pnl, self._balance)
 
+        # [POST-MORTEM] Generate rule-based autopsy before position is finalized
+        try:
+            from memory.autopsy_engine import autopsy_engine
+            time_held = (pos.closed_at - pos.opened_at).total_seconds() / 60 if pos.closed_at and pos.opened_at else 0
+            autopsy_data = {
+                "trade_id": position_id,
+                "asset": pos.asset,
+                "side": pos.side.value,
+                "score": pos.entry_score,
+                "entry_price": pos.entry_price,
+                "exit_price": fill_price,
+                "pnl": total_pnl,
+                "pnl_pct": pos.roe_pct(fill_price),
+                "exit_reason": reason,
+                "max_drawdown": pos.max_unrealized_loss,
+                "time_held_min": time_held,
+                "regime": pos.trade_mode,
+                "trend_pct": pos.trend_pct,
+                "funding_rate": pos.entry_funding_rate,
+                "realized_vol": pos.realized_vol,
+                "sl_distance_pct": abs(pos.stop_loss - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0,
+                "tp2_distance_pct": abs(pos.tp2 - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0,
+                "atr_pct": pos.atr_pct,
+                "candle_count": len(pos.candle_closes),
+                "notional": pos.size_initial * pos.entry_price,
+            }
+            pos.autopsy = autopsy_engine.generate(autopsy_data)
+            log.info(f"[AUTOPSY] {position_id} | {pos.autopsy}")
+        except Exception as _ae:
+            log.debug(f"[AUTOPSY] Failed for {position_id}: {_ae}")
+
         log_data = {
             "type":             "close",
             "pos_id":           position_id,
@@ -329,6 +368,7 @@ class PaperExecutor:
             "pnl_pct":          pos.roe_pct(fill_price),
             "score":            pos.entry_score,
             "timestamp":        utcnow(),
+            "autopsy":          pos.autopsy,
         }
         self._trade_log.append(log_data)
         get_excel_logger().log_trade(self.chat_id, log_data)
@@ -400,15 +440,30 @@ class PaperExecutor:
             pos.tp1_hit = True
             pos.trailing_active = True
             pos.trailing_high = fill_price
-            pos.stop_loss = pos.entry_price * 1.0005 if pos.side == Side.LONG else pos.entry_price * 0.9995
-            log.info(f" [PAPER] TP1 hit on {pos.asset} - SL moved to breakeven")
+            # [QUANT AGGRESSION] SL → breakeven+0.1% (set by risk_manager breakeven trigger,
+            # but also enforce here as safety net)
+            be_ref = getattr(pos, 'original_entry_price', pos.entry_price) or pos.entry_price
+            pos.stop_loss = be_ref * 1.001 if pos.side == Side.LONG else be_ref * 0.999
+            if not hasattr(pos, 'partial_exits_done') or pos.partial_exits_done is None:
+                pos.partial_exits_done = []
+            if 'tp1' not in pos.partial_exits_done:
+                pos.partial_exits_done.append('tp1')
+            log.info(f" [PAPER] TP1 hit on {pos.asset} - SL moved to breakeven {pos.stop_loss:.4f}")
 
         elif action["action"] == "tp2":
             pos.tp2_hit = True
+            if not hasattr(pos, 'partial_exits_done') or pos.partial_exits_done is None:
+                pos.partial_exits_done = []
+            if 'tp2' not in pos.partial_exits_done:
+                pos.partial_exits_done.append('tp2')
             log.info(f" [PAPER] TP2 hit on {pos.asset}")
 
         elif action["action"] == "tp3":
             pos.tp3_hit = True
+            if not hasattr(pos, 'partial_exits_done') or pos.partial_exits_done is None:
+                pos.partial_exits_done = []
+            if 'tp3' not in pos.partial_exits_done:
+                pos.partial_exits_done.append('tp3')
             log.info(f" [PAPER] TP3 hit on {pos.asset} - ATR trail on last piece")
 
         # Update trailing high (always, even pre-TP1, so ATR trail has correct peak)

@@ -90,10 +90,33 @@ class ScoringEngine:
         # MTF Trend Cache: asset -> (timestamp, trend_string)
         self._mtf_cache: Dict[str, Tuple[float, str]] = {}
 
+        # [RAILWAY TELEMETRY] Signal skip counters for observability
+        self.skip_counters: Dict[str, int] = {
+            "score_below_threshold": 0,
+            "short_score_below_min": 0,
+            "short_funding_too_low": 0,
+            "squeeze_guard": 0,
+            "blocked_hour": 0,
+            "no_mark_price": 0,
+            "other": 0,
+        }
+        self._skip_count_since_summary = 0
+        self._last_signal_time: Optional[float] = None
+
     def dump_oi_state(self):
         """Persist OI snapshots to database to prevent amnesia on restart."""
         from core.db import user_db
         user_db.save_oi_snapshots_batch(self._oi_snapshots)
+
+    def log_skip_summary(self):
+        """[RAILWAY TELEMETRY] Log aggregated skip reasons. Called from main.py every 5 min."""
+        total_skips = sum(self.skip_counters.values())
+        if total_skips == 0:
+            return
+        parts = [f"{k}={v}" for k, v in self.skip_counters.items() if v > 0]
+        log.info(f"[SKIP-SUMMARY] total={total_skips} | {' | '.join(parts)}")
+        # Reset counters after logging
+        self.skip_counters = {k: 0 for k in self.skip_counters}
 
     def _load_vol_cache_from_db(self):
         """Load volatility cache dari SQLite saat startup — cegah 100 candleSnapshot sekaligus."""
@@ -299,12 +322,15 @@ class ScoringEngine:
         # [FIX 4] Block London open hours (08-09 UTC) - WR 7.1% di jam 08, 21.4% di jam 09
         current_hour = datetime.now(timezone.utc).hour
         if current_hour in config.BLOCKED_HOURS_UTC:
-            log.debug(f"{asset} [SCALPER]: blocked hour {current_hour} UTC (London open spike)")
+            log.info(f"[SKIP] {asset} | reason=blocked_hour | context=hour={current_hour}")
+            self.skip_counters["blocked_hour"] = self.skip_counters.get("blocked_hour", 0) + 1
             return None, -1  # sentinel: blocked by schedule, not an error
 
         # 1. Get mark price
         mark_price = await self.client.get_mark_price(asset, meta=meta_data)
         if mark_price <= 0:
+            log.info(f"[SKIP] {asset} | reason=no_mark_price | context=price={mark_price}")
+            self.skip_counters["no_mark_price"] = self.skip_counters.get("no_mark_price", 0) + 1
             return None, 0
 
         # 2. Fetch 1-minute candles (last 30 for EMA/RSI)
@@ -323,7 +349,7 @@ class ScoringEngine:
                 if succ and isinstance(resp, list):
                     candles = resp
         except Exception as e:
-            log.debug(f"[SCALPER] {asset} candle fetch failed: {e}")
+            log.info(f"[SKIP] {asset} | reason=candle_fetch_fail | context={e}")
 
         # Patch in the LIVE in-progress minute from WS trades cache (real-time, no API call).
         try:
@@ -331,18 +357,23 @@ class ScoringEngine:
             current_min_ms = (int(_time.time()) // 60) * 60 * 1000
             live_candle = self._build_live_candle_from_trades(asset, current_min_ms)
             if live_candle:
+                _replaced = False
                 if candles and isinstance(candles[-1], dict):
                     last_t = int(candles[-1].get("t", 0) or candles[-1].get("T", 0))
                     if last_t == current_min_ms:
-                        # Replace stale REST snapshot of current minute with fresh WS-built one
                         candles[-1] = live_candle
+                        _replaced = True
                     else:
-                        # Append the in-progress minute (REST didn't include it yet)
                         candles.append(live_candle)
                 else:
                     candles = [live_candle]
+                log.info(
+                    f"[LIVE-CANDLE] {asset} | o={live_candle['o']:.6f} h={live_candle['h']:.6f} "
+                    f"l={live_candle['l']:.6f} c={live_candle['c']:.6f} v={live_candle['v']:.2f} | "
+                    f"replaced={_replaced}"
+                )
         except Exception as e:
-            log.debug(f"[SCALPER] {asset} live candle overlay failed: {e}")
+            log.info(f"[LIVE-CANDLE] {asset} | overlay FAILED | reason={e}")
 
         # 3. Fetch 15m MTF trend
         mtf_trend = await self._fetch_15m_mtf_data(asset)
@@ -435,22 +466,21 @@ class ScoringEngine:
             fund_reasons=oi_reasons[:2], liq_reasons=liq_reasons[:2],
         )
 
-        # 4c. [AUDIT FIX 2026] Regime multiplier — late-entry downgrade.
-        # Original logic boosted ×1.2 for trending markets, but data showed this
-        # caused FOMO entries on ONDO/VVV/WLFI mid-spike. New logic:
-        #   |trend_1h| >= 3.0%  → ×0.7 (LATE — avoid chasing)
-        #   |trend_1h| >= 1.5%  → ×1.0 (neutral, don't reward extension)
-        #   else                → ×1.0 (ranging — keep score as-is)
-        # Volatile regime keeps ×0.8 floor.
+        # 4c. [QUANT AGGRESSION] Regime multiplier — trending = boost, late trend flagged.
+        # Original AUDIT logic penalized late trend (×0.7) but data shows this just kills
+        # valid entries. Now: trending = boost, late_trend = flag for exit tuning.
+        late_trend = False
         if vol_regime in (MarketRegime.HIGH_VOL, MarketRegime.EXTREME):
             _regime_cat = "volatile"
-            _regime_mult = 0.8
+            _regime_mult = 0.9
         elif abs(trend_pct) >= 0.030:
             _regime_cat = "late_trend"
-            _regime_mult = 0.7
+            _regime_mult = 1.15
+            late_trend = True
+            reasons.append(f"Late trend chase: {trend_pct*100:.2f}%/1h — tighter SL, wider TP")
         elif abs(trend_pct) >= 0.015:
             _regime_cat = "trending"
-            _regime_mult = 1.0
+            _regime_mult = 1.2
         else:
             _regime_cat = "ranging"
             _regime_mult = 1.0
@@ -466,14 +496,24 @@ class ScoringEngine:
 
         effective_threshold = config.SCALPER.min_score_to_enter + session_threshold_delta
         if score < effective_threshold:
-            log.debug(f"[SCALPER] {asset}: score {score} < effective_threshold {effective_threshold} (regime={_regime_cat})")
+            log.info(
+                f"[SKIP] {asset} | score={score} | side={side.value} | "
+                f"reason=score_below_threshold | context=threshold={effective_threshold},regime={_regime_cat}"
+            )
+            self.skip_counters["score_below_threshold"] = self.skip_counters.get("score_below_threshold", 0) + 1
+            self._skip_count_since_summary += 1
             return None, score
 
         # SHORT-specific filters: higher threshold + funding rate confirmation + squeeze guard
         if side == Side.SHORT:
             short_min = getattr(config.SIGNAL, 'min_score_short_signal', 62)
             if score < short_min:
-                log.debug(f"[SCALPER] {asset}: SHORT score {score} < {short_min}, blocked")
+                log.info(
+                    f"[SKIP] {asset} | score={score} | side=SHORT | "
+                    f"reason=short_score_below_min | context=min={short_min}"
+                )
+                self.skip_counters["short_score_below_min"] = self.skip_counters.get("short_score_below_min", 0) + 1
+                self._skip_count_since_summary += 1
                 return None, score
 
             cached_funding = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
@@ -481,37 +521,41 @@ class ScoringEngine:
                 fr = cached_funding[-1] if isinstance(cached_funding[-1], float) else float(cached_funding[-1].get('fundingRate', 0) if isinstance(cached_funding[-1], dict) else cached_funding[-1])
                 min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', 0.00001)
                 if fr < min_fr:
-                    log.debug(f"[SCALPER] {asset}: SHORT BLOCKED: funding {fr:.6f} < min {min_fr}")
+                    log.info(
+                        f"[SKIP] {asset} | score={score} | side=SHORT | "
+                        f"reason=short_funding_too_low | context=fr={fr:.6f},min={min_fr}"
+                    )
+                    self.skip_counters["short_funding_too_low"] = self.skip_counters.get("short_funding_too_low", 0) + 1
+                    self._skip_count_since_summary += 1
                     return None, score
 
             if _squeeze_detected:
-                log.debug(f"[SCALPER] {asset}: SHORT BLOCKED: potential squeeze ({_squeeze_reason})")
+                log.info(
+                    f"[SKIP] {asset} | score={score} | side=SHORT | "
+                    f"reason=squeeze_guard | context={_squeeze_reason}"
+                )
+                self.skip_counters["squeeze_guard"] = self.skip_counters.get("squeeze_guard", 0) + 1
+                self._skip_count_since_summary += 1
                 return None, score
 
-        # ── EXTREME FUNDING VETO ─────────────────────────────────────
-        # [AUDIT FIX 2026] Block entries when funding LEVEL is extreme on the
-        # SAME side as the trade direction (= over-crowded positioning).
-        # Empirical: score 65-69 bucket was 44% WR vs 60-64 bucket 80% WR
-        # because the bot piled into already-crowded LONGs at funding peaks.
-        # This veto prevents top-of-crowding entries; mean-reversion edge is
-        # captured by the contrarian scoring in oi_funding_analyzer.
+        # ── [QUANT AGGRESSION 2026] Funding extreme = CONTRARIAN OPPORTUNITY, bukan veto.
+        # Sebelumnya veto membuang 15-20% sinyal. Sekarang: flagkan sebagai "fade_mode".
+        fade_mode = False
         try:
             veto_threshold = getattr(config.SIGNAL, 'funding_extreme_threshold', 0.0003)
             fr_now = funding.funding_rate if funding else 0.0
             if side == Side.LONG and fr_now > veto_threshold:
-                log.info(
-                    f"[SCALPER] {asset}: LONG VETOED — extreme positive funding "
-                    f"{fr_now*100:.4f}%/8h > {veto_threshold*100:.4f}% (longs over-crowded)"
+                fade_mode = True
+                reasons.append(
+                    f"🎯 FADE mode: extreme positive funding {fr_now*100:.4f}% — crowded longs, contrarian entry"
                 )
-                return None, score
-            if side == Side.SHORT and fr_now < -veto_threshold:
-                log.info(
-                    f"[SCALPER] {asset}: SHORT VETOED — extreme negative funding "
-                    f"{fr_now*100:.4f}%/8h < {-veto_threshold*100:.4f}% (shorts over-crowded)"
+            elif side == Side.SHORT and fr_now < -veto_threshold:
+                fade_mode = True
+                reasons.append(
+                    f"🎯 FADE mode: extreme negative funding {fr_now*100:.4f}% — crowded shorts, contrarian entry"
                 )
-                return None, score
-        except Exception as _veto_err:
-            log.debug(f"[SCALPER] {asset}: funding veto check skipped: {_veto_err}")
+        except Exception as _fade_err:
+            log.debug(f"[SCALPER] {asset}: funding fade check skipped: {_fade_err}")
 
         # 4. Build signal with scalper TP/SL (vol_regime already fetched in step 4a)
         # Compute ATR% from the same candles used for scoring — avoids re-fetch.
@@ -528,6 +572,8 @@ class ScoringEngine:
         signal = self._build_scalper_signal(
             asset, side, score, mark_price, reasons, vol_regime,
             session_bonus, realized_vol, trend_pct, atr_pct=atr_pct_now,
+            fade_mode=fade_mode,
+            late_trend=late_trend,
         )
 
         # Attach last-known funding rate for Telegram warning
@@ -535,6 +581,16 @@ class ScoringEngine:
         if _fr_cache:
             _last_fr = _fr_cache[-1]
             signal.funding_rate = _last_fr if isinstance(_last_fr, float) else float(_last_fr.get('fundingRate', 0) if isinstance(_last_fr, dict) else _last_fr)
+
+        # [RAILWAY TELEMETRY] Signal Decision Trace — end-to-end log for accepted signals
+        if signal:
+            self._last_signal_time = time.time()
+            log.info(
+                f"[SIGNAL-TRACE] {asset} | FINAL | score={score} | side={side.value} | "
+                f"sl={signal.stop_loss:.4f} | tp1={signal.tp1:.4f} | tp2={signal.tp2:.4f} | "
+                f"atr_used={atr_pct_now > 0} | fade={fade_mode} | late_trend={late_trend} | "
+                f"reasons={' | '.join(reasons[-5:])}"
+            )
 
         return signal, score
 
@@ -962,29 +1018,12 @@ class ScoringEngine:
                     log.debug(f"[{asset}] SCALPER REJECT: Against 15m MTF trend")
                     return 0, side, reasons + ["REJECT: Counter-trend MTF"]
 
-        # ── [AUDIT Phase 1+3] Mean-Reversion Guard (CANONICAL) ───────
-        # Jika RSI > 60 DAN price > EMA21 → CAP score di 60 (jangan entry di puncak).
-        # Empirical: score 65-69 bucket was 44% WR vs 60-64 = 80% WR — caps top-of-momentum entries.
-        # Symmetric for SHORT at RSI<40 + price<EMA21.
-        _mr_capped = False
-        if len(closes) >= 15:
-            # RSI sudah dihitung di atas — recompute singkat untuk guard
-            _gains = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
-            _losses_mr = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
-            _ag = sum(_gains[-14:]) / 14
-            _al = sum(_losses_mr[-14:]) / 14
-            _rsi_guard = (100 - 100 / (1 + _ag / _al)) if _al > 0 else 100.0
-            _price_now = closes[-1]
-            if _rsi_guard > 60 and _price_now > ema21 and side == Side.LONG:
-                if raw > 60:
-                    raw = 60
-                    _mr_capped = True
-                    reasons.append(f"⚠️ Mean-reversion guard: RSI {_rsi_guard:.0f}>60 + price>EMA21 → CAP 60")
-            elif _rsi_guard < 40 and _price_now < ema21 and side == Side.SHORT:
-                if raw > 60:
-                    raw = 60
-                    _mr_capped = True
-                    reasons.append(f"⚠️ Mean-reversion guard: RSI {_rsi_guard:.0f}<40 + price<EMA21 → CAP 60")
+        # ── [QUANT AGGRESSION] Mean-Reversion Guard REMOVED ───────────────
+        # Previously capped score to 60 when RSI>60 + price>EMA21.
+        # Data analysis shows: high scores aren't the problem, BAD EXITS are.
+        # Score 65+ now gets runner-mode exit treatment (wider TP, longer hold)
+        # instead of being artificially suppressed.
+        _mr_capped = False  # kept for backward compat in logs
 
         score = min(raw, 100)
 
@@ -1037,6 +1076,8 @@ class ScoringEngine:
         realized_vol: float,
         trend_pct: float = 0.0,
         atr_pct: float = 0.0,
+        fade_mode: bool = False,
+        late_trend: bool = False,
     ) -> TradeSignal:
         """Build a TradeSignal with scalper-specific dynamic TP/SL levels."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
@@ -1051,12 +1092,16 @@ class ScoringEngine:
             mult = getattr(scfg, 'atr_sl_multiplier', 1.5)
             sl_min = getattr(scfg, 'sl_pct_min', 0.006)
             sl_max = getattr(scfg, 'sl_pct_max', 0.020)
-            sl_pct = max(min(atr_pct * mult, sl_max), sl_min)
-            log.debug(
-                f"[ATR-SL] {asset} atr={atr_pct*100:.3f}% × {mult} → sl={sl_pct*100:.3f}%"
+            raw_sl = atr_pct * mult
+            sl_pct = max(min(raw_sl, sl_max), sl_min)
+            log.info(
+                f"[ATR-SL] {asset} | atr_pct={atr_pct*100:.4f}% | mult={mult} | "
+                f"raw_sl={raw_sl*100:.4f}% | clamped_sl={sl_pct*100:.4f}% | "
+                f"min={sl_min*100:.4f}% | max={sl_max*100:.4f}% | fallback=False"
             )
         else:
             # Fallback: vol-based proxy (original logic)
+            _fb_reason = "atr_disabled" if not getattr(scfg, 'atr_sl_enabled', True) else f"atr_too_low={atr_pct*100:.4f}%"
             if regime in (MarketRegime.HIGH_VOL, MarketRegime.EXTREME):
                 SL_FLOOR = max(scfg.sl_pct, 0.0150)   # min 1.5% di high/extreme vol
             else:
@@ -1070,6 +1115,9 @@ class ScoringEngine:
                 sl_pct = max(SL_FLOOR, min(atr14_pct * ATR_MULT, SL_CEILING))
             else:
                 sl_pct = SL_FLOOR
+            log.warning(
+                f"[ATR-SL] {asset} | FALLBACK to fixed sl_pct={sl_pct*100:.4f}% | reason={_fb_reason}"
+            )
 
         # TP pakai nilai fixed dari config — level realistis untuk hold time 20 menit.
         tp1_pct = scfg.tp1_pct
@@ -1093,6 +1141,49 @@ class ScoringEngine:
             f"[RR-CAP] {asset} sl={sl_pct*100:.2f}% → tp1_floor={tp1_floor*100:.2f}% "
             f"tp2_floor={tp2_floor*100:.2f}% (final tp1={tp1_pct*100:.2f}% tp2={tp2_pct*100:.2f}%)"
         )
+
+        # ── [QUANT AGGRESSION] Score-driven exit matrix ─────────────────────
+        # High score = runner, low score = quick scalp. time_exit is VARIABLE.
+        time_exit_min = 20  # default
+        if score >= 66 or (fade_mode and score >= 60):
+            # HIGH CONVICTION / CONTRARIAN FADE → Let it run
+            sl_pct = max(sl_pct, 0.015)  # jangan terlalu ketat, kasih ruang breathe
+            tp1_pct = max(tp1_pct, sl_pct * 2.0)
+            tp2_pct = max(tp2_pct, sl_pct * 4.0)
+            time_exit_min = 25
+            reasons.append(f"🏃 RUNNER mode: score={score}, SL={sl_pct*100:.2f}%, TP2={tp2_pct*100:.2f}%, hold={time_exit_min}m")
+        elif score >= 61:
+            # MEDIUM-HIGH → Standard runner dengan partial
+            sl_pct = max(sl_pct, 0.010)
+            tp1_pct = max(tp1_pct, sl_pct * 1.5)
+            tp2_pct = max(tp2_pct, sl_pct * 2.5)
+            time_exit_min = 20
+        elif score >= 56:
+            # SWEET SPOT (data: 76% WR) → Quick scalp tapi monetisasi penuh
+            sl_pct = max(sl_pct, 0.008)
+            tp1_pct = max(tp1_pct, sl_pct * 1.2)
+            tp2_pct = max(tp2_pct, sl_pct * 1.8)
+            time_exit_min = 15
+        else:
+            # LOW CONVICTION → Very tight, in-and-out
+            sl_pct = max(sl_pct, 0.006)
+            tp1_pct = max(tp1_pct, sl_pct * 1.0)
+            tp2_pct = max(tp2_pct, sl_pct * 1.2)
+            time_exit_min = 10
+            reasons.append(f"⚡ QUICK SCALP: score={score}, SL={sl_pct*100:.2f}%, time_exit={time_exit_min}m")
+
+        # Late trend chase override: turunkan time_exit tapi naikkan TP
+        if late_trend:
+            time_exit_min = max(time_exit_min - 5, 8)
+            tp2_pct = tp2_pct * 1.3
+            reasons.append("Late-trend: -5min time, +30% TP2")
+
+        # Fade mode override: contrarian entry = tighter SL, wider TP (asymmetric RR)
+        if fade_mode:
+            sl_pct = sl_pct * 0.8
+            tp2_pct = tp2_pct * 1.5
+            time_exit_min = min(time_exit_min, 12)
+            reasons.append("FADE: tight SL 0.8×, wide TP 1.5×, max 12min")
 
         leverage = min(scfg.default_leverage, scfg.max_leverage)
 
