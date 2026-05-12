@@ -87,7 +87,6 @@ Regime: <code>{regime}</code>
 🛑 Stop Loss: <code>${sl}</code> ({sl_pct:.1f}%)
  TP1: <code>${tp1}</code> (+{tp1_pct:.1f}%)
  TP2: <code>${tp2}</code> (+{tp2_pct:.1f}%)
- TP3: <code>${tp3}</code> (+{tp3_pct:.1f}%)
 ⚡ Leverage: <b>{lev}x isolated</b>
 📐 R:R = <b>{rr:.1f}x</b>
 --------------------
@@ -1817,8 +1816,6 @@ class KaraTelegram:
             tp1_pct=abs(signal.tp1 / signal.entry_price - 1) * 100,
             tp2=format_price(signal.tp2),
             tp2_pct=abs(signal.tp2 / signal.entry_price - 1) * 100,
-            tp3=format_price(signal.tp3) if getattr(signal, 'tp3', 0) else "—",
-            tp3_pct=abs(signal.tp3 / signal.entry_price - 1) * 100 if getattr(signal, 'tp3', 0) else 0.0,
             lev=signal.suggested_leverage,
             rr=signal.risk_reward_ratio,
             sig_id=signal.signal_id[:8]
@@ -1878,7 +1875,6 @@ class KaraTelegram:
             f"  • 🛑 SL   : <code>${format_price(pos.stop_loss)}</code>\n"
             f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code>\n"
             f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code>\n"
-            f"  • 🎯 TP3  : <code>${format_price(pos.tp3) if getattr(pos, 'tp3', 0) else '—'}</code>\n"
             f"  • 📐 R:R Ratio: <b>{signal.risk_reward_ratio:.2f}x</b>\n"
             f"  • 📊 Score: <b>{signal.score}/100</b>\n\n"
             
@@ -1930,7 +1926,7 @@ class KaraTelegram:
                 f"  • SL digeser ke Entry (breakeven) ✅\n"
                 f"  • Sisa 75% masih berjalan\n\n"
 
-                f"<i>Monitoring TP2 → TP3 → ATR Trail. ✨</i>"
+                f"<i>Monitoring TP2 → ATR Trail. ✨</i>"
             )
 
         elif action_type == "tp2":
@@ -1942,9 +1938,9 @@ class KaraTelegram:
                 f"  • Entry   : <code>${format_price(entry)}</code>\n"
                 f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
 
-                f"🛡️ <b>Menuju TP3</b>\n"
+                f"🛡️ <b>Menuju ATR Trail</b>\n"
                 f"  • Sisa 50% masih berjalan\n"
-                f"  • TP3 target: <code>${format_price(getattr(pos, 'tp3', 0) or 0)}</code> 🚀"
+                f"  • Menunggu trail activation... 🚀"
             )
 
         elif action_type == "tp3":

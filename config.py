@@ -202,8 +202,9 @@ class ScalperConfig:
     max_leverage:            int   = 35       # hard cap for scalper
 
     # Position sizing (% of equity)
-    risk_per_trade_pct:      float = 0.04     # 4% per trade (Aggressive baseline)
-    max_risk_per_trade_pct:  float = 0.10     # 10% absolute cap (AI Boost)
+    risk_per_trade_pct:      float = 0.08     # 8% per trade (Sultan Aggression)
+    max_risk_per_trade_pct:  float = 0.12     # 12% absolute cap
+    min_risk_per_trade_pct:  float = 0.05     # 5% floor
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # Scalper SL/TP (Calibrated for 25x leverage, 20-min max hold)

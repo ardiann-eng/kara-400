@@ -843,20 +843,35 @@ class RiskManager:
 
         import logging
         _log = logging.getLogger("kara.risk_manager")
+        import time
+        _now_ms = int(time.time() * 1000)
+
+        # ── 1m Candle Refresh (last 30) ──────────────────────────────
         try:
-            candles_1m = await hl_client.get_candles(position.asset, "1m", limit=30)
-            if candles_1m and isinstance(candles_1m, list):
+            # Bypass get_candles() SDK check to avoid "client not connected" errors
+            start_1m = _now_ms - (60_000 * 30)
+            res_1m, succ_1m = await hl_client._call_info_endpoint("candleSnapshot", {
+                "req": {
+                    "coin": position.asset,
+                    "interval": "1m",
+                    "startTime": start_1m,
+                    "endTime": _now_ms
+                }
+            })
+            
+            candles_1m = res_1m if (succ_1m and isinstance(res_1m, list)) else []
+            
+            if candles_1m:
                 closes, highs, lows, volumes = [], [], [], []
                 for c in candles_1m:
-                    if not isinstance(c, dict):
-                        continue
+                    if not isinstance(c, dict): continue
                     try:
                         closes.append(float(c.get("c", 0)))
                         highs.append(float(c.get("h", 0)))
                         lows.append(float(c.get("l", 0)))
                         volumes.append(float(c.get("v", 0)))
-                    except (TypeError, ValueError):
-                        continue
+                    except (TypeError, ValueError): continue
+                
                 if closes:
                     position.candle_closes  = closes
                     position.candle_highs   = highs
@@ -869,17 +884,28 @@ class RiskManager:
         except Exception as e:
             _log.info(f"[CANDLE-REFRESH] {position.asset} | 1m refresh FAILED | reason={e}")
 
+        # ── 15m Candle Refresh (last 60) ─────────────────────────────
         try:
-            candles_15m = await hl_client.get_candles(position.asset, "15m", limit=60)
-            if candles_15m and isinstance(candles_15m, list):
+            start_15m = _now_ms - (900_000 * 60)
+            res_15m, succ_15m = await hl_client._call_info_endpoint("candleSnapshot", {
+                "req": {
+                    "coin": position.asset,
+                    "interval": "15m",
+                    "startTime": start_15m,
+                    "endTime": _now_ms
+                }
+            })
+            
+            candles_15m = res_15m if (succ_15m and isinstance(res_15m, list)) else []
+            
+            if candles_15m:
                 htf_closes = []
                 for c in candles_15m:
-                    if not isinstance(c, dict):
-                        continue
+                    if not isinstance(c, dict): continue
                     try:
                         htf_closes.append(float(c.get("c", 0)))
-                    except (TypeError, ValueError):
-                        continue
+                    except (TypeError, ValueError): continue
+                
                 if htf_closes:
                     position.htf_candle_closes = htf_closes
         except Exception as e:
