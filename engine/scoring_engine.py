@@ -491,7 +491,8 @@ class ScoringEngine:
 
         # FIX #5: Session adjusts entry threshold, not score.
         session_bonus, session_reasons, session_threshold_delta = self._get_session_bonus()
-        # session_bonus is always 0; score is unchanged
+        score += session_bonus  # NY/London bonus adds to score
+        score = max(0, min(score, 100))
         reasons.extend(session_reasons)
 
         effective_threshold = config.SCALPER.min_score_to_enter + session_threshold_delta
@@ -519,7 +520,7 @@ class ScoringEngine:
             cached_funding = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
             if cached_funding:
                 fr = cached_funding[-1] if isinstance(cached_funding[-1], float) else float(cached_funding[-1].get('fundingRate', 0) if isinstance(cached_funding[-1], dict) else cached_funding[-1])
-                min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', 0.00001)
+                min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', -0.0001)
                 if fr < min_fr:
                     log.info(
                         f"[SKIP] {asset} | score={score} | side=SHORT | "
@@ -754,6 +755,18 @@ class ScoringEngine:
         bear_pts = 0
         reasons = []
 
+        # Component trackers for SCORE-DEBUG log
+        _c_ob = 0
+        _c_fund = 0
+        _c_liq = 0
+        _c_ema = 0
+        _c_rsi = 0
+        _c_div = 0
+        _c_wick = 0
+        _c_cvd = 0
+        _c_vol = 0
+        _c_mtf = 0
+
         # ── Orderbook Imbalance (from cache) ─────────────────────────
         ob = self.cache.orderbook.get(asset) if hasattr(self.cache, 'orderbook') else None
         if ob:
@@ -789,16 +802,16 @@ class ScoringEngine:
                 imb = 0.0
 
             if imb > 0.60:
-                bull_pts += 20
+                bull_pts += 20; _c_ob = 20
                 reasons.append(f"📗 Strong bid wall (imbalance {imb:.2f}) → LONG")
             elif imb < -0.60:
-                bear_pts += 20
+                bear_pts += 20; _c_ob = 20
                 reasons.append(f"📕 Strong ask wall (imbalance {imb:.2f}) → SHORT")
             elif imb > 0.40:
-                bull_pts += 8
+                bull_pts += 8; _c_ob = 8
                 reasons.append(f"🟢 Mild bid pressure ({imb:.2f})")
             elif imb < -0.40:
-                bear_pts += 8
+                bear_pts += 8; _c_ob = 8
                 reasons.append(f"🔴 Mild ask pressure ({imb:.2f})")
 
         # ── OI + Funding Analysis (from standard pipeline — zero API calls) ──────
@@ -808,6 +821,7 @@ class ScoringEngine:
         if oi_bull > 0 or oi_bear > 0:
             fund_delta = oi_bull - oi_bear
             fund_pts = max(-25, min(25, int(fund_delta)))  # [AUDIT] Fundamental 40%: OI/Funding max ±25
+            _c_fund = abs(fund_pts)
             if fund_pts > 0:
                 bull_pts += fund_pts
                 reasons.append(f"📊 OI/Funding bullish (+{fund_pts})")
@@ -821,6 +835,7 @@ class ScoringEngine:
         if liq_bull > 0 or liq_bear > 0:
             liq_delta = liq_bull - liq_bear
             liq_pts = max(-15, min(15, int(liq_delta)))  # [AUDIT] Fundamental 40%: Liquidation max ±15
+            _c_liq = abs(liq_pts)
             if liq_pts > 0:
                 bull_pts += liq_pts
                 reasons.append(f"💥 Liq bias bullish (+{liq_pts})")
@@ -876,10 +891,10 @@ class ScoringEngine:
         ema21 = ema(closes[-21:], 21) if len(closes) >= 21 else closes[-1]
 
         if ema8 > ema21 * 1.0005:   # EMA8 clearly above EMA21
-            bull_pts += 12  # [AUDIT] Teknikal 30%: EMA max 12 (sole trend indicator)
+            bull_pts += 12; _c_ema = 12
             reasons.append(f"📈 EMA8 ({ema8:.4f}) > EMA21 ({ema21:.4f}) → bullish")
         elif ema8 < ema21 * 0.9995:
-            bear_pts += 12  # [AUDIT] Teknikal 30%: EMA max 12
+            bear_pts += 12; _c_ema = 12
             reasons.append(f"📉 EMA8 ({ema8:.4f}) < EMA21 ({ema21:.4f}) → bearish")
 
         # ── RSI 14 (1m) ──────────────────────────────────────────────
@@ -898,16 +913,16 @@ class ScoringEngine:
             # untuk 1m timeframe. RSI 1m jarang menyentuh extreme, jadi zone diperluas
             # agar RSI lebih sering berkontribusi ke skor.
             if rsi < 30:
-                bull_pts += 10  # [AUDIT] Teknikal 30%: RSI max 10
+                bull_pts += 10; _c_rsi = 10
                 reasons.append(f"📊 RSI extreme oversold ({rsi:.1f}) → strong buy")
             elif rsi < 40:
-                bull_pts += 5
+                bull_pts += 5; _c_rsi = 5
                 reasons.append(f"📊 RSI oversold ({rsi:.1f}) → buy signal")
             elif rsi > 70:
-                bear_pts += 10  # [AUDIT] Teknikal 30%: RSI max 10
+                bear_pts += 10; _c_rsi = 10
                 reasons.append(f"📊 RSI extreme overbought ({rsi:.1f}) → strong sell")
             elif rsi > 60:
-                bear_pts += 5
+                bear_pts += 5; _c_rsi = 5
                 reasons.append(f"📊 RSI overbought ({rsi:.1f}) → sell signal")
             else:
                 reasons.append(f"📊 RSI neutral ({rsi:.1f})")
@@ -930,10 +945,10 @@ class ScoringEngine:
                 # [FIX 2026-05-10] Divergence dikurangi dari 10→7 pts — divergence
                 # pada 1m timeframe sering false signal karena noise.
                 if price_now > price_5ago * 1.002 and rsi_now < rsi_5ago - 3:
-                    bear_pts += 5  # [AUDIT] Teknikal 30%: divergence max 5
+                    bear_pts += 5; _c_div = 5
                     reasons.append(f"📉 Bearish RSI divergence (price ↑ tapi RSI {rsi_5ago:.0f}→{rsi_now:.0f}) → SHORT")
                 elif price_now < price_5ago * 0.998 and rsi_now > rsi_5ago + 3:
-                    bull_pts += 5  # [AUDIT] Teknikal 30%: divergence max 5
+                    bull_pts += 5; _c_div = 5
                     reasons.append(f"📈 Bullish RSI divergence (price ↓ tapi RSI {rsi_5ago:.0f}→{rsi_now:.0f}) → LONG")
 
         # ── Bearish Rejection Wick Detection (SHORT signal) ──────────────
@@ -948,7 +963,7 @@ class ScoringEngine:
                 # [FIX 2026-05-10] Wick detection dikurangi 8→5 pts — single candle
                 # pattern pada 1m terlalu noisy untuk bobot besar.
                 if body > 0 and upper_wick > 1.5 * body and c_close < c_open:
-                    bear_pts += 3  # [AUDIT] Teknikal 30%: wick max 3
+                    bear_pts += 3; _c_wick = 3
                     reasons.append(f"🕯️ Rejection wick (wick {upper_wick/body:.1f}× body) → SHORT signal")
             except (TypeError, ValueError):
                 pass
@@ -965,10 +980,10 @@ class ScoringEngine:
             if cvd_total > 0:
                 cvd_ratio = (buy_vol - sell_vol) / cvd_total
                 if cvd_ratio > 0.25:
-                    bull_pts += 10  # [AUDIT] Microstructure 30%: CVD max 10
+                    bull_pts += 10; _c_cvd = 10
                     reasons.append(f"💚 CVD bullish ({cvd_ratio*100:.0f}% net buy pressure)")
                 elif cvd_ratio < -0.25:
-                    bear_pts += 10  # [AUDIT] Microstructure 30%: CVD max 10
+                    bear_pts += 10; _c_cvd = 10
                     reasons.append(f"❤️ CVD bearish ({cvd_ratio*100:.0f}% net sell pressure)")
 
         # ── Volume Surge (2min vs 10min average) ──────────────────────
@@ -983,6 +998,7 @@ class ScoringEngine:
                 if surge > 2.0:
                     # High volume surge — follow the direction
                     extra = min(int((surge - 2.0) * 4), 10) # [BOOST] Increase surge max to 10
+                    _c_vol += extra
                     reasons.append(f"🔥 Volume surge {surge:.1f}x avg (+{extra} pts momentum)")
                     if bull_pts >= bear_pts:
                         bull_pts += extra
@@ -995,6 +1011,7 @@ class ScoringEngine:
             if total_vol > 500000: # Example $500k/min threshold
                 bull_pts += 3
                 bear_pts += 3
+                _c_vol += 3
                 reasons.append("💎 High liquidity asset (+3 baseline)")
 
         # ── [AUDIT Phase 1] HH/HL Structure REMOVED — redundant with EMA cross ──
@@ -1008,10 +1025,10 @@ class ScoringEngine:
         scfg = config.SCALPER
         if mtf_trend != "neutral":
             if (side == Side.LONG and mtf_trend == "bull") or (side == Side.SHORT and mtf_trend == "bear"):
-                raw += scfg.mtf_score_bonus
+                raw += scfg.mtf_score_bonus; _c_mtf = scfg.mtf_score_bonus
                 reasons.append(f"📡 15m MTF Align ({mtf_trend}) → +{scfg.mtf_score_bonus}")
             else:
-                raw += scfg.mtf_score_penalty
+                raw += scfg.mtf_score_penalty; _c_mtf = scfg.mtf_score_penalty
                 reasons.append(f"📡 15m MTF Discord ({mtf_trend}) → {scfg.mtf_score_penalty}")
                 # Hard reject for scalper if 15m trend is strongly against us
                 if abs(scfg.mtf_score_penalty) > 10 and raw < 60:
@@ -1027,18 +1044,12 @@ class ScoringEngine:
 
         score = min(raw, 100)
 
-        # ── Per-coin breakdown log (debug only) ──────────────────────
-        _fund_bull = max(0, int(oi_bull - oi_bear)) if oi_bull > oi_bear else 0
-        _fund_bear = max(0, int(oi_bear - oi_bull)) if oi_bear > oi_bull else 0
-        _liq_bull  = max(0, int(liq_bull - liq_bear)) if liq_bull > liq_bear else 0
-        _liq_bear  = max(0, int(liq_bear - liq_bull)) if liq_bear > liq_bull else 0
-        _ob_pts    = bull_pts - _fund_bull - _liq_bull if side == Side.LONG else bear_pts - _fund_bear - _liq_bear
-        log.debug(
-            f"[BREAKDOWN] {asset:6} | score={score} {side.value.upper():5} | "
-            f"bull={bull_pts} bear={bear_pts} | "
-            f"OI/Fund: bull={oi_bull:.1f} bear={oi_bear:.1f} | "
-            f"Liq: bull={liq_bull:.1f} bear={liq_bear:.1f} | "
-            f"Tech(OB+EMA+RSI+CVD): ~{_ob_pts}"
+        # ── Per-coin SCORE-DEBUG log (info level for Railway visibility) ──
+        log.info(
+            f"[SCORE-DEBUG] {asset} | {side.value.upper()} score={score} | "
+            f"OB={_c_ob} EMA={_c_ema} RSI={_c_rsi} DIV={_c_div} WICK={_c_wick} "
+            f"CVD={_c_cvd} VOL={_c_vol} FUND={_c_fund} LIQ={_c_liq} MTF={_c_mtf} | "
+            f"bull={bull_pts} bear={bear_pts}"
         )
 
         return score, side, reasons
@@ -1473,15 +1484,12 @@ class ScoringEngine:
 
             # ── SHORT Quality Filters (berlaku saat ALLOW_SHORT = True) ──────
             # Solusi 2: Funding Rate Confirmation
-            # SHORT valid HANYA jika longs paying aggressively (crowded long → reversal).
-            # Jika funding negatif = market sudah short-biased = SHORT sangat berbahaya.
+            # FIX: fr=0.000000 is neutral — fine for SHORT.
+            # Only block when funding is strongly negative (shorts paying longs heavily).
             fr = getattr(funding, 'funding_rate', 0.0)
-            min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', 0.0002)
-            if fr < 0:
-                log.debug(f"[{asset}] SHORT BLOCKED: Funding negatif ({fr:.6f}) = shorts already paying, berbahaya")
-                return None, 0
-            elif fr < min_fr:
-                log.debug(f"[{asset}] SHORT BLOCKED: Funding {fr:.6f} < {min_fr} (tidak cukup crowded long untuk reversal)")
+            min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', -0.0001)
+            if fr < min_fr:
+                log.debug(f"[{asset}] SHORT BLOCKED: Funding {fr:.6f} < {min_fr} (terlalu bearish/short-biased)")
                 return None, 0
 
             # Solusi 3: Anti-Trend Filter
@@ -1524,7 +1532,7 @@ class ScoringEngine:
 
         raw_score += structure_delta
 
-        # session_bonus is always 0; session adjusts threshold not score.
+        # Session bonus applied later with diminishing returns (line ~1546)
         raw_score = max(0, min(raw_score, 92))
 
         # ── Apply regime multiplier ────────────────────────────────────
@@ -1793,35 +1801,39 @@ class ScoringEngine:
     # ──────────────────────────────────────────
 
     def _get_session_bonus(self):
-        """Session adjusts entry threshold (not score). Returns (0, reasons, threshold_delta)."""
+        """Session adjusts entry threshold (not score). Returns (bonus, reasons, threshold_delta)."""
         hour = datetime.now(timezone.utc).hour
         ny_start = SIGNAL.ny_session_start_utc
         ny_end   = SIGNAL.ny_session_end_utc
         lon_start= SIGNAL.london_start_utc
         lon_end  = SIGNAL.london_end_utc
 
-        threshold_delta = 0  # negative = lower threshold (more permissive)
+        bonus = 0
+        threshold_delta = 0
         reasons = []
 
         is_ny  = ny_start  <= hour < ny_end
         is_lon = lon_start <= hour < lon_end
 
         if is_ny:
-            threshold_delta -= 3   # NY liquidity: slightly lower threshold to enter
-            reasons.append("🗽 NY session (threshold -3)")
+            ny_bonus = getattr(SIGNAL, 'ny_session_bonus', 10)
+            bonus += ny_bonus
+            reasons.append(f"🗽 NY session (+{ny_bonus} pts)")
 
         if is_lon:
-            threshold_delta -= 2   # London-NY overlap: slightly lower threshold
-            reasons.append("🇬🇧 London session (threshold -2)")
+            lon_bonus = getattr(SIGNAL, 'london_session_bonus', 4)
+            bonus += lon_bonus
+            reasons.append(f"🇬🇧 London session (+{lon_bonus} pts)")
 
         if not is_ny and not is_lon:
             if hour >= 22 or hour < 7:
-                threshold_delta += 5  # Asia: raise threshold (lower liquidity = need stronger signal)
-                reasons.append("🌏 Asia session (threshold +5, need stronger signal)")
+                asia_pen = getattr(SIGNAL, 'asia_session_penalty', -10)
+                threshold_delta += abs(asia_pen)  # raise threshold (need stronger signal)
+                reasons.append(f"🌏 Asia session (threshold +{abs(asia_pen)}, need stronger signal)")
             else:
                 reasons.append("⏰ Off-session neutral")
 
-        return 0, reasons, threshold_delta
+        return bonus, reasons, threshold_delta
 
     # ──────────────────────────────────────────
     # SIGNAL BUILDER

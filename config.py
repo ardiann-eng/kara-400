@@ -350,8 +350,10 @@ class SignalConfig:
     # SHORT-specific filters (aktif saat ALLOW_SHORT = True)
     # Solusi 2: Funding rate confirmation
     # Real HL funding rates are typically +-0.00002; threshold must match that range
-    short_min_funding_rate:  float = 0.00001  # SHORT valid if funding >= +0.00001 (longs paying)
-                                               # Previously 0.0002 which is 10x too high — blocked all SHORTs
+    # FIX: fr=0.000000 is NEUTRAL — perfectly fine for SHORT.
+    # Only block SHORT when funding is strongly negative (shorts paying longs = market bullish).
+    short_min_funding_rate:  float = -0.0001  # SHORT valid if funding >= -0.0001
+                                               # Was 0.00001 which blocked neutral funding SHORTs
     # Solusi 3: Anti-trend filter
     short_max_uptrend_pct:   float = 0.03     # Block SHORT jika 24h trend > +3% (jangan lawan trend)
 
