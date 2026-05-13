@@ -229,13 +229,13 @@ class ScalperConfig:
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # ── [C3 FIX] SL/TP — dikalibrasi untuk 15x leverage ──
-    # SL max ROE: 1.2% × 15x = -18% (survivable)
-    # SL min ROE: 0.4% × 15x = -6% (tight for BTC)
-    sl_pct:                  float = 0.0120   # [AUDIT] 2.0%→1.2%: fallback SL for 15x lev
+    # SL max ROE: 1.5% × 15x = -22.5% (survivable)
+    # SL min ROE: 0.7% × 15x = -10.5% (noise protection floor)
+    sl_pct:                  float = 0.0150   # [AUDIT] 1.2%→1.5%: fallback SL for 15x lev
     atr_sl_enabled:          bool  = True     # enable ATR-adaptive SL for scalper
-    atr_sl_multiplier:       float = 1.5      # SL = ATR(14) × 1.5
-    sl_pct_min:              float = 0.004    # [AUDIT] 0.6%→0.4%: tighter floor (0.4%×15x = -6% ROE)
-    sl_pct_max:              float = 0.012    # [AUDIT] 2.0%→1.2%: ceiling (1.2%×15x = -18% ROE)
+    atr_sl_multiplier:       float = 2.0      # [AUDIT] 1.5→2.0: SL = 2× ATR (standard noise filter)
+    sl_pct_min:              float = 0.007    # [AUDIT] 0.4%→0.7%: floor raised to avoid market noise
+    sl_pct_max:              float = 0.015    # [AUDIT] 1.2%→1.5%: ceiling raised for high-vol assets
     # RR enforcement: TP1 minimum = sl_pct × tp1_min_rr ; TP2 minimum = sl_pct × tp2_min_rr
     tp1_min_rr_to_sl:        float = 0.6      # TP1 ≥ 0.6× SL distance
     tp2_min_rr_to_sl:        float = 1.5      # TP2 ≥ 1.5× SL distance (positive RR enforcement)
