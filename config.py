@@ -316,6 +316,19 @@ class ScalperConfig:
     early_trail_activation_pct:  float = 0.003  # [AUDIT] 0.4%→0.3%: lock profit lebih awal
     early_trail_distance_pct:    float = 0.002  # [AUDIT] 0.3%→0.2%: tighter trail
 
+    # ── Quick-profit exit: langsung close saat profit signifikan + harga berbalik ──
+    # Di Hyperliquid banyak asset max leverage 3-5x → ROE per % move kecil.
+    # Jangan tunggu full trailing cycle — ambil profit saat masih ada.
+    # Logic: jika floating >= quick_profit_threshold DAN retrace dari peak >= quick_profit_retrace,
+    # close FULL posisi langsung (tidak tunggu TP1/TP2/trail).
+    quick_profit_enabled:         bool  = True
+    quick_profit_threshold_pct:   float = 0.008  # aktivasi saat floating >= 0.8% price move
+    quick_profit_retrace_pct:     float = 0.003  # exit jika harga retrace 0.3% dari peak
+    # Leverage-aware scaling: semakin rendah leverage, threshold lebih kecil
+    # (karena ROE per % kecil, harus ambil profit lebih cepat)
+    quick_profit_low_lev_threshold: float = 0.005  # threshold untuk leverage <= 5x
+    quick_profit_low_lev_retrace:   float = 0.002  # retrace lebih ketat saat leverage rendah
+
     # ── [C5 FIX] Partial profit & breakeven — turunkan threshold ──
     # Sebelum: TP1=1.0×SL, TP2=1.5×SL, Trail=2.0×SL → hampir tidak tercapai (2/108 trade)
     # Sesudah: TP1=0.7×SL, TP2=1.0×SL, Trail=1.3×SL → tercapai lebih sering
@@ -362,20 +375,21 @@ class SignalConfig:
     # FIX #4: SHORT trades had 57.6% WR and net -$12.55 in audit data.
     # Structural bias: positive funding/basis almost always favors LONG on Hyperliquid.
     # Raise SHORT threshold significantly to only execute highest-conviction SHORT signals.
-    min_score_short_signal:  int   = 57       # [AUDIT Phase 1] SHORT same as LONG threshold (was 59)
-    min_score_short_auto:    int   = 57       # [AUDIT Phase 1] SHORT auto-execute same as LONG
+    min_score_short_signal:  int   = 62       # [FIX 2026-05-14] naik dari 57 — SHORT struktural lebih lemah di HL
+    min_score_short_auto:    int   = 62       # [FIX 2026-05-14] sama dengan signal threshold
 
     # Bull-Bear gap (LONG vs SHORT berbeda threshold)
     min_bull_bear_gap:       int   = 18       # LONG: minimum gap bull vs bear pts
-    min_bull_bear_gap_short: int   = 18       # [AUDIT Phase 1] SHORT same gap as LONG (was 20)
+    min_bull_bear_gap_short: int   = 25       # [FIX 2026-05-14] SHORT butuh gap lebih besar (naik dari 18)
+
+    # Minimum komponen teknikal (OI+Liq+OB) sebelum sinyal valid
+    # Data 2026-05-13: KAITO SHORT score=59 tapi OI=0+Liq=0+OB=0 — pure session score, bukan teknikal
+    min_technical_score_short: int = 10      # SHORT wajib punya setidaknya 10 pts dari 3 komponen utama
+    min_technical_score_long:  int = 5       # LONG sedikit lebih permisif
 
     # SHORT-specific filters (aktif saat ALLOW_SHORT = True)
-    # Solusi 2: Funding rate confirmation
-    # Real HL funding rates are typically +-0.00002; threshold must match that range
-    # FIX: fr=0.000000 is NEUTRAL — perfectly fine for SHORT.
-    # Only block SHORT when funding is strongly negative (shorts paying longs = market bullish).
-    short_min_funding_rate:  float = -0.0001  # SHORT valid if funding >= -0.0001
-                                               # Was 0.00001 which blocked neutral funding SHORTs
+    # Funding confirmation: block SHORT hanya jika funding sangat negatif (shorts sudah bayar longs)
+    short_min_funding_rate:  float = -0.0001  # SHORT valid jika funding >= -0.0001
     # Solusi 3: Anti-trend filter
     short_max_uptrend_pct:   float = 0.03     # Block SHORT jika 24h trend > +3% (jangan lawan trend)
 

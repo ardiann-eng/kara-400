@@ -2,6 +2,27 @@
 
 > Ditulis dari hasil membaca seluruh kode Python. Setiap angka berasal dari kode, bukan asumsi.
 > Bahasa: Indonesia, dengan istilah teknis dalam bahasa Inggris bila lebih tepat.
+>
+> **Last updated:** 2026-05-14 — sinkron dengan perubahan: SHORT threshold naik ke 62, technical-minimum gate, leverage-aware quick-profit exit, OI tension fallback di Liquidation analyzer, compounding fix di paper executor.
+
+---
+
+## RINGKASAN PERUBAHAN TERBARU (2026-05-14)
+
+| Area | Sebelum | Sesudah | File |
+|---|---|---|---|
+| SHORT signal threshold | 57 | **62** | `config.py` (`SignalConfig.min_score_short_signal`) |
+| SHORT auto-execute threshold | 57 | **62** | `config.py` (`min_score_short_auto`) |
+| SHORT bull-bear gap minimum | 18 | **25** | `config.py` (`min_bull_bear_gap_short`) |
+| Technical minimum gate SHORT | — | **OI+Liq+OB ≥ 10 pts** wajib | `engine/scoring_engine.py` |
+| Technical minimum gate LONG | — | **≥ 5 pts** | `engine/scoring_engine.py` |
+| Liquidation analyzer neutral funding | bull=0, bear=0 (no signal) | **bull=bear=tension** (min 1, max ~3) | `engine/analyzers/liquidation_analyzer.py` |
+| Quick-profit exit (Rule F0) | tidak ada | **Aktif** dengan leverage-aware threshold | `risk/risk_manager.py` |
+| Time exit saat profit | grace period sama dgn loss | **Exit langsung saat profit** | `risk/risk_manager.py` |
+| Paper executor compounding | equity = balance only | **equity = balance + unrealized semua posisi** | `execution/paper_executor.py` |
+| Scalper risk_per_trade_pct | 12% | **5%** | `config.py` (commit b5cb4f8) |
+| Margin cap | flat | **leverage-aware** | `risk/risk_manager.py` (commit 645e2d1) |
+| TP multiplier | besar | **lebih kecil** | (commit 645e2d1) |
 
 ---
 
@@ -159,8 +180,10 @@ Menggunakan OI USD sebagai proxy:
 Poin dibagi ke bull/bear berdasarkan funding direction:
 - Funding positif → longs crowded → lebih banyak ke bear (short liq tilt)
 - Funding negatif → shorts crowded → lebih banyak ke bull
+- **Funding netral (2026-05-14 fix)** → bull=bear=`max(base_points // 3, 1)` (min 1, max ~3 per sisi). Sebelumnya 0/0 yang membuat komponen ini "diam" untuk asset dengan funding netral; sekarang memberikan **OI tension score** kecil supaya scoring engine tetap punya sinyal dari semua 3 komponen.
 
 *Contoh: OI $300M, funding +0.00003 → base_points=8, tilt=1 → bull=3, bear=5*
+*Contoh netral: OI $300M, funding ≈ 0 → base_points=8, tension=2 → bull=2, bear=2*
 
 ---
 
@@ -311,9 +334,13 @@ Jika tidak ada 3-of-4 consensus → signal tidak dibuat (`return None, score`).
 **Scalper Mode:** Arah ditentukan dari `bull_pts ≥ bear_pts` setelah semua komponen dihitung. Tidak ada 3-of-4 filter di scalper.
 
 **SHORT tambahan filter (hanya berlaku jika SHORT diizinkan):**
-- Funding rate harus ≥ +0.00001 (longs sedang crowded, bukan shorts)
+- Funding rate harus ≥ **-0.0001** (block hanya saat funding sangat negatif — shorts sudah bayar longs). Sebelumnya `+0.00001` yang terlalu ketat dan membuang neutral-funding SHORTs.
 - 24h trend tidak boleh > +3% ke atas
-- Bull-bear gap minimal 20 poin (vs 18 untuk LONG)
+- Bull-bear gap minimal **25 poin** (naik dari 18 — fix 2026-05-14: SHORT struktural lebih lemah di HL karena positive funding bias)
+- **Technical minimum gate (BARU 2026-05-14):** `OI_bear + Liq_bear + OB_bear ≥ 10`. Mencegah sinyal "session-only" lolos — contoh nyata: KAITO SHORT score=59 tapi OI=0, Liq=0, OB=0 (pure session bonus). Sekarang diblok.
+
+**LONG tambahan filter (BARU 2026-05-14):**
+- **Technical minimum gate:** `OI_bull + Liq_bull + OB_bull ≥ 5`. Lebih permisif dari SHORT karena positive funding bias HL favors LONG.
 
 ---
 
@@ -321,12 +348,16 @@ Jika tidak ada 3-of-4 consensus → signal tidak dibuat (`return None, score`).
 
 ### 3a. Threshold yang Harus Dilewati
 
-| Mode | Threshold Signal | Threshold Auto-Execute |
-|---|---|---|
-| Standard | Score ≥ 55 (config), tapi kode engine pakai 62 | Score ≥ 60 (user config, locked) |
-| Scalper | Score ≥ 60 (HARD, tidak bisa diubah user) | Score ≥ 60 |
+| Mode | Side | Threshold Signal | Threshold Auto-Execute |
+|---|---|---|---|
+| Standard | LONG | Score ≥ 55 (config), tapi kode engine pakai 62 | Score ≥ 60 (user config, locked) |
+| Standard | SHORT | **Score ≥ 62** (naik dari 57, fix 2026-05-14) | **Score ≥ 62** |
+| Scalper | LONG | Score ≥ 60 (HARD, tidak bisa diubah user) | Score ≥ 60 |
+| Scalper | SHORT | **Score ≥ 62** (naik dari 57) | **Score ≥ 62** |
 
-**Catatan penting:** Ada inkonsistensi antara `config.SIGNAL.min_score_to_signal = 55` dan kode di `_run_standard()` yang hardcode threshold 62 (`getattr(config.SIGNAL, 'min_score_to_signal', 62)`). Yang berlaku efektif adalah **62** untuk standard mode.
+**Catatan penting:** Ada inkonsistensi antara `config.SIGNAL.min_score_to_signal = 55` dan kode di `_run_standard()` yang hardcode threshold 62. Yang berlaku efektif adalah **62** untuk standard mode LONG.
+
+**Alasan SHORT lebih tinggi (2026-05-14):** Audit data menunjukkan SHORT trades WR 57.6% dengan net -$12.55 di Hyperliquid karena structural bias — positive funding/basis hampir selalu favor LONG. Threshold dinaikkan agar hanya highest-conviction SHORT yang lolos.
 
 ---
 
@@ -342,13 +373,14 @@ Berikut urutan filter lengkap, berurutan dari scoring hingga eksekusi:
 4. **Spread Filter (Standard)** — Jika bid-ask spread > 0.25%, asset di-reject.
 5. **Spread Filter (Scalper)** — Jika spread > 0.15%, asset di-reject.
 6. **3-of-4 Consensus (Standard only)** — Jika tidak ada 3 dari 4 indikator aligned, tidak ada sinyal.
-7. **Bull-Bear Gap (Standard)** — Gap minimal 18 poin (LONG) atau 20 poin (SHORT).
-8. **SHORT Funding Filter** — SHORT hanya valid jika funding ≥ +0.00001.
+7. **Bull-Bear Gap** — Gap minimal **18 poin (LONG)** atau **25 poin (SHORT)** (naik dari 20 di fix 2026-05-14).
+8. **SHORT Funding Filter** — SHORT diblok hanya jika funding < **-0.0001** (sebelumnya `< +0.00001`, terlalu ketat).
 9. **SHORT Anti-Trend Filter** — SHORT diblok jika 24h trend > +3%.
-10. **Momentum Consensus (Scalper)** — Jika 1m candles berlawanan dengan sinyal, di-reject.
-11. **MTF Alignment (Scalper)** — Jika 15m EMA berlawanan kuat dan skor < 60 setelah penalty, di-reject.
-12. **Score Threshold** — Standard < 62 atau Scalper < 60.
-13. **Signal Cooldown** — Standard: 15 menit per aset. Scalper: 5 menit per aset.
+10. **Technical Minimum Gate (BARU 2026-05-14)** — SHORT diblok jika `OI_bear + Liq_bear + OB_bear < 10`. LONG diblok jika `OI_bull + Liq_bull + OB_bull < 5`. Mencegah sinyal "session-only" tanpa konfirmasi fundamental/teknikal.
+11. **Momentum Consensus (Scalper)** — Jika 1m candles berlawanan dengan sinyal, di-reject.
+12. **MTF Alignment (Scalper)** — Jika 15m EMA berlawanan kuat dan skor < 60 setelah penalty, di-reject.
+13. **Score Threshold** — Standard LONG < 62 atau SHORT < 62. Scalper LONG < 60 atau SHORT < 62.
+14. **Signal Cooldown** — Standard: 15 menit per aset. Scalper: 5 menit per aset.
 
 **Di dalam `_handle_signals()` (memblok setelah sinyal dibuat):**
 
@@ -534,6 +566,40 @@ Pemisahan dari scan loop krusial: bahkan jika scan sedang lambat karena throttle
 
 ---
 
+### 4d.1. Quick-Profit Exit / Rule F0 (BARU 2026-05-14)
+
+**Tujuan:** Di Hyperliquid banyak aset di-cap max leverage 3-5×, sehingga ROE per % move kecil. Trailing stop biasa terlalu lambat — quick-profit exit mengambil profit langsung saat harga berbalik dari peak.
+
+**Aktif kapan?**
+- `floating_pnl >= threshold` (lihat tabel di bawah)
+- **DAN** harga retrace dari peak `>= retrace_threshold`
+- Bekerja **kapan saja**, tidak peduli TP1 sudah hit atau belum
+
+**Leverage-aware threshold:**
+
+| Leverage Posisi | Floating Threshold | Retrace Threshold | Trigger Behavior |
+|---|---|---|---|
+| ≤ 5× (low-lev assets: BLUR, KAITO, dll) | **0.5%** | **0.2%** | Close FULL posisi langsung |
+| > 5× (BTC, ETH, FARTCOIN, dll) | **0.8%** | **0.3%** | Close FULL posisi langsung |
+
+**Konfigurasi (`config.py` → ScalperConfig):**
+```
+quick_profit_enabled:           True
+quick_profit_threshold_pct:     0.008  (0.8% — untuk leverage > 5x)
+quick_profit_retrace_pct:       0.003  (0.3% retrace)
+quick_profit_low_lev_threshold: 0.005  (0.5% — untuk leverage <= 5x)
+quick_profit_low_lev_retrace:   0.002  (0.2% retrace)
+```
+
+**Contoh trigger:**
+- BLUR LONG 3×, entry $0.026 → harga naik ke $0.02614 (+0.54% > 0.5% threshold)
+- Harga turun ke $0.02609 (retrace dari peak 0.02% — belum cukup)
+- Harga turun lagi ke $0.02608 (retrace 0.23% > 0.2%) → **EXIT FULL**
+
+**Catatan urutan eksekusi:** Rule F0 dijalankan **sebelum** Rule F (early trailing) dan **sebelum** time exit. Artinya kalau quick-profit threshold terpenuhi, posisi ditutup tanpa nunggu trailing stop cycle yang panjang.
+
+---
+
 ### 4e. Stop Loss
 
 **Kalkulasi saat entry:**
@@ -560,8 +626,12 @@ KARA menggunakan **momentum-based time exit** untuk standard mode, bukan hard ti
 **Rule B — Flatline** (aktif setelah 30 menit):
 - Jika floating PnL < ±0.15% selama 30 menit → kapital redeployed, exit
 
-**Rule C — TP1 sudah hit → TIDAK ada time exit**
-- Jika posisi sudah TP1 dan trailing aktif, **tidak ada time exit**. Biarkan trailing stop yang handle
+**Rule C — TP1 sudah hit → grace period 50%, bukan tanpa time exit**
+- Jika posisi sudah TP1, `effective_max_hold = max_hold × 1.5` (50% extension)
+- **Setelah extended deadline lewat:**
+  - Jika posisi **profit** → exit segera (`time_exit` action). Jangan tahan profit lebih lama dari max_hold extended. *(2026-05-14 fix — sebelumnya selalu skip time exit kalau profit)*
+  - Jika posisi **loss** + masih dalam grace + recoverable → tunggu
+  - Lainnya → exit paksa
 
 **Rule D — Hard Safety Net 6 jam:**
 - Jika sudah 6 jam dan TP1 belum pernah tercapai, posisi ditutup paksa
@@ -654,6 +724,21 @@ Jika equity ≥ 150% dari start → risk_pct dikali 0.80 (kurangi agresivitas sa
 - Equity ≤ 80% dari start → risk_pct dikali 0.50 (mode hati-hati)
 - Drawdown ≥ 15% dari peak → size_usd dipotong 50% lagi
 
+**Fix Paper Executor 2026-05-14 — equity tracking benar:**
+
+Sebelumnya `save_paper_state(chat_id, balance, balance)` — equity di-save sama dengan balance tanpa memperhitungkan unrealized PnL dari posisi yang masih terbuka. Akibatnya:
+- `peak_balance` di-restore dari `balance` saja saat restart → peak tidak akurat
+- Drawdown calculation berbasis peak yang salah → drawdown guard salah aktif/non-aktif
+- Compounding decision (≥150% / ≤80% multipliers) berbasis equity yang salah
+
+**Sekarang:**
+```python
+total_unrealized = sum(p.pnl_unrealized for p in self._positions.values() if p.status == OPEN)
+user_db.save_paper_state(chat_id, balance, balance + total_unrealized)
+```
+
+Equity sekarang = `realized_balance + unrealized_dari_semua_posisi_terbuka`. Berlaku saat partial close, full close, dan close_position. Saat restart, `peak_balance` dihitung dari `max(equity_tersimpan, balance)` — bukan hardcode balance saja.
+
 ---
 
 ## BAGIAN 7: NOTIFIKASI TELEGRAM
@@ -693,6 +778,25 @@ R:R = X.Xx
 ---
 
 ## BAGIAN 8: TEMUAN DARI KODE
+
+> Section ini di-update 2026-05-14. Item yang sudah di-fix dipindahkan ke "Sudah Diperbaiki" di bawah.
+
+### Sudah Diperbaiki (2026-05-14)
+
+| Temuan | Status | Commit/Fix |
+|---|---|---|
+| SHORT threshold terlalu rendah (57) → WR 57.6% net loss | ✅ Naik ke 62 | `config.py` |
+| Bull-bear gap SHORT sama dengan LONG (18) | ✅ Naik ke 25 untuk SHORT | `config.py` |
+| Sinyal "session-only" lolos (score 59, OI=0, Liq=0) | ✅ Technical minimum gate ditambah | `scoring_engine.py` |
+| Liquidation analyzer return 0/0 saat funding netral | ✅ OI tension fallback (bull=bear=1-3) | `liquidation_analyzer.py` |
+| Paper executor: equity = balance saja (no unrealized) | ✅ Equity = balance + unrealized semua posisi | `paper_executor.py` |
+| Time exit nahan profit terlalu lama saat TP1 hit | ✅ Exit segera saat profit di max_hold | `risk_manager.py` |
+| Low-lev (3-5×) asset profit tipis hilang karena trail lambat | ✅ Quick-profit exit Rule F0 dengan leverage-aware threshold | `risk_manager.py` |
+| Scalper margin tidak konsisten antar leverage | ✅ Leverage-aware risk_pct + margin cap | commit 83fbd7a, 645e2d1 |
+| Scalper risk_per_trade_pct kebesaran (12%) | ✅ Turun ke 5% | commit b5cb4f8 |
+| `localize_for_user` override TP/SL merusak RR | ✅ Tidak override lagi | commit 62e8971 |
+
+---
 
 ### Komponen yang Diimplementasikan tapi Tidak Terkoneksi
 
@@ -751,8 +855,35 @@ Ada konfigurasi "tutup setelah 8 jam jika profit 1-3%" tapi tidak ada kode yang 
 
 ---
 
-## VERDICT
+## VERDICT (Update 2026-05-14)
 
 Arsitektur KARA secara keseluruhan **sound dan terstruktur dengan baik**: pemisahan antara data collection (WS + REST), scoring engine (3 analyzer independen), risk management, executor, dan notifikasi sudah jelas. Pipeline dari sinyal ke eksekusi melewati banyak filter berlapis yang membuat bot sulit masuk trade sembarangan.
 
-**Kesenjangan terbesar antara apa yang KARA seharusnya lakukan dan apa yang sebenarnya terjadi adalah: bot beroperasi dalam mode FULL_AUTO total, tapi risk management thresholds di-set sangat longgar** — daily loss limit 90% dan kill switch di drawdown 95% secara efektif berarti tidak ada pelindung kapital yang bermakna sampai akun hampir habis. Dikombinasikan dengan position sizing yang mengambil 2.5–3.5% risk per trade dengan leverage 10-25x pada mode scalper, satu losing streak 5-6 trade bisa menghapus 20-30% akun sebelum bot pause. Sementara itu, komponen yang sebenarnya bisa melindungi (AI edge filter, semi-auto confirmation) baru aktif setelah 300 trades atau tidak aktif sama sekali (FULL_AUTO bypass). Bagi user baru dengan saldo kecil, gap antara "bot ini punya 24 filter sebelum trade" dan "bot ini bisa kehilangan 90% saldo sebelum berhenti" adalah sumber risiko yang paling kritis.
+### Perbaikan Sejak Audit Terakhir
+
+Set perubahan **2026-05-14** menyelesaikan beberapa kelemahan kritis:
+
+1. **SHORT bias di Hyperliquid sudah dimitigasi** — threshold naik ke 62, gap minimum 25, technical minimum gate 10 pts. Sinyal seperti "KAITO SHORT score 59 dengan OI=0/Liq=0" sekarang diblok.
+2. **Compounding tracking benar** — paper executor sekarang save equity = `balance + unrealized` semua posisi, sehingga peak/drawdown/dynamic risk multiplier bekerja akurat.
+3. **Low-leverage assets profitable** — quick-profit exit dengan threshold leverage-aware (0.5% untuk lev ≤5×) berarti BLUR/KAITO/AXS dengan max 3-5× tidak hilang profit karena trail terlalu lambat.
+4. **Time exit tidak nahan profit** — saat max_hold + grace lewat dan posisi profit, langsung exit. Sebelumnya selalu skip time exit kalau TP1 hit, yang berisiko balik ke loss.
+5. **Liquidation analyzer tidak diam saat funding netral** — OI tension fallback memberikan sinyal kecil dari OI besar tanpa funding edge yang jelas.
+
+### Risiko yang Tersisa
+
+**Risk management thresholds masih sangat longgar:**
+- Daily loss limit **90%** dari equity hari ini → trading pause baru aktif saat akun hampir habis
+- Kill switch di drawdown **95%** dari peak → effective trigger di saldo nyaris nol
+- Auto-reset kill switch saat equity recovery → kill switch bisa hilang sebelum user notice
+
+**Untuk modal kecil ($60-100):**
+- Scalper risk 5% × leverage 15-25× pada 3 posisi concurrent = exposure ~75% per cycle
+- Quick-profit exit + technical minimum gate mengurangi loss frequency, tapi **tidak menggantikan daily loss limit yang ketat**
+- Rekomendasi: turunkan `daily_loss_pause_pct` ke 15-20%, `kill_switch_drawdown_pct` ke 25-30%, **selama equity belum tumbuh > $500**
+
+**FULL_AUTO masih aktif tanpa konfirmasi user:**
+Infrastruktur semi-auto Telegram lengkap tapi `FULL_AUTO = True` bypass. Untuk user pemula, opsi konfirmasi manual mungkin lebih aman.
+
+### Status Akhir
+
+Bot sekarang **secara signifikan lebih konservatif di sisi entry** (technical gate, SHORT threshold tinggi) dan **lebih protektif di sisi exit** (quick-profit, profit-aware time exit). Bagian yang belum tersentuh adalah **risk envelope** (daily limits, kill switch threshold) — di sini user perlu manual tune berdasarkan ukuran modal masing-masing.

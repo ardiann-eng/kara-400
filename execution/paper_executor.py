@@ -72,8 +72,9 @@ class PaperExecutor:
         if state:
             self._balance = state["balance"]
             self._available = state["balance"]
-            # Remove direct overwrite of _daily_start_balance to use RiskManager instead
-            self._peak_balance = max(state["balance"], state.get("equity", 0))
+            # Compounding fix: peak_balance pakai equity tersimpan (bukan hardcode balance)
+            # equity sudah = balance + unrealized saat disimpan, jadi ini nilai tertinggi yang valid
+            self._peak_balance = max(state.get("equity", state["balance"]), state["balance"])
             log.debug(f" [PAPER] Restored balance from DB: {format_usd(self._balance)}")
         
         positions = user_db.load_paper_positions(chat_id)
@@ -358,7 +359,12 @@ class PaperExecutor:
         self._positions.pop(position_id, None)
         from core.db import user_db
         user_db.remove_paper_position(position_id)
-        user_db.save_paper_state(self.chat_id, self._balance, self._balance)
+        # Compounding fix: equity = realized balance + unrealized dari posisi lain yang masih buka
+        _unrealized_others = sum(
+            p.pnl_unrealized for p in self._positions.values()
+            if p.status == PositionStatus.OPEN
+        )
+        user_db.save_paper_state(self.chat_id, self._balance, self._balance + _unrealized_others)
 
         # Total PnL for the record (cumulative)
         total_pnl = pos.pnl_realized
@@ -518,7 +524,12 @@ class PaperExecutor:
         from core.db import user_db
         if pos.status == PositionStatus.OPEN:
             user_db.save_paper_position(self.chat_id, pos)
-        user_db.save_paper_state(self.chat_id, self._balance, self._balance + pos.pnl_unrealized)
+        # Compounding fix: equity = realized balance + unrealized SEMUA posisi terbuka
+        _total_unrealized = sum(
+            p.pnl_unrealized for p in self._positions.values()
+            if p.status == PositionStatus.OPEN
+        )
+        user_db.save_paper_state(self.chat_id, self._balance, self._balance + _total_unrealized)
 
         return {**action, "pnl": partial_pnl, "position_id": pos.position_id}
 

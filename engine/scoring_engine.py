@@ -539,6 +539,22 @@ class ScoringEngine:
                 self._skip_count_since_summary += 1
                 return None, score
 
+            # [FIX 2026-05-14] Technical minimum gate for SHORT
+            # Block SHORT jika OI+Liq fundamental score terlalu rendah.
+            # Mencegah sinyal "session-only" lolos — misal score=59 tapi OI=0,Liq=0.
+            # OB score tidak tersedia di scope ini, threshold pakai nilai lebih kecil (6).
+            _tech_fundamental = (oi_bear or 0) + (liq_bear or 0)
+            _min_tech_short = max(getattr(config.SIGNAL, 'min_technical_score_short', 10) - 4, 6)
+            if _tech_fundamental < _min_tech_short:
+                log.info(
+                    f"[SKIP] {asset} | score={score} | side=SHORT | "
+                    f"reason=weak_technical | context=fundamental_pts={_tech_fundamental:.1f}<{_min_tech_short} "
+                    f"(OI_bear={oi_bear:.1f} Liq_bear={liq_bear:.1f})"
+                )
+                self.skip_counters["weak_technical_short"] = self.skip_counters.get("weak_technical_short", 0) + 1
+                self._skip_count_since_summary += 1
+                return None, score
+
         # ── [QUANT AGGRESSION 2026] Funding extreme = CONTRARIAN OPPORTUNITY, bukan veto.
         # Sebelumnya veto membuang 15-20% sinyal. Sekarang: flagkan sebagai "fade_mode".
         fade_mode = False
@@ -1511,6 +1527,17 @@ class ScoringEngine:
             max_up = getattr(config.SIGNAL, 'short_max_uptrend_pct', 0.02)
             if trend_pct > max_up:
                 log.debug(f"[{asset}] SHORT BLOCKED: 24h uptrend {trend_pct*100:.1f}% > {max_up*100:.0f}% (jangan lawan trend)")
+                return None, 0
+
+            # [FIX 2026-05-14] Minimum technical gate: OI_bear + Liq_bear >= threshold
+            # Blok SHORT jika 3 komponen teknikal utama terlalu lemah (pure session score).
+            _tech_bear = (oi_bear or 0) + (liq_bear or 0) + (ob_bear or 0)
+            _min_tech = getattr(config.SIGNAL, 'min_technical_score_short', 10)
+            if _tech_bear < _min_tech:
+                log.debug(
+                    f"[{asset}] SHORT BLOCKED: technical score {_tech_bear:.1f} < {_min_tech} "
+                    f"(OI_bear={oi_bear:.1f} Liq_bear={liq_bear:.1f} OB_bear={ob_bear:.1f})"
+                )
                 return None, 0
         else:
             return None, 0

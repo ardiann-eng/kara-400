@@ -158,9 +158,14 @@ class LiquidationAnalyzer:
                 bear_proxy = 0
                 reasons.append(f"{risk_label} + negative funding -> BULLISH liq tilt (shorts crowded)")
             else:
-                bull_proxy = 0
-                bear_proxy = 0
-                reasons.append(f"{risk_label} (neutral funding, no liq edge)")
+                # Funding netral = tidak ada crowding yang jelas, tapi OI besar tetap
+                # berarti ada open interest yang siap bergerak ke salah satu arah.
+                # Berikan base tension score kecil (dibagi rata) agar komponen ini
+                # tidak keluar 0/0 — scoring engine butuh sinyal dari semua 3 komponen.
+                tension = max(base_points // 3, 1)  # min 1, max ~3
+                bull_proxy = tension
+                bear_proxy = tension
+                reasons.append(f"{risk_label} (neutral funding, OI tension +{tension} each side)")
 
             bull += bull_proxy
             bear += bear_proxy

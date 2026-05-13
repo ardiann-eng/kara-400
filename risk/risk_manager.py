@@ -1283,6 +1283,51 @@ class RiskManager:
                     if existing == 0 or trail_sl < existing:
                         position.trailing_stop_price = trail_sl
 
+        # ── Rule F0: Quick-profit exit — ambil profit langsung saat harga berbalik ──
+        # Relevan terutama untuk leverage rendah (3-5x) di Hyperliquid di mana
+        # ROE per % move kecil — jangan tunggu ATR trail cycle yang panjang.
+        # Aktif bahkan setelah TP1 (untuk close sisa posisi dengan cepat).
+        scfg_qp = SCALPER
+        if getattr(scfg_qp, 'quick_profit_enabled', True) and floating > 0:
+            pos_lev = getattr(position, 'leverage', 15)
+
+            # Sesuaikan threshold berdasarkan leverage aktual posisi
+            if pos_lev <= 5:
+                qp_threshold = getattr(scfg_qp, 'quick_profit_low_lev_threshold', 0.005)
+                qp_retrace   = getattr(scfg_qp, 'quick_profit_low_lev_retrace', 0.002)
+            else:
+                qp_threshold = getattr(scfg_qp, 'quick_profit_threshold_pct', 0.008)
+                qp_retrace   = getattr(scfg_qp, 'quick_profit_retrace_pct', 0.003)
+
+            if floating >= qp_threshold:
+                # Hitung retrace dari peak
+                if position.side == Side.LONG:
+                    peak_qp  = max(position.trailing_high, current_price)
+                    retrace_qp = (peak_qp - current_price) / max(peak_qp, 1e-9)
+                else:
+                    peak_qp  = min(position.trailing_high, current_price)
+                    retrace_qp = (current_price - peak_qp) / max(peak_qp, 1e-9)
+
+                if retrace_qp >= qp_retrace:
+                    log.info(
+                        f"[QUICK-PROFIT] {position.asset} | lev={pos_lev}x | "
+                        f"floating=+{floating*100:.2f}% >= {qp_threshold*100:.2f}% | "
+                        f"retrace={retrace_qp*100:.2f}% >= {qp_retrace*100:.2f}% | "
+                        f"tp1_hit={position.tp1_hit} → EXIT FULL"
+                    )
+                    return {
+                        "action":      "trailing_stop",
+                        "close_ratio": 1.0,
+                        "price":       current_price,
+                        "trail_price": current_price,
+                        "trail_pct":   qp_retrace,
+                        "message":     (
+                            f"💰 Quick-profit exit: +{floating*100:.2f}% "
+                            f"(lev={pos_lev}x, retrace {retrace_qp*100:.2f}% dari peak). "
+                            f"Ambil profit sebelum balik lebih dalam."
+                        )
+                    }
+
         # ── Rule F: Early Trailing — profit tapi belum TP1 ───────────────
         # Aktif saat floating >= threshold (misal +0.5%) tanpa nunggu TP1 flag.
         # Proteksi profit saat harga balik sebelum mencapai TP1.
@@ -1346,19 +1391,34 @@ class RiskManager:
                 opened = opened.replace(tzinfo=_tz.utc)
             hold_minutes = (now - opened).total_seconds() / 60.0
 
-            # [QUANT AGGRESSION] Runner grace: if TP1 already hit, extend deadline 50%
+            # Runner grace: jika TP1 sudah hit, extend deadline 50%
             effective_max = max_hold
             if position.tp1_hit:
                 effective_max = max_hold * 1.5
-            # If in profit and near TP2, don't time-exit at all
-            if position.tp1_hit and floating > 0:
-                # Runner in profit — let ATR trail handle it, skip time exit
-                pass
-            elif hold_minutes >= effective_max:
-                is_in_loss = floating < 0
-                is_within_grace = hold_minutes < (effective_max + grace)
-                is_recoverable = floating > soft_floor
 
+            if hold_minutes >= effective_max:
+                is_in_loss     = floating < 0
+                is_in_profit   = floating > 0
+                is_within_grace   = hold_minutes < (effective_max + grace)
+                is_recoverable    = floating > soft_floor
+
+                # Saat profit: exit segera — jangan tahan lebih lama dari max_hold.
+                # Quick-profit exit (Rule F0) mestinya sudah handle sebelum ini,
+                # tapi sebagai safety net: jika masih di sini dan profit → exit.
+                if is_in_profit:
+                    return {
+                        "action":      "time_exit",
+                        "close_ratio": 1.0,
+                        "price":       current_price,
+                        "pnl":         position.pnl_unrealized,
+                        "position_id": position.position_id,
+                        "message":     (
+                            f"⏱️ Time exit (profit) {hold_minutes:.0f}m/{effective_max:.0f}m "
+                            f"(score={entry_score}). PnL: +{floating*100:.2f}%. Ambil profit."
+                        )
+                    }
+
+                # Saat loss: beri grace period untuk recovery
                 if is_in_loss and is_within_grace and is_recoverable:
                     pass  # loss tapi masih dalam batas recovery → tunggu
                 else:
