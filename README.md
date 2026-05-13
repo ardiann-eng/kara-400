@@ -1,68 +1,57 @@
-# 🌸 KARA — Intelligence Trading Partner
+# KARA Database Exporter
 
-**KARA-400** is a professional-grade, multi-user automated trading engine for **Hyperliquid Perps**, featuring a premium Telegram interface, real-time IDR localization, and an integrated AI Knowledge Base.
+## Tujuan
+Mengekspor database SQLite `kara_data.db` (di Railway) ke file CSV yang bisa dibaca AI IDE untuk audit scoring & risk management.
 
----
+## File Hasil Export
+| File | Keterangan |
+|---|---|
+| `_schema.json` | Schema lengkap semua tabel (nama kolom, tipe data, PK) |
+| `{nama_tabel}.csv` | Satu file CSV per tabel di database |
+| `SCORING_AUDIT.csv` | View khusus: trades + komponen scoring + korelasi per komponen |
+| `SCORING_AUDIT_JOINED.csv` | Jika tabel trades dan signals terpisah, ini hasil JOIN-nya |
 
-## ✨ Key Features
+## Cara Pakai di Railway
 
-- **👥 Multi-User Architecture**: Isolated trading sessions per user. Each subscriber gets their own balance, risk settings, and position management.
-- **🇮🇩 IDR Localization**: All Telegram notifications (`/status`, `/pos`, `/journal`) are displayed in Indonesian Rupiah (IDR) using real-time USD/IDR conversion.
-- **🚀 Dual Trading Modes**:
-    - **Standard**: Secure, swing-oriented trading with structured Risk/Reward.
-    - **Scalper**: Ultra-aggressive, high-leverage mode for rapid market cycles.
-- **🧠 AI Knowledge Base**: Integrated `KNOWLEDGE_BASE.md` that serves as the "source of truth" for the bot's logic, risk math, and strategy.
-- **📱 Premium Telegram UI**: Interactive cards with detailed "Alasan KARA" (AI analysis), [Take Trade] buttons, and real-time PnL updates.
-- **📊 Web Dashboard**: Modern, glassmorphism-style dashboard for real-time market monitoring and admin oversight.
-- **🛡️ Advanced Risk Management**: Per-user position sizing, drawdown kill-switches, and automatic stop-loss adjustments.
+### Opsi 1: Railway CLI (Paling Cepat)
+```bash
+# Di laptop, dalam folder repo KARA
+railway login
+railway link  # pilih project KARA
+railway run python export_kara_db.py
 
----
+# Download hasilnya (gunakan Railway dashboard atau SCP jika punya akses)
+```
 
-## 🛠️ Architecture
+### Opsi 2: One-Off Job di Dashboard
+1. Push `export_kara_db.py` ke repo
+2. Buka Railway Dashboard -> project KARA
+3. Buat "Job" baru, set Start Command: `python export_kara_db.py`
+4. Jalankan job, lalu download folder `kara_export/` dari volumes
 
-KARA is built for scalability and performance:
-- **Core**: Python 3.10+ (Asyncio-driven).
-- **Persistence**: JSON/SQLite based storage with Persistent Volume support for Cloud hosting.
-- **API**: Hyperliquid Python SDK (Testnet/Mainnet support).
-- **Communication**: python-telegram-bot v21+.
-- **Dashboard**: FastAPI + TailwindCSS + Lightweight-Charts for the web UI.
+### Opsi 3: Jalankan di Local (jika DB sudah diunduh)
+```bash
+# Letakkan kara_data.db di folder yang sama
+python export_kara_db.py
 
----
+# Hasil ada di folder kara_export/
+```
 
-## 🚀 Quick Start (Deployment on Railway)
+## Environment Variables (Opsional)
+| Variable | Default | Keterangan |
+|---|---|---|
+| `KARA_DB_PATH` | `kara_data.db` | Path ke file SQLite |
+| `KARA_EXPORT_DIR` | `kara_export` | Folder output CSV |
 
-KARA is optimized for **Railway** deployment.
+## Setelah Export
+1. Zip folder `kara_export/`
+2. Letakkan di root project KARA di laptop
+3. AI IDE (Claude Code / Cursor) akan otomatis scan file CSV saat audit
 
-1. **Fork this repository** (ensure it is **Private**).
-2. **Setup Environment Variables**:
-   ```env
-   TELEGRAM_TOKEN=your_bot_token
-   TELEGRAM_CHAT_ID=your_admin_id
-   HL_PRIVATE_KEY=your_wallets_private_key
-   USD_TO_IDR=15850
-   DB_PATH=/app/storage/kara_data.db
-   STORAGE_DIR=/app/storage
-   ```
-3. **Mount a Volume**: On Railway, mount a persistent volume at `/app/storage` to ensure your trade history and user data survive restarts.
-4. **Deploy**: KARA will automatically detect the environment and start the Telegram Bot + Dashboard.
+## Catatan untuk Audit Scoring
+Script otomatis mendeteksi kolom scoring (OB_, OI_, RSI, CVD, Volume, MTF, dll).
+Jika ditemukan, script menghitung korelasi tiap komponen dengan PnL dan menandai:
+- `[KEEP]` jika |correlation| > 0.15
+- `[REMOVE/ZERO]` jika |correlation| <= 0.15
 
----
-
-## 📜 Commands
-
-- `/start`: Register and initialize a new paper trading account with Rp1.000.000.
-- `/status`: Check your equity, daily PnL, and current drawdown in IDR.
-- `/pos`: View active positions with interactive buttons to close or manage.
-- `/mode`: Switch between **Standard** and **Scalper** strategies.
-- `/journal`: Detailed summary of your performance (Trade Journal).
-- `/live`: (Admin) Toggle between Paper and Live trading modes.
-
----
-
-## ⚠️ Disclaimer
-
-Trading futures involves significant risk. KARA is provided as-is. Use the **Paper Trading** mode extensively before committing real capital.
-
----
-
-**Built with 💜 by Antigravity AI for the KARA-400 Project.**
+Hasil perhitungan ini tercetak di log dan bisa digunakan untuk kalibrasi bobot.

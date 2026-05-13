@@ -21,17 +21,20 @@ class UserSession:
         # Hydrate initial balances
         self.risk_mgr.reset_daily(self.user.paper_balance_usd)
         self.risk_mgr._peak_balance = self.user.paper_balance_usd
+
+        # [AUDIT FIX 2026-05-13] Get WS market cache for orderbook-based slippage
+        from data.ws_client import market_cache
         
         # Instantiate executor
         if self.user.config.bot_mode == BotMode.PAPER:
-            self.executor = PaperExecutor(self.risk_mgr, initial_balance=self.user.paper_balance_usd, chat_id=self.user.chat_id)
+            self.executor = PaperExecutor(self.risk_mgr, initial_balance=self.user.paper_balance_usd, chat_id=self.user.chat_id, market_cache=market_cache)
         elif self.user.config.bot_mode == BotMode.LIVE:
             from execution.live_executor import LiveExecutor
             from data.hyperliquid_client import HyperliquidClient
             
             if not self.user.hl_agent_secret or not self.user.hl_agent_address:
                 log.error(f"User {self.user.chat_id} is in LIVE mode but missing Agent Secret/Address. Falling back to PAPER.")
-                self.executor = PaperExecutor(self.risk_mgr, initial_balance=self.user.paper_balance_usd, chat_id=self.user.chat_id)
+                self.executor = PaperExecutor(self.risk_mgr, initial_balance=self.user.paper_balance_usd, chat_id=self.user.chat_id, market_cache=market_cache)
             else:
                 self.user_client = HyperliquidClient(
                     wallet_address=self.user.hl_agent_address,
@@ -39,7 +42,7 @@ class UserSession:
                 )
                 self.executor = LiveExecutor(self.user.chat_id, self.user_client, self.risk_mgr)
         else:
-            self.executor = PaperExecutor(self.risk_mgr, initial_balance=self.user.paper_balance_usd, chat_id=self.user.chat_id)
+            self.executor = PaperExecutor(self.risk_mgr, initial_balance=self.user.paper_balance_usd, chat_id=self.user.chat_id, market_cache=market_cache)
             
     async def initialize(self):
         """Perform async tasks like connecting the HL client and syncing chain state."""

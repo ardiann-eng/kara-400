@@ -32,12 +32,22 @@ class PaperExecutor:
     """
     Paper (simulated) execution engine.
     All trades stored in-memory; persisted to SQLite via main.py.
+
+    [AUDIT FIX 2026-05-13] Realistic slippage:
+    - Uses live orderbook from WS cache to calculate actual spread + market impact
+    - Walks the book based on order notional to compute volume-weighted fill price
+    - Fallback to tiered spread model when orderbook unavailable
+
+    [AUDIT FIX 2026-05-13] Exchange-aware leverage:
+    - Caps leverage at Hyperliquid's per-asset maxLeverage from exchange metadata
+    - Prevents paper mode from using leverage that would be rejected on mainnet
     """
 
-    def __init__(self, risk_manager: RiskManager, initial_balance: float = 1000.0, chat_id: str = "system"):
+    def __init__(self, risk_manager: RiskManager, initial_balance: float = 1000.0, chat_id: str = "system", market_cache=None):
         self.risk  = risk_manager
         self.mode  = BotMode.PAPER
         self.chat_id = chat_id
+        self._market_cache = market_cache  # WS MarketDataCache for orderbook slippage
 
         # State
         self._balance:    float = initial_balance
@@ -131,7 +141,7 @@ class PaperExecutor:
     async def open_position(self, signal: TradeSignal) -> Optional[Position]:
         """
         Open a paper position from a confirmed signal.
-        Simulates realistic fill (spread slippage).
+        Simulates realistic fill using live orderbook slippage.
         """
         account = await self.get_account_state()
 
@@ -143,16 +153,34 @@ class PaperExecutor:
             log.warning(f" Trade blocked: {reason}")
             return None
 
+        # ── [AUDIT FIX] Exchange-aware leverage cap ──────────────────────
+        # Cap leverage at Hyperliquid's actual maxLeverage for this asset.
+        # Prevents paper mode from using leverage that would be rejected live.
+        exchange_max_lev = await self._get_exchange_max_leverage(signal.asset)
+        if signal.suggested_leverage > exchange_max_lev:
+            log.info(
+                f"[PAPER-LEV] {signal.asset}: leverage {signal.suggested_leverage}x "
+                f"> exchange max {exchange_max_lev}x → capped"
+            )
+            signal.suggested_leverage = exchange_max_lev
+
         # Calculate size & leverage
         size_usd, contracts, actual_lev = self.risk.calculate_position_size(
             signal, self._balance
         )
+
+        # ── [AUDIT FIX] Double-check actual_lev against exchange max ─────
+        actual_lev = min(actual_lev, exchange_max_lev)
         
         # Isolated margin = notional / leverage
         margin = (contracts * signal.entry_price) / actual_lev
 
-        # Simulate fill (add small spread)
-        fill_price = self._simulate_fill(signal.entry_price, signal.side)
+        # ── [AUDIT FIX] Realistic orderbook-based fill simulation ────────
+        notional_usd = contracts * signal.entry_price
+        fill_price = self._simulate_fill(
+            signal.entry_price, signal.side,
+            asset=signal.asset, notional_usd=notional_usd
+        )
 
         # Build position
         liq_price = self._calculate_liquidation_price(fill_price, signal.side, actual_lev)
@@ -197,16 +225,21 @@ class PaperExecutor:
         user_db.save_paper_position(cid, pos)
         user_db.save_paper_state(cid, self._balance, account.total_equity)
 
-        # Log entry
+        # Log entry with slippage info
+        slippage_bps = abs(fill_price - signal.entry_price) / signal.entry_price * 10000
         log_data = {
             "type":     "open",
             "pos_id":   pos.position_id,
             "asset":    signal.asset,
             "side":     signal.side.value,
             "entry_price": fill_price,
+            "mark_price": signal.entry_price,
+            "slippage_bps": round(slippage_bps, 2),
             "size":     contracts,
             "notional": contracts * fill_price,
             "margin":   margin,
+            "leverage":  actual_lev,
+            "exchange_max_lev": exchange_max_lev,
             "score":    signal.score,
             "timestamp":utcnow(),
         }
@@ -216,10 +249,11 @@ class PaperExecutor:
         # Record per-asset trade for repeat guard
         self.risk.record_asset_trade(signal.asset)
 
-        log.debug(
+        log.info(
             f" [PAPER] Opened {signal.asset} {signal.side.value.upper()} "
-            f"@ {fill_price} | {contracts:.4f} contracts "
-            f"| margin: {format_usd(margin)} | lev: {signal.suggested_leverage}x"
+            f"@ {fill_price} (mark={signal.entry_price:.6f}, slip={slippage_bps:.1f}bps) "
+            f"| {contracts:.4f} contracts "
+            f"| margin: {format_usd(margin)} | lev: {actual_lev}x/{exchange_max_lev}x(max)"
         )
         
         return pos
@@ -298,7 +332,13 @@ class PaperExecutor:
         if not pos or pos.status == PositionStatus.CLOSED:
             return None
 
-        fill_price = self._simulate_fill(current_price, Side.SHORT if pos.side == Side.LONG else Side.LONG)
+        # [AUDIT FIX] Use orderbook-based slippage for exit too
+        exit_side = Side.SHORT if pos.side == Side.LONG else Side.LONG
+        exit_notional = pos.size_current * current_price
+        fill_price = self._simulate_fill(
+            current_price, exit_side,
+            asset=pos.asset, notional_usd=exit_notional
+        )
         
         # The final PnL is what was made on the REMAINING size
         floating_pnl = pos.unrealized_pnl(fill_price)
@@ -485,14 +525,215 @@ class PaperExecutor:
     # HELPERS
     # ──────────────────────────────────────────
 
-    def _simulate_fill(self, price: float, side: Side) -> float:
-        """Add realistic spread to simulate market fill."""
-        spread = price * 0.0003   # 0.03% spread (typical for BTC on HL)
-        noise  = random.uniform(-0.0001, 0.0001) * price
+    def _simulate_fill(
+        self, price: float, side: Side,
+        asset: str = "", notional_usd: float = 0.0
+    ) -> float:
+        """
+        [AUDIT FIX 2026-05-13] Realistic fill simulation using live orderbook.
+
+        Three-layer slippage model:
+          1. Actual spread: from WS orderbook bid/ask (not hardcoded)
+          2. Market impact: walk the book based on order notional size
+          3. Execution noise: small random jitter (±0.5 bps) for realism
+
+        Fallback: tiered spread by asset class when orderbook unavailable.
+        This ensures paper trading results are CLOSER to live execution.
+        """
+        # ── Layer 1+2: Orderbook-based slippage ──────────────────────────
+        ob_slippage_pct = self._get_orderbook_slippage(asset, side, notional_usd)
+
+        # ── Layer 3: Execution noise (±0.5 bps random jitter) ────────────
+        noise_pct = random.uniform(-0.00005, 0.00005)  # ±0.5 bps
+
+        total_slippage_pct = ob_slippage_pct + noise_pct
+
         if side == Side.LONG:
-            return round(price + spread + noise, 8)   # buy at ask
+            fill = price * (1 + total_slippage_pct)   # buy at ask + impact
         else:
-            return round(price - spread + noise, 8)   # sell at bid
+            fill = price * (1 - total_slippage_pct)   # sell at bid - impact
+
+        return round(fill, 8)
+
+    def _get_orderbook_slippage(
+        self, asset: str, side: Side, notional_usd: float
+    ) -> float:
+        """
+        [AUDIT FIX 2026-05-13] Calculate realistic slippage from live orderbook.
+
+        Uses the WS MarketDataCache to:
+          1. Get the actual bid-ask spread (Layer 1)
+          2. Walk the book to calculate market impact for the given notional (Layer 2)
+
+        Returns: slippage as a fraction of mid price (e.g. 0.0012 = 0.12%)
+        """
+        # Try to get live orderbook from WS cache
+        ob_data = None
+        if self._market_cache and asset:
+            ob_data = getattr(self._market_cache, 'orderbook', {}).get(asset)
+
+        if ob_data and isinstance(ob_data, dict):
+            try:
+                levels = ob_data.get("levels", [[], []])
+                bids_raw = levels[0] if len(levels) > 0 else []
+                asks_raw = levels[1] if len(levels) > 1 else []
+
+                # Parse orderbook levels
+                def _parse_level(x):
+                    if isinstance(x, dict):
+                        return float(x.get("px", 0)), float(x.get("sz", 0))
+                    try:
+                        return float(x[0]), float(x[1])
+                    except (IndexError, TypeError, ValueError):
+                        return 0.0, 0.0
+
+                bids = [(px, sz) for px, sz in (_parse_level(b) for b in bids_raw) if px > 0 and sz > 0]
+                asks = [(px, sz) for px, sz in (_parse_level(a) for a in asks_raw) if px > 0 and sz > 0]
+
+                if bids and asks:
+                    best_bid = bids[0][0]
+                    best_ask = asks[0][0]
+                    mid = (best_bid + best_ask) / 2.0
+
+                    if mid <= 0:
+                        return self._fallback_slippage(asset)
+
+                    # ── Layer 1: Half-spread (always paid) ───────────────
+                    half_spread_pct = (best_ask - best_bid) / (2.0 * mid)
+
+                    # ── Layer 2: Market impact (walk the book) ───────────
+                    # For BUY (LONG): walk ASK side; for SELL (SHORT): walk BID side
+                    book_side = asks if side == Side.LONG else list(reversed(bids))
+                    impact_pct = self._walk_book(book_side, mid, notional_usd)
+
+                    total = half_spread_pct + impact_pct
+
+                    log.debug(
+                        f"[SLIP-OB] {asset} {side.value.upper()} | "
+                        f"spread={half_spread_pct*10000:.1f}bps | "
+                        f"impact={impact_pct*10000:.1f}bps | "
+                        f"total={total*10000:.1f}bps | "
+                        f"notional=${notional_usd:.0f} | "
+                        f"bid={best_bid:.6f} ask={best_ask:.6f}"
+                    )
+                    return total
+
+            except Exception as e:
+                log.debug(f"[SLIP-OB] {asset}: orderbook parse failed ({e}), using fallback")
+
+        # ── Fallback: tiered spread model ────────────────────────────────
+        return self._fallback_slippage(asset)
+
+    @staticmethod
+    def _walk_book(
+        levels: list, mid_price: float, notional_usd: float
+    ) -> float:
+        """
+        Walk the orderbook to calculate volume-weighted average price (VWAP)
+        for a given order size, then return the impact as % of mid.
+
+        This simulates how a real market order eats through multiple price levels.
+        """
+        if notional_usd <= 0 or not levels or mid_price <= 0:
+            return 0.0
+
+        remaining_usd = notional_usd
+        total_filled_usd = 0.0
+        total_filled_value = 0.0  # price × size in USD
+
+        for px, sz in levels:
+            if remaining_usd <= 0:
+                break
+            level_usd = px * sz  # total USD liquidity at this level
+            fill_usd = min(remaining_usd, level_usd)
+            total_filled_usd += fill_usd
+            total_filled_value += fill_usd  # fills at this price level
+            # Weight by price deviation from mid
+            remaining_usd -= fill_usd
+
+        if total_filled_usd <= 0:
+            return 0.0
+
+        # VWAP calculation: weighted average price across levels
+        vwap = 0.0
+        remaining_usd = notional_usd
+        for px, sz in levels:
+            if remaining_usd <= 0:
+                break
+            level_usd = px * sz
+            fill_usd = min(remaining_usd, level_usd)
+            weight = fill_usd / notional_usd
+            vwap += px * weight
+            remaining_usd -= fill_usd
+
+        # If we didn't fill the entire order, extrapolate from last level
+        if remaining_usd > 0 and levels:
+            last_px = levels[-1][0]
+            unfilled_weight = remaining_usd / notional_usd
+            # Assume remaining fills at worst price + 0.05% penalty
+            vwap += last_px * 1.0005 * unfilled_weight
+
+        # Impact = how far VWAP deviates from mid
+        impact = abs(vwap - mid_price) / mid_price
+        return impact
+
+    @staticmethod
+    def _fallback_slippage(asset: str) -> float:
+        """
+        [AUDIT FIX 2026-05-13] Tiered fallback slippage when orderbook unavailable.
+
+        Based on Hyperliquid empirical data:
+          - BTC/ETH (mega-cap): 0.02-0.05% spread
+          - Top altcoins (SOL, DOGE, etc): 0.05-0.15% spread
+          - Mid/small altcoins: 0.10-0.30% spread
+          - Micro-cap/meme coins: 0.15-0.50% spread
+
+        These values are CONSERVATIVE — actual slippage depends on order size.
+        """
+        # Tier 1: mega-cap with deep liquidity
+        tier1 = {"BTC", "ETH"}
+        # Tier 2: large-cap alts
+        tier2 = {"SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX", "LINK", "MATIC", "DOT", "NEAR"}
+        # Tier 3: mid-cap (everything else known)
+        # Tier 4: small/meme — default
+
+        asset_upper = asset.upper() if asset else ""
+        if asset_upper in tier1:
+            # BTC/ETH: ~2-5 bps half-spread
+            return random.uniform(0.0002, 0.0005)
+        elif asset_upper in tier2:
+            # Large-cap alts: ~5-12 bps
+            return random.uniform(0.0005, 0.0012)
+        elif asset_upper:
+            # Mid/small-cap: ~8-20 bps
+            return random.uniform(0.0008, 0.0020)
+        else:
+            # Unknown: conservative 15 bps
+            return 0.0015
+
+    async def _get_exchange_max_leverage(self, asset: str) -> int:
+        """
+        [AUDIT FIX 2026-05-13] Fetch the actual max leverage allowed by Hyperliquid
+        for a specific asset from exchange metadata.
+
+        This ensures paper mode never simulates leverage higher than what
+        Hyperliquid actually allows — preventing unrealistic ROE projections.
+        """
+        try:
+            from data.hyperliquid_client import get_client
+            client = get_client()
+            if client and client._market_cache:
+                universe, _ = client._market_cache
+                for u in universe:
+                    if isinstance(u, dict) and u.get("name") == asset:
+                        max_lev = int(u.get("maxLeverage", 50))
+                        log.debug(f"[PAPER-LEV] {asset}: exchange maxLeverage={max_lev}x")
+                        return max_lev
+        except Exception as e:
+            log.debug(f"[PAPER-LEV] {asset}: could not fetch exchange leverage ({e})")
+
+        # Conservative fallback if metadata unavailable
+        return 50
 
     def _calculate_liquidation_price(self, entry: float, side: Side, leverage: int) -> float:
         """

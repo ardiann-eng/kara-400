@@ -188,51 +188,70 @@ RISK = RiskConfig()
 
 # ──────────────────────────────────────────────
 # SCALPER MODE CONFIG  ⚠️ EXTREME RISK
-# Ultra-aggressive scalping: 10-40 trades/day, max 12min hold time.
-# Only activate with full risk understanding.
+# [AUDIT OVERHAUL 2026-05-13] Dikalibrasi ulang berdasarkan 108 trade data.
+# Masalah sebelumnya: SL ROE -51.6%, time exit 94%, trailing stop 2/108.
 # ──────────────────────────────────────────────
 @dataclass
 class ScalperConfig:
     """
-    Scalper mode — ultra-aggressive, high-frequency.
-    ⚠️  WARNING: 35x leverage + 13% risk per trade. Use only if you understand the risk.
-    """
-    # Leverage
-    default_leverage:        int   = 25       # 25x default for scalper
-    max_leverage:            int   = 35       # hard cap for scalper
+    Scalper mode — high-frequency scalping, dikalibrasi untuk modal 1 juta IDR (~$62.50).
 
-    # Position sizing (% of equity)
-    risk_per_trade_pct:      float = 0.08     # 8% per trade (Sultan Aggression)
-    max_risk_per_trade_pct:  float = 0.12     # 12% absolute cap
-    min_risk_per_trade_pct:  float = 0.05     # 5% floor
+    [AUDIT FIX 2026-05-13] Perubahan kritis:
+    - C3: Leverage 25x→15x, SL max 2.0%→1.2% → max ROE loss -18% (was -50%)
+    - C4: Grace period 35m→10m → total max hold 30m (was 55m)
+    - C5: TP multiples turun → trailing stop lebih sering terpicu
+    - C6: Sizing naik → profit meaningful vs fee
+
+    Strategi objektif untuk modal $62.50:
+    ┌─────────────────────────────────────────────────────────────┐
+    │ Target: 2-5% equity/hari = $1.25-$3.12/hari                │
+    │ Win Rate minimum: 52% (dengan R:R 1.2:1 = positive EV)     │
+    │ Max loss per trade: -18% ROE = -$1.12 (pada margin $6.25)  │
+    │ Avg win target: +10-15% ROE = $0.62-$0.94                  │
+    │ Max daily trades: 15-20 (fee budget ~$0.20)                 │
+    │ Recovery dari 1 SL: butuh 2 winning trades (was 14!)        │
+    └─────────────────────────────────────────────────────────────┘
+    """
+    # ── [C3 FIX] Leverage — turunkan untuk mengurangi amplifikasi ROE ──
+    # Sebelum: 25x × 2% SL = -50% ROE per SL hit (BENCANA)
+    # Sesudah: 15x × 1.2% SL = -18% ROE per SL hit (SURVIVABLE)
+    # 1 SL sekarang = 2 winning trades untuk recovery, bukan 14.
+    default_leverage:        int   = 15       # [AUDIT] 25→15x: max ROE loss -18% (was -50%)
+    max_leverage:            int   = 20       # [AUDIT] 35→20x: hard cap realistis
+
+    # ── [C6 FIX] Position sizing — naik untuk modal kecil $62.50 ──
+    # Sebelum: 8% risk × vol_scale → notional ~$40 → profit $0.15 < fee
+    # Sesudah: 12% risk → notional ~$75-100 → profit $0.50+ > fee
+    # Dengan leverage 15x dan SL 1.2%: risk = $62.5 × 0.12 = $7.50 per trade
+    risk_per_trade_pct:      float = 0.12     # [AUDIT] 8%→12%: bigger size for small capital
+    max_risk_per_trade_pct:  float = 0.15     # [AUDIT] 12%→15%: absolute cap raised
+    min_risk_per_trade_pct:  float = 0.08     # [AUDIT] 5%→8%: floor raised for meaningful P&L
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
-    # Scalper SL/TP (Calibrated for 25x leverage, 20-min max hold)
-    # [SL FIX 2026 PHASE 2] ATR-adaptive SL.
-    # Old fixed 3.0% × 25x = -75% ROE per hit — wipes 5 winners with 1 loss.
-    # New: SL = ATR × multiplier, clamped between [sl_pct_min, sl_pct_max].
-    # `sl_pct` below is now ONLY a fallback when ATR is unavailable.
-    sl_pct:                  float = 0.0200   # fallback when ATR not computed (was 0.0300)
+    # ── [C3 FIX] SL/TP — dikalibrasi untuk 15x leverage ──
+    # SL max ROE: 1.2% × 15x = -18% (survivable)
+    # SL min ROE: 0.4% × 15x = -6% (tight for BTC)
+    sl_pct:                  float = 0.0120   # [AUDIT] 2.0%→1.2%: fallback SL for 15x lev
     atr_sl_enabled:          bool  = True     # enable ATR-adaptive SL for scalper
     atr_sl_multiplier:       float = 1.5      # SL = ATR(14) × 1.5
-    sl_pct_min:              float = 0.006    # floor 0.6% (BTC-grade tight SL)
-    sl_pct_max:              float = 0.020    # ceiling 2.0% (down from 3.0% backstop)
+    sl_pct_min:              float = 0.004    # [AUDIT] 0.6%→0.4%: tighter floor (0.4%×15x = -6% ROE)
+    sl_pct_max:              float = 0.012    # [AUDIT] 2.0%→1.2%: ceiling (1.2%×15x = -18% ROE)
     # RR enforcement: TP1 minimum = sl_pct × tp1_min_rr ; TP2 minimum = sl_pct × tp2_min_rr
     tp1_min_rr_to_sl:        float = 0.6      # TP1 ≥ 0.6× SL distance
     tp2_min_rr_to_sl:        float = 1.5      # TP2 ≥ 1.5× SL distance (positive RR enforcement)
-    tp1_pct:                 float = 0.0075   # 0.75% TP1 — [ADAPTIVE] Lowered for 20m scalping
-    tp2_pct:                 float = 0.0125   # 1.25% TP2 — [ADAPTIVE] Lowered
-    trailing_pct:            float = 0.0050   # 0.50% trailing on remainder
+    tp1_pct:                 float = 0.0060   # [AUDIT] 0.75%→0.60%: more achievable in 20m
+    tp2_pct:                 float = 0.0100   # [AUDIT] 1.25%→1.00%: more achievable in 20m
+    trailing_pct:            float = 0.0040   # [AUDIT] 0.50%→0.40%: tighter trail
 
-    # Timing
-    max_hold_minutes:        float = 20.0     # force close after 20min if no TP hit (was 12)
-    max_hold_grace_minutes:  float = 35.0     # 35 min extra grace for losing positions to recover to BEP
-    max_hold_soft_floor_pct: float = -0.020   # grace aktif jika loss ≤ -2.0% (beri waktu recovery)
+    # ── [C4 FIX] Timing — potong grace period drastis ──
+    # Sebelum: 20m + 35m grace = 55m max hold → 23 big losses dari posisi yang terseret
+    # Sesudah: 20m + 10m grace = 30m max hold → cut loss lebih cepat
+    max_hold_minutes:        float = 20.0     # force close after 20min if no TP hit
+    max_hold_grace_minutes:  float = 10.0     # [AUDIT] 35→10m: total max 30m, bukan 55m
+    max_hold_soft_floor_pct: float = -0.010   # [AUDIT] -2%→-1%: cut loss lebih cepat (1%×15x = -15% ROE)
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold — HARD THRESHOLD SCALPER (TIDAK BISA DIUBAH USER)
-    # [THRESHOLD FIX 2026-05-08] Turun 60→57. Data 55 trade: threshold 57 = PnL +14.99
-    # vs threshold 60 = PnL hanya +2.95. Skor rata-rata aktual 62.4, bukan 70+.
     min_score_to_enter:      int   = 57       # ⚠️ HARD: scalper entry gate
     signal_cooldown_minutes: int   = 5        # 5 min cooldown scalper
     mtf_confirm_enabled:     bool  = True     # require 15m trend confirmation
@@ -240,13 +259,13 @@ class ScalperConfig:
     mtf_confirm_lookback:    int   = 32       # ~8h on 15m candles
 
     # Concurrent positions
-    max_concurrent_positions: int  = 5        # max 5 scalper positions (was 3)
+    max_concurrent_positions: int  = 5        # max 5 scalper positions
 
     # Partial TP ratios (scalper: heavier close at TP1/TP2 given tight hold window)
-    tp1_close_ratio:         float = 0.50     # 50% on TP1 (was 0.55)
+    tp1_close_ratio:         float = 0.50     # 50% on TP1
     tp2_close_ratio:         float = 0.667    # 67% of remaining at TP2 (~33% original)
-    tp3_close_ratio:         float = 1.0      # close all remaining at TP3 (scalper: no trail)
-    tp3_pct:                 float = 0.020    # 2.0% TP3 — [ADAPTIVE] Lowered (was 3.0%)
+    tp3_close_ratio:         float = 1.0      # close all remaining at TP3
+    tp3_pct:                 float = 0.015    # [AUDIT] 2.0%→1.5%: achievable target
     # ATR trailing — scalper uses fixed pct (trade too short for ATR trail to matter)
     atr_trailing_multiplier: float = 2.0
 
@@ -255,54 +274,55 @@ class ScalperConfig:
     pyramid_at_profit_pct:   float = 0.004   # 0.4%
 
     # Daily guard (scalper can lose fast)
-    # Paper mode: longgar supaya data terkumpul cepat.
-    # Live mode: override oleh LIVE_SCALPER_RISK di bawah.
-    daily_loss_hard_pct:     float = 0.90    # paper: 90% daily loss → stop
-    max_drawdown_pct:        float = 0.95    # paper: 95% total drawdown kill-switch
-    post_loss_cooldown_hrs:  float = 2.0     # cooldown setelah 50% daily loss (was pinjam RISK 5h)
+    # [AUDIT] Paper mode juga perlu proteksi realistis.
+    daily_loss_hard_pct:     float = 0.15    # [AUDIT] 90%→15%: stop setelah -15% equity/hari ($9.37)
+    max_drawdown_pct:        float = 0.30    # [AUDIT] 95%→30%: kill-switch at -30% total ($18.75)
+    post_loss_cooldown_hrs:  float = 2.0     # cooldown setelah daily limit
 
     # MTF Score weights
     mtf_score_bonus:         int = 12        # bonus if 1m aligns with 15m trend
-    mtf_score_penalty:       int = -5        # penalty if counter-trend (was -10, terlalu berat)
+    mtf_score_penalty:       int = -5        # penalty if counter-trend
 
     # ── Momentum exit — Multi-confirmation refactor (v2) ─────────────────
-    # Root cause analisis 43/43 losses: threshold terlalu kecil (0.43% avg pullback
-    # = noise normal crypto), tidak ada confirmation layer, skor masuk ke exit logic.
-    # Solusi: ATR-dynamic threshold + 5-layer confirmation, skor TIDAK dipakai di exit.
-    momentum_exit_enabled:            bool  = False   # [AUDIT 2026-05-11] DIMATIKAN — 11/11 loss (-$51.97). Root cause: HTF override → fixed 2% threshold × 25x = -50% ROE per trade.
-    momentum_exit_min_minutes:        float = 3.0     # min hold 3 menit — exit lebih awal saat momentum redup
+    # [AUDIT 2026-05-13] RE-ENABLED dengan leverage 15x.
+    # Root cause kegagalan sebelumnya: HTF override → 2% threshold × 25x = -50% ROE.
+    # Dengan 15x: 2% threshold × 15x = -30% ROE → masih besar tapi survivable.
+    # Dikurangi ke 1.5% × 15x = -22.5% ROE max.
+    momentum_exit_enabled:            bool  = True    # [AUDIT] RE-ENABLED: safe at 15x leverage
+    momentum_exit_min_minutes:        float = 3.0     # min hold 3 menit
 
     # Layer 1 — Minimum pullback (anti-noise)
-    momentum_exit_min_pullback_pct:   float = 0.005   # floor 0.5% — lebih sensitif tangkap reversal awal
+    momentum_exit_min_pullback_pct:   float = 0.005   # floor 0.5%
     momentum_exit_atr_pullback_mult:  float = 1.2     # threshold = max(0.5%, ATR14% * 1.2)
 
     # Layer 2 — Volume confirmation
     momentum_exit_volume_mult:        float = 1.3     # current vol harus >= SMA20 * 1.3
 
-    # Layer 3 — Trend structure break (EMA cross) — faster periods to detect fading early
-    momentum_exit_ema_fast:           int   = 9       # EMA fast period (was 20 — too slow)
-    momentum_exit_ema_slow:           int   = 21      # EMA slow period (was 50 — too slow)
+    # Layer 3 — Trend structure break (EMA cross)
+    momentum_exit_ema_fast:           int   = 9       # EMA fast period
+    momentum_exit_ema_slow:           int   = 21      # EMA slow period
 
-    # Layer 4 — Momentum indicators — more sensitive to catch fading early
-    momentum_exit_rsi_threshold:      float = 48.0    # RSI < 48 = momentum fading (was 45 — too late)
-    # MACD histogram < 0 also counts (calculated inline)
+    # Layer 4 — Momentum indicators
+    momentum_exit_rsi_threshold:      float = 48.0    # RSI < 48 = momentum fading
 
     # Layer 5 — HTF trend filter (15m EMA)
     momentum_exit_htf_ema_fast:       int   = 20      # 15m EMA fast
     momentum_exit_htf_ema_slow:       int   = 50      # 15m EMA slow
-    # Kalau HTF uptrend intact (ema_fast > ema_slow), threshold pullback dinaikkan ke 2%
-    momentum_exit_htf_uptrend_pullback: float = 0.020  # butuh 2% drop jika HTF masih naik (was 3% — too patient)
+    momentum_exit_htf_uptrend_pullback: float = 0.015  # [AUDIT] 2.0%→1.5%: 1.5%×15x = -22.5% ROE max
 
-    # Early trailing: aktif dari profit threshold tanpa nunggu TP1 flag
+    # ── Early trailing: lock profit sebelum TP1 ──
     early_trail_enabled:         bool  = True
-    early_trail_activation_pct:  float = 0.004  # aktif saat profit >= 0.4% (unleveraged)
-    early_trail_distance_pct:    float = 0.003  # exit kalau retraced >= 0.3% dari peak
+    early_trail_activation_pct:  float = 0.003  # [AUDIT] 0.4%→0.3%: lock profit lebih awal
+    early_trail_distance_pct:    float = 0.002  # [AUDIT] 0.3%→0.2%: tighter trail
 
-    # [QUANT AGGRESSION] Partial profit & breakeven layers
-    partial_tp1_at_sl_multiple: float = 1.0    # close 40% at 1.0× SL distance
-    partial_tp2_at_sl_multiple: float = 1.5    # close 30% at 1.5× SL distance
-    partial_tp3_trail_at: float = 2.0          # trail remaining 30% at 2.0× SL
-    breakeven_trigger_at_sl_multiple: float = 0.8  # move SL to entry+0.1% at 0.8× SL
+    # ── [C5 FIX] Partial profit & breakeven — turunkan threshold ──
+    # Sebelum: TP1=1.0×SL, TP2=1.5×SL, Trail=2.0×SL → hampir tidak tercapai (2/108 trade)
+    # Sesudah: TP1=0.7×SL, TP2=1.0×SL, Trail=1.3×SL → tercapai lebih sering
+    # Dengan SL ~0.8%: TP1=0.56%, TP2=0.80%, Trail=1.04% → realistis dalam 20m
+    partial_tp1_at_sl_multiple: float = 0.7    # [AUDIT] 1.0→0.7: close 40% lebih awal
+    partial_tp2_at_sl_multiple: float = 1.0    # [AUDIT] 1.5→1.0: close 30% lebih awal
+    partial_tp3_trail_at: float = 1.3          # [AUDIT] 2.0→1.3: trail aktif lebih awal
+    breakeven_trigger_at_sl_multiple: float = 0.5  # [AUDIT] 0.8→0.5: breakeven lebih cepat
     scale_in_threshold_pct: float = 0.005      # +0.5% in 3min = scale in 50%
     scale_in_threshold_sec: int = 180           # 3 min window for scale-in check
     max_scale_ins: int = 1                     # max 1 add per position
