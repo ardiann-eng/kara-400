@@ -222,11 +222,14 @@ class ScalperConfig:
     # ── [C6 FIX] Position sizing — dikalibrasi untuk modal kecil $62.50 ──
     # Formula: size_usd = (balance × risk_pct × lev_ratio) / (sl_pct × leverage)
     # lev_ratio = actual_lev / 15 — normalisasi agar margin dollar sama di semua lev
-    # lev=15x: risk_pct_eff=5%  → $62.5×5%/(1.5%×15) = $13.9 margin (22% balance)
-    # lev=5x : risk_pct_eff=1.7% → $62.5×1.7%/(1.5%×5) = $13.9 margin (22% balance)
-    risk_per_trade_pct:      float = 0.05     # baseline untuk lev=15x
-    max_risk_per_trade_pct:  float = 0.08     # absolute cap
-    min_risk_per_trade_pct:  float = 0.005    # floor minimum
+    # lev=20x: risk_pct_eff=26.7% → $62.5×26.7%/(0.8%×20) = $104 → margin $13.7 (22% balance)
+    # lev=10x: risk_pct_eff=13.3% → $62.5×13.3%/(0.8%×10) = $104 → margin $10.4 (17% balance)
+    # lev=5x : risk_pct_eff=6.67% → $62.5×6.67%/(0.8%×5)  = $104 → margin $20.8 → capped $21.7
+    # lev=3x : risk_pct_eff=4.0%  → $62.5×4.0%/(0.8%×3)   = $104 → margin $35   → capped $21.7
+    # Hard cap 35% balance selalu aktif sebagai safety net terakhir
+    risk_per_trade_pct:      float = 0.20     # baseline untuk lev=15x (naik dari 5%)
+    max_risk_per_trade_pct:  float = 0.28     # absolute cap (naik dari 8%)
+    min_risk_per_trade_pct:  float = 0.015    # floor minimum (naik dari 0.5%)
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # ── [C3 FIX] SL/TP — dikalibrasi untuk 15x leverage ──
