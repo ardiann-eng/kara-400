@@ -1159,34 +1159,33 @@ class ScoringEngine:
         _sl_max = getattr(scfg, 'sl_pct_max', 0.015)
         time_exit_min = 20  # default
         if score >= 66 or (fade_mode and score >= 60):
-            # HIGH CONVICTION / CONTRARIAN FADE → Let it run
-            # SL floor 1.0% (bukan 1.5%) agar tidak memaksa SL terlalu lebar di aset cepat
+            # HIGH CONVICTION → TP multiplier dikecilkan agar realistis dalam 25m
             sl_pct = max(sl_pct, 0.010)
-            sl_pct = min(sl_pct, _sl_max)  # tetap hormati sl_pct_max dari config
-            tp1_pct = max(tp1_pct, sl_pct * 1.5)   # TP1 ≥ 1.5× SL (was 2.0×)
-            tp2_pct = max(tp2_pct, sl_pct * 2.5)   # TP2 ≥ 2.5× SL (was 4.0× — terlalu jauh)
+            sl_pct = min(sl_pct, _sl_max)
+            tp1_pct = max(tp1_pct, sl_pct * 1.0)   # was 1.5×
+            tp2_pct = max(tp2_pct, sl_pct * 1.8)   # was 2.5×
             time_exit_min = 25
             reasons.append(f"🏃 RUNNER mode: score={score}, SL={sl_pct*100:.2f}%, TP2={tp2_pct*100:.2f}%, hold={time_exit_min}m")
         elif score >= 61:
-            # MEDIUM-HIGH → Standard runner dengan partial
+            # MEDIUM-HIGH
             sl_pct = max(sl_pct, 0.008)
             sl_pct = min(sl_pct, _sl_max)
-            tp1_pct = max(tp1_pct, sl_pct * 1.2)
-            tp2_pct = max(tp2_pct, sl_pct * 2.0)
+            tp1_pct = max(tp1_pct, sl_pct * 0.8)   # was 1.2×
+            tp2_pct = max(tp2_pct, sl_pct * 1.5)   # was 2.0×
             time_exit_min = 20
         elif score >= 56:
-            # SWEET SPOT (data: 76% WR) → Quick scalp tapi monetisasi penuh
+            # SWEET SPOT → TP lebih dekat agar tercapai dalam 15m
             sl_pct = max(sl_pct, 0.007)
             sl_pct = min(sl_pct, _sl_max)
-            tp1_pct = max(tp1_pct, sl_pct * 1.0)
-            tp2_pct = max(tp2_pct, sl_pct * 1.5)
+            tp1_pct = max(tp1_pct, sl_pct * 0.7)   # was 1.0×
+            tp2_pct = max(tp2_pct, sl_pct * 1.2)   # was 1.5×
             time_exit_min = 15
         else:
-            # LOW CONVICTION → Very tight, in-and-out
+            # LOW CONVICTION → sangat ketat
             sl_pct = max(sl_pct, 0.006)
             sl_pct = min(sl_pct, _sl_max)
-            tp1_pct = max(tp1_pct, sl_pct * 0.8)
-            tp2_pct = max(tp2_pct, sl_pct * 1.2)
+            tp1_pct = max(tp1_pct, sl_pct * 0.5)   # was 0.8×
+            tp2_pct = max(tp2_pct, sl_pct * 1.0)   # was 1.2×
             time_exit_min = 10
             reasons.append(f"⚡ QUICK SCALP: score={score}, SL={sl_pct*100:.2f}%, time_exit={time_exit_min}m")
 

@@ -417,10 +417,15 @@ class RiskManager:
             size_usd *= 0.5
             log.warning(f"[RISK] Drawdown guard active (DD: {drawdown*100:.1f}% >= 15%). Risk halved to {risk_pct/2*100:.1f}%.")
 
-        # ── 3. Hard Margin Cap (Safety First - 35% Max Equity) ────────
-        max_allowed_margin = account_balance * 0.35
+        # ── 3. Hard Margin Cap — leverage-aware ───────────────────────
+        # Leverage tinggi (15x) → cap 20% balance (notional 3× balance)
+        # Leverage rendah (5x)  → cap 10% balance (notional 0.5× balance)
+        # Formula: cap turun proporsional saat leverage rendah
+        _lev_ratio = lev / 15.0   # normalize ke baseline 15x
+        _margin_cap_pct = max(0.10, min(0.20, 0.20 * _lev_ratio))
+        max_allowed_margin = account_balance * _margin_cap_pct
         if size_usd > max_allowed_margin:
-            log.warning(f"[RISK] Margin cap hit: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} (35% limit)")
+            log.warning(f"[RISK] Margin cap hit: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} ({_margin_cap_pct*100:.0f}% limit, lev={lev}x)")
             size_usd = max_allowed_margin
 
         # ── 4. Calculate Contracts ────────────────────────────────────
