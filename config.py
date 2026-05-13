@@ -220,12 +220,13 @@ class ScalperConfig:
     max_leverage:            int   = 20       # [AUDIT] 35→20x: hard cap realistis
 
     # ── [C6 FIX] Position sizing — dikalibrasi untuk modal kecil $62.50 ──
-    # Formula: size_usd = (balance × risk_pct) / (sl_pct × leverage)
-    # Dengan SL 1.5% dan lev 15x: $62.5 × 0.05 / (0.015 × 15) = $13.9 margin (~22%)
-    # 12% lama → size $33 → selalu kena hard cap 35% ($21.87) — cap jadi default sizing
-    risk_per_trade_pct:      float = 0.05     # 12%→5%: size ~$13.9, tidak kena cap 35%
-    max_risk_per_trade_pct:  float = 0.08     # 15%→8%: absolute cap
-    min_risk_per_trade_pct:  float = 0.03     # 8%→3%: floor untuk profit di atas fee
+    # Formula: size_usd = (balance × risk_pct × lev_ratio) / (sl_pct × leverage)
+    # lev_ratio = actual_lev / 15 — normalisasi agar margin dollar sama di semua lev
+    # lev=15x: risk_pct_eff=5%  → $62.5×5%/(1.5%×15) = $13.9 margin (22% balance)
+    # lev=5x : risk_pct_eff=1.7% → $62.5×1.7%/(1.5%×5) = $13.9 margin (22% balance)
+    risk_per_trade_pct:      float = 0.05     # baseline untuk lev=15x
+    max_risk_per_trade_pct:  float = 0.08     # absolute cap
+    min_risk_per_trade_pct:  float = 0.005    # floor minimum
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # ── [C3 FIX] SL/TP — dikalibrasi untuk 15x leverage ──

@@ -371,7 +371,7 @@ class RiskManager:
         
         # --- CONVICTION-WEIGHTED POSITION SIZING (AGGRESSIVE) ---
         score = getattr(signal, 'score', 0)
-        risk_pct = self.get_risk_pct(score, account_balance)
+        risk_pct = self.get_risk_pct(score, account_balance, leverage=lev)
 
         risk_pct = min(risk_pct, cfg.max_risk_per_trade_pct)
 
@@ -417,15 +417,10 @@ class RiskManager:
             size_usd *= 0.5
             log.warning(f"[RISK] Drawdown guard active (DD: {drawdown*100:.1f}% >= 15%). Risk halved to {risk_pct/2*100:.1f}%.")
 
-        # ── 3. Hard Margin Cap — leverage-aware ───────────────────────
-        # Leverage tinggi (15x) → cap 20% balance (notional 3× balance)
-        # Leverage rendah (5x)  → cap 10% balance (notional 0.5× balance)
-        # Formula: cap turun proporsional saat leverage rendah
-        _lev_ratio = lev / 15.0   # normalize ke baseline 15x
-        _margin_cap_pct = max(0.10, min(0.20, 0.20 * _lev_ratio))
-        max_allowed_margin = account_balance * _margin_cap_pct
+        # ── 3. Hard Margin Cap (Safety First - 35% Max Equity) ────────
+        max_allowed_margin = account_balance * 0.35
         if size_usd > max_allowed_margin:
-            log.warning(f"[RISK] Margin cap hit: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} ({_margin_cap_pct*100:.0f}% limit, lev={lev}x)")
+            log.warning(f"[RISK] Margin cap hit: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} (35% limit)")
             size_usd = max_allowed_margin
 
         # ── 4. Calculate Contracts ────────────────────────────────────
@@ -455,26 +450,30 @@ class RiskManager:
         sl_pct = abs(signal.entry_price - signal.stop_loss) / signal.entry_price
         return contracts * signal.entry_price * sl_pct
 
-    def get_risk_pct(self, score: int, equity: float) -> float:
-        # Baca baseline dari mode-aware config (ScalperConfig.risk_per_trade_pct = 12%,
-        # RiskConfig.risk_per_trade_pct = 1%). Hardcode lama (2.0/2.5%) mengabaikan C6 fix.
+    def get_risk_pct(self, score: int, equity: float, leverage: int = 15) -> float:
+        # Target: margin ~10-15% balance regardless of leverage.
+        # size_usd = (balance × risk_pct) / (sl_pct × lev)
+        # Agar size_usd konstan, risk_pct harus naik proporsional dengan leverage.
+        # Baseline: lev=15x → risk_pct=cfg.risk_per_trade_pct
+        # lev=5x  → risk_pct = baseline × (5/15) agar margin dollar sama
         cfg = self._cfg()
         base = cfg.risk_per_trade_pct
+        lev_ratio = leverage / 15.0
+        base = base * lev_ratio   # scale down risk_pct saat leverage rendah
 
-        # Score multiplier: skor tinggi dapat sedikit lebih besar
+        # Score multiplier
         if score >= 65:
-            risk_pct = base * 1.10   # +10% untuk high-conviction
+            risk_pct = base * 1.10
         else:
-            risk_pct = base          # baseline untuk 57-64
+            risk_pct = base
 
-        # min_risk floor agar sizing tidak terlalu kecil di modal kecil
-        min_risk = getattr(cfg, 'min_risk_per_trade_pct', base * 0.5)
+        min_risk = getattr(cfg, 'min_risk_per_trade_pct', cfg.risk_per_trade_pct * 0.5)
         risk_pct = max(risk_pct, min_risk)
 
         # Equity protection multiplier
         ratio = equity / self._session_start_balance if self._session_start_balance > 0 else 1.0
-        if ratio >= 1.5:   equity_mult = 0.8   # protect gains
-        elif ratio <= 0.8: equity_mult = 0.5   # damaged mode
+        if ratio >= 1.5:   equity_mult = 0.8
+        elif ratio <= 0.8: equity_mult = 0.5
         else:              equity_mult = 1.0
 
         return risk_pct * equity_mult
