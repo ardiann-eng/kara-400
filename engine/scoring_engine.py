@@ -1155,30 +1155,37 @@ class ScoringEngine:
 
         # ── [QUANT AGGRESSION] Score-driven exit matrix ─────────────────────
         # High score = runner, low score = quick scalp. time_exit is VARIABLE.
+        # sl_pct_max dari ScalperConfig SELALU di-enforce — tidak boleh dilewati.
+        _sl_max = getattr(scfg, 'sl_pct_max', 0.015)
         time_exit_min = 20  # default
         if score >= 66 or (fade_mode and score >= 60):
             # HIGH CONVICTION / CONTRARIAN FADE → Let it run
-            sl_pct = max(sl_pct, 0.015)  # jangan terlalu ketat, kasih ruang breathe
-            tp1_pct = max(tp1_pct, sl_pct * 2.0)
-            tp2_pct = max(tp2_pct, sl_pct * 4.0)
+            # SL floor 1.0% (bukan 1.5%) agar tidak memaksa SL terlalu lebar di aset cepat
+            sl_pct = max(sl_pct, 0.010)
+            sl_pct = min(sl_pct, _sl_max)  # tetap hormati sl_pct_max dari config
+            tp1_pct = max(tp1_pct, sl_pct * 1.5)   # TP1 ≥ 1.5× SL (was 2.0×)
+            tp2_pct = max(tp2_pct, sl_pct * 2.5)   # TP2 ≥ 2.5× SL (was 4.0× — terlalu jauh)
             time_exit_min = 25
             reasons.append(f"🏃 RUNNER mode: score={score}, SL={sl_pct*100:.2f}%, TP2={tp2_pct*100:.2f}%, hold={time_exit_min}m")
         elif score >= 61:
             # MEDIUM-HIGH → Standard runner dengan partial
-            sl_pct = max(sl_pct, 0.010)
-            tp1_pct = max(tp1_pct, sl_pct * 1.5)
-            tp2_pct = max(tp2_pct, sl_pct * 2.5)
+            sl_pct = max(sl_pct, 0.008)
+            sl_pct = min(sl_pct, _sl_max)
+            tp1_pct = max(tp1_pct, sl_pct * 1.2)
+            tp2_pct = max(tp2_pct, sl_pct * 2.0)
             time_exit_min = 20
         elif score >= 56:
             # SWEET SPOT (data: 76% WR) → Quick scalp tapi monetisasi penuh
-            sl_pct = max(sl_pct, 0.008)
-            tp1_pct = max(tp1_pct, sl_pct * 1.2)
-            tp2_pct = max(tp2_pct, sl_pct * 1.8)
+            sl_pct = max(sl_pct, 0.007)
+            sl_pct = min(sl_pct, _sl_max)
+            tp1_pct = max(tp1_pct, sl_pct * 1.0)
+            tp2_pct = max(tp2_pct, sl_pct * 1.5)
             time_exit_min = 15
         else:
             # LOW CONVICTION → Very tight, in-and-out
             sl_pct = max(sl_pct, 0.006)
-            tp1_pct = max(tp1_pct, sl_pct * 1.0)
+            sl_pct = min(sl_pct, _sl_max)
+            tp1_pct = max(tp1_pct, sl_pct * 0.8)
             tp2_pct = max(tp2_pct, sl_pct * 1.2)
             time_exit_min = 10
             reasons.append(f"⚡ QUICK SCALP: score={score}, SL={sl_pct*100:.2f}%, time_exit={time_exit_min}m")
@@ -1196,7 +1203,15 @@ class ScoringEngine:
             time_exit_min = min(time_exit_min, 12)
             reasons.append("FADE: tight SL 0.8×, wide TP 1.5×, max 12min")
 
-        leverage = min(scfg.default_leverage, scfg.max_leverage)
+        # Cap leverage against exchange-allowed max for this asset
+        _exchange_max_lev = 50
+        if self.client._market_cache:
+            _universe, _ = self.client._market_cache
+            for _u in _universe:
+                if isinstance(_u, dict) and _u.get("name") == asset:
+                    _exchange_max_lev = int(_u.get("maxLeverage", 50))
+                    break
+        leverage = min(scfg.default_leverage, scfg.max_leverage, _exchange_max_lev)
 
         if side == Side.LONG:
             stop_loss = round(mark_price * (1 - sl_pct), 8)
@@ -1876,10 +1891,17 @@ class ScoringEngine:
             tp1       = round(mark_price * (1 - tp1_pct), 8)
             tp2       = round(mark_price * (1 - tp2_pct), 8)
 
-        # Leverage: scale with score
-        leverage = RISK.default_leverage
+        # Leverage: scale with score, capped by exchange-allowed max
+        _exchange_max_lev = 50
+        if self.client._market_cache:
+            _universe, _ = self.client._market_cache
+            for _u in _universe:
+                if isinstance(_u, dict) and _u.get("name") == asset:
+                    _exchange_max_lev = int(_u.get("maxLeverage", 50))
+                    break
+        leverage = min(RISK.default_leverage, _exchange_max_lev)
         if score >= 75:
-            leverage = min(RISK.default_leverage + 2, RISK.max_leverage)
+            leverage = min(RISK.default_leverage + 2, RISK.max_leverage, _exchange_max_lev)
 
         return TradeSignal(
             signal_id=str(uuid.uuid4())[:8].upper(),

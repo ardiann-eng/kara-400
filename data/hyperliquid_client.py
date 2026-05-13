@@ -92,6 +92,9 @@ class HyperliquidClient:
         # Semaphore untuk execution path TIDAK ADA — order harus instan
         self._data_sem: Optional[asyncio.Semaphore] = None   # dibuat di connect()
 
+        # Lock untuk mencegah race condition concurrent connect() calls — lazy-init di connect()
+        self._connect_lock: Optional[asyncio.Lock] = None
+
         # Candle caching — key: (asset, interval) supaya 1m dan 15m tidak saling overwrite
         # TTL berbeda per interval: candle lebih panjang berubah lebih jarang
         self._candle_cache: Dict[Tuple[str, str], Tuple[float, List]] = {}
@@ -111,44 +114,49 @@ class HyperliquidClient:
 
     async def connect(self):
         """Initialize SDK clients. Call once at startup."""
-        self._loop = asyncio.get_event_loop()
-        # Throttle HANYA untuk data scan — execution path tidak pernah kena semaphore ini
-        self._data_sem = asyncio.Semaphore(8)
+        if self._connect_lock is None:
+            self._connect_lock = asyncio.Lock()
+        async with self._connect_lock:
+            if self._http_data is not None:
+                return  # already connected by a concurrent caller, skip re-init
 
-        self._http_data = httpx.AsyncClient(
-            base_url=self._data_url,
-            timeout=15.0,
-            limits=httpx.Limits(max_connections=10)
-        )
-        self._http_trade = httpx.AsyncClient(
-            base_url=self._trade_url,
-            timeout=15.0,
-            limits=httpx.Limits(max_connections=10)
-        )
+            self._loop = asyncio.get_event_loop()
+            self._data_sem = asyncio.Semaphore(8)
 
-        # Info client (read-only, no key needed)
-        try:
-            self._info = Info(base_url=self._data_url, skip_ws=True)
-            log.info(f"✓ Info client initialized (SDK) - Data: {config.DATA_SOURCE.upper()}")
-        except Exception as e:
-            log.warning(f"Info client init failed (will use HTTP only): {e}")
-            self._info = None
+            self._http_data = httpx.AsyncClient(
+                base_url=self._data_url,
+                timeout=15.0,
+                limits=httpx.Limits(max_connections=10)
+            )
+            self._http_trade = httpx.AsyncClient(
+                base_url=self._trade_url,
+                timeout=15.0,
+                limits=httpx.Limits(max_connections=10)
+            )
 
-        if self.private_key:
+            # Info client (read-only, no key needed)
             try:
-                self._account = eth_account.Account.from_key(self.private_key)
-                self._exchange = Exchange(
-                    account=self._account,
-                    base_url=self._trade_url
-                )
-                log.info(f"✓ Exchange client ready [{config.TRADE_MODE.upper()}] - wallet: {self.wallet[:8]}...{self.wallet[-4:]}")
+                self._info = Info(base_url=self._data_url, skip_ws=True)
+                log.info(f"✓ Info client initialized (SDK) - Data: {config.DATA_SOURCE.upper()}")
             except Exception as e:
-                log.error(f"Exchange initialization failed: {e}")
-                self._exchange = None
-        else:
-            log.warning("No private key set - read-only mode (paper safe)")
+                log.warning(f"Info client init failed (will use HTTP only): {e}")
+                self._info = None
 
-        log.info(f"✓ Hyperliquid client connected [Data: {config.DATA_SOURCE.upper()} | Execution: {config.TRADE_MODE.upper()}]")
+            if self.private_key:
+                try:
+                    self._account = eth_account.Account.from_key(self.private_key)
+                    self._exchange = Exchange(
+                        account=self._account,
+                        base_url=self._trade_url
+                    )
+                    log.info(f"✓ Exchange client ready [{config.TRADE_MODE.upper()}] - wallet: {self.wallet[:8]}...{self.wallet[-4:]}")
+                except Exception as e:
+                    log.error(f"Exchange initialization failed: {e}")
+                    self._exchange = None
+            else:
+                log.warning("No private key set - read-only mode (paper safe)")
+
+            log.info(f"✓ Hyperliquid client connected [Data: {config.DATA_SOURCE.upper()} | Execution: {config.TRADE_MODE.upper()}]")
 
     def _format_api_error(self, response_text: str, max_len: int = 80) -> str:
         """Collapse a potentially multiline/HTML error body into one short line."""
@@ -195,7 +203,16 @@ class HyperliquidClient:
         method ini sama sekali — mereka pakai SDK thread executor langsung.
         """
         if not self._http_data:
-            raise RuntimeError("Call connect() first")
+            # Lazy-init: auto-connect jika belum connect daripada crash.
+            # refresh_position_candles() bisa dipanggil sebelum connect() selesai.
+            log.warning(f"[API] _http_data not initialized for {request_type}, auto-connecting...")
+            try:
+                await self.connect()
+            except Exception as _ce:
+                log.warning(f"[API] Auto-connect failed: {_ce}")
+                return {}, False
+            if not self._http_data:
+                return {}, False
 
         # Build payload
         payload = {"type": request_type}
@@ -444,7 +461,10 @@ class HyperliquidClient:
                 result = [name for name, _ in markets[:top_n]]
 
                 if result:
-                    log.info(f"✓ Loaded {len(result)} markets: {', '.join(result[:5])}...")
+                    # [AUDIT FIX 2026-05-13] Populate global cache so leverage/price checks work immediately
+                    self._market_cache = (universe, contexts)
+                    self._market_cache_time = time.monotonic()
+                    log.info(f"✓ Loaded {len(result)} markets and updated universe cache.")
                     return result
 
                 log.warning(f"get_top_volume_markets: No markets with volume (attempt {attempt+1}/{max_retries})")

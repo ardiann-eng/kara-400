@@ -354,10 +354,11 @@ class PaperExecutor:
         self._available  += pos.margin_usd + floating_pnl
         self._used_margin-= pos.margin_usd
         
-        # BUG 1 FIX: Persist to SQLite
+        # Remove from in-memory dict and DB
+        self._positions.pop(position_id, None)
         from core.db import user_db
         user_db.remove_paper_position(position_id)
-        user_db.save_paper_state(self.chat_id, self._balance, self._balance) # equity = balance when no positions
+        user_db.save_paper_state(self.chat_id, self._balance, self._balance)
 
         # Total PnL for the record (cumulative)
         total_pnl = pos.pnl_realized
@@ -602,8 +603,9 @@ class PaperExecutor:
                     half_spread_pct = (best_ask - best_bid) / (2.0 * mid)
 
                     # ── Layer 2: Market impact (walk the book) ───────────
-                    # For BUY (LONG): walk ASK side; for SELL (SHORT): walk BID side
-                    book_side = asks if side == Side.LONG else list(reversed(bids))
+                    # LONG: walk ASK side (sorted ascending — best ask first)
+                    # SHORT: walk BID side (sorted descending — best bid first, already correct)
+                    book_side = asks if side == Side.LONG else bids
                     impact_pct = self._walk_book(book_side, mid, notional_usd)
 
                     total = half_spread_pct + impact_pct
@@ -629,53 +631,43 @@ class PaperExecutor:
         levels: list, mid_price: float, notional_usd: float
     ) -> float:
         """
-        Walk the orderbook to calculate volume-weighted average price (VWAP)
-        for a given order size, then return the impact as % of mid.
+        Walk the orderbook to calculate VWAP impact for a given notional size.
+        Returns impact as fraction of mid price (e.g. 0.0012 = 12 bps).
 
-        This simulates how a real market order eats through multiple price levels.
+        levels: [(price, size), ...] already sorted correctly by caller:
+          - LONG  → asks sorted ascending  (best ask first)
+          - SHORT → bids sorted descending (best bid first)
         """
         if notional_usd <= 0 or not levels or mid_price <= 0:
             return 0.0
 
         remaining_usd = notional_usd
-        total_filled_usd = 0.0
-        total_filled_value = 0.0  # price × size in USD
+        filled_usd = 0.0
+        vwap_num = 0.0  # sum of (price × fill_usd)
 
         for px, sz in levels:
             if remaining_usd <= 0:
                 break
-            level_usd = px * sz  # total USD liquidity at this level
-            fill_usd = min(remaining_usd, level_usd)
-            total_filled_usd += fill_usd
-            total_filled_value += fill_usd  # fills at this price level
-            # Weight by price deviation from mid
-            remaining_usd -= fill_usd
-
-        if total_filled_usd <= 0:
-            return 0.0
-
-        # VWAP calculation: weighted average price across levels
-        vwap = 0.0
-        remaining_usd = notional_usd
-        for px, sz in levels:
-            if remaining_usd <= 0:
-                break
+            if px <= 0:
+                continue
             level_usd = px * sz
             fill_usd = min(remaining_usd, level_usd)
-            weight = fill_usd / notional_usd
-            vwap += px * weight
+            vwap_num += px * fill_usd
+            filled_usd += fill_usd
             remaining_usd -= fill_usd
 
-        # If we didn't fill the entire order, extrapolate from last level
+        if filled_usd <= 0:
+            return 0.0
+
+        # If order larger than visible book, extrapolate from last level + 0.05% penalty
         if remaining_usd > 0 and levels:
             last_px = levels[-1][0]
-            unfilled_weight = remaining_usd / notional_usd
-            # Assume remaining fills at worst price + 0.05% penalty
-            vwap += last_px * 1.0005 * unfilled_weight
+            penalty_px = last_px * 1.0005
+            vwap_num += penalty_px * remaining_usd
+            filled_usd += remaining_usd
 
-        # Impact = how far VWAP deviates from mid
-        impact = abs(vwap - mid_price) / mid_price
-        return impact
+        vwap = vwap_num / filled_usd
+        return abs(vwap - mid_price) / mid_price
 
     @staticmethod
     def _fallback_slippage(asset: str) -> float:

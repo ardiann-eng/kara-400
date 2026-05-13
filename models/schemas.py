@@ -200,7 +200,7 @@ class TradeSignal(BaseModel):
             sl_pct  = cfg.default_sl_pct
             tp1_pct = cfg.tp1_pct
             tp2_pct = cfg.tp2_pct
-            self.suggested_leverage = 10  # default standard
+            self.suggested_leverage = min(cfg.default_leverage, cfg.max_leverage)
 
         # ── 1. Calculate Stop Loss ────────────────────────────────────
         if atr_value > 0 and config.RISK.enable_atr_sl:

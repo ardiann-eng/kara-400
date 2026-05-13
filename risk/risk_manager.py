@@ -451,19 +451,27 @@ class RiskManager:
         return contracts * signal.entry_price * sl_pct
 
     def get_risk_pct(self, score: int, equity: float) -> float:
-        # 2-tier berdasarkan data 55 trade aktual (avg skor 62.4).
-        # Skor 65+ WR 33% — tidak lebih baik dari 57-64 (50%), jadi tidak dapat tier lebih tinggi.
+        # Baca baseline dari mode-aware config (ScalperConfig.risk_per_trade_pct = 12%,
+        # RiskConfig.risk_per_trade_pct = 1%). Hardcode lama (2.0/2.5%) mengabaikan C6 fix.
+        cfg = self._cfg()
+        base = cfg.risk_per_trade_pct
+
+        # Score multiplier: skor tinggi dapat sedikit lebih besar
         if score >= 65:
-            risk_pct = 0.025   # 2.5% — WR 33%, moderat
+            risk_pct = base * 1.10   # +10% untuk high-conviction
         else:
-            risk_pct = 0.020   # 2.0% — baseline untuk 57-64
-        
+            risk_pct = base          # baseline untuk 57-64
+
+        # min_risk floor agar sizing tidak terlalu kecil di modal kecil
+        min_risk = getattr(cfg, 'min_risk_per_trade_pct', base * 0.5)
+        risk_pct = max(risk_pct, min_risk)
+
         # Equity protection multiplier
         ratio = equity / self._session_start_balance if self._session_start_balance > 0 else 1.0
         if ratio >= 1.5:   equity_mult = 0.8   # protect gains
         elif ratio <= 0.8: equity_mult = 0.5   # damaged mode
         else:              equity_mult = 1.0
-        
+
         return risk_pct * equity_mult
 
     # ──────────────────────────────────────────
