@@ -1024,9 +1024,8 @@ class KaraBot:
             # localize_for_user akan override dengan config mentah dan merusak RR.
             if user_mode == 'scalper':
                 user_signal.trade_mode = user_mode
-                import config as _cfg
-                _scfg = _cfg.SCALPER
-                user_signal.suggested_leverage = min(_scfg.default_leverage, _scfg.max_leverage)
+                # suggested_leverage sudah dihitung _build_scalper_signal dengan
+                # triple cap (config × user × exchange maxLeverage) — tidak di-override.
             else:
                 user_signal.localize_for_user(user_mode, atr_value=atr_value)
 
