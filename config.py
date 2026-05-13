@@ -219,13 +219,13 @@ class ScalperConfig:
     default_leverage:        int   = 15       # [AUDIT] 25→15x: max ROE loss -18% (was -50%)
     max_leverage:            int   = 20       # [AUDIT] 35→20x: hard cap realistis
 
-    # ── [C6 FIX] Position sizing — naik untuk modal kecil $62.50 ──
-    # Sebelum: 8% risk × vol_scale → notional ~$40 → profit $0.15 < fee
-    # Sesudah: 12% risk → notional ~$75-100 → profit $0.50+ > fee
-    # Dengan leverage 15x dan SL 1.2%: risk = $62.5 × 0.12 = $7.50 per trade
-    risk_per_trade_pct:      float = 0.12     # [AUDIT] 8%→12%: bigger size for small capital
-    max_risk_per_trade_pct:  float = 0.15     # [AUDIT] 12%→15%: absolute cap raised
-    min_risk_per_trade_pct:  float = 0.08     # [AUDIT] 5%→8%: floor raised for meaningful P&L
+    # ── [C6 FIX] Position sizing — dikalibrasi untuk modal kecil $62.50 ──
+    # Formula: size_usd = (balance × risk_pct) / (sl_pct × leverage)
+    # Dengan SL 1.5% dan lev 15x: $62.5 × 0.05 / (0.015 × 15) = $13.9 margin (~22%)
+    # 12% lama → size $33 → selalu kena hard cap 35% ($21.87) — cap jadi default sizing
+    risk_per_trade_pct:      float = 0.05     # 12%→5%: size ~$13.9, tidak kena cap 35%
+    max_risk_per_trade_pct:  float = 0.08     # 15%→8%: absolute cap
+    min_risk_per_trade_pct:  float = 0.03     # 8%→3%: floor untuk profit di atas fee
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
     # ── [C3 FIX] SL/TP — dikalibrasi untuk 15x leverage ──
