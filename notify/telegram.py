@@ -1501,7 +1501,8 @@ class KaraTelegram:
                 "pnl_pct": "PnL (%)",
                 "score": "Signal Score",
                 "reason": "Exit Reason",
-                "pos_id": "Position ID"
+                "pos_id": "Position ID",
+                "autopsy": "Autopsy"
             }
             # Only keep columns that exist in the data
             cols = [c for c in column_map.keys() if c in df.columns]
