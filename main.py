@@ -1019,7 +1019,16 @@ class KaraBot:
                 except Exception as e:
                     log.debug(f"ATR calc skipped for {user_signal.asset}: {e}")
                 
-            user_signal.localize_for_user(user_mode, atr_value=atr_value)
+            # Scalper: localize_for_user hanya untuk leverage & trade_mode.
+            # SL/TP sudah dikalkulasi oleh _build_scalper_signal (score matrix + ATR),
+            # localize_for_user akan override dengan config mentah dan merusak RR.
+            if user_mode == 'scalper':
+                user_signal.trade_mode = user_mode
+                import config as _cfg
+                _scfg = _cfg.SCALPER
+                user_signal.suggested_leverage = min(_scfg.default_leverage, _scfg.max_leverage)
+            else:
+                user_signal.localize_for_user(user_mode, atr_value=atr_value)
 
             # ── Vol-aware SL/TP recalculation (Fix 1 + Fix 4) ────────────────
             # calculate_levels() pakai vol_cache dari scorer — zero API calls.
