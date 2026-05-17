@@ -680,10 +680,14 @@ class KaraTelegram:
             if not user: return
 
             if "leverage" in cmd:
-                if not (1 <= val <= 30):
-                    await update.effective_message.reply_text("❌ Leverage harus antara 1 dan 30x.")
+                if not (1 <= val <= 125):
+                    await update.effective_message.reply_text("❌ Leverage harus antara 1 dan 125x.")
                     return
-                user.config.max_leverage = val
+                # Simpan ke field yang sesuai mode trading user
+                if user.config.trading_mode == "scalper":
+                    user.config.scl_max_leverage = val
+                else:
+                    user.config.std_max_leverage = val
                 field_name = "Leverage Maksimal"
             else: # setmaxpos
                 if not (1 <= val <= 10):
@@ -693,6 +697,9 @@ class KaraTelegram:
                 field_name = "Maksimal Posisi"
 
             user_db.update_user(user)
+            # Rebuild session supaya executor langsung pakai setting baru
+            if self.bot_app and chat_id in self.bot_app.sessions:
+                del self.bot_app.sessions[chat_id]
             log.info(f"✅ User {chat_id} updated {field_name} to {val}")
             await update.effective_message.reply_html(f"✅ <b>{field_name}</b> diperbarui menjadi: <code>{val}</code>")
             
@@ -730,7 +737,12 @@ class KaraTelegram:
             user = user_db.get_user(chat_id)
             setattr(user.config, field, val)
             user_db.update_user(user)
-            
+
+            # Rebuild session supaya executor (PaperExecutor/BitgetExecutor)
+            # langsung pakai setting baru (leverage, max_concurrent, dll).
+            if self.bot_app and chat_id in self.bot_app.sessions:
+                del self.bot_app.sessions[chat_id]
+
             await update.effective_message.reply_html(f"✅ <b>Berhasil!</b> Nilai diperbarui menjadi: <code>{val}</code>")
             return await self.cmd_settings(update, ctx)
             
