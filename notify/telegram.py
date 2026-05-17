@@ -38,6 +38,8 @@ log = logging.getLogger("kara.telegram")
 WAITING_CODE = 1
 WAITING_CONFIG_VALUE = 2
 WAITING_MAIN_ADDRESS = 3
+WAITING_BITGET_CREDS = 4
+WAITING_BITGET_LEVERAGE = 5
 
 DAILY_REPORT_TEMPLATE = """
 📊 <b>KARA DAILY INSIGHTS</b> 🌸
@@ -118,6 +120,80 @@ Kamu akan mengaktifkan trading dengan dana nyata di Hyperliquid. Baca ini sebelu
 3. Futures crypto berisiko tinggi. Gunakan hanya dana yang siap untuk hilang sepenuhnya.
 
 <i>Lanjut untuk membuat Agent Wallet dan mengaktifkan Live Mode?</i>
+"""
+
+BITGET_LIVE_RISK_WARNING = """
+⚠️ <b>Live Mode — Bitget Execution</b> 🌸
+
+Mode ini akan menggunakan dana nyata di akun <b>Bitget USDT-M Futures</b> kamu.
+
+<b>Bagaimana cara kerjanya:</b>
+1. 🧠 Sinyal trading dianalisis dari data <b>Hyperliquid</b> (data terbaik untuk scalping).
+2. 💸 Eksekusi <b>otomatis</b> di akun <b>Bitget</b> kamu via API.
+3. 🛡️ Stop-Loss dipasang langsung di server Bitget — tetap aktif walau bot offline.
+4. 🔐 API Key kamu dienkripsi (Fernet) dan tidak pernah keluar dari server KARA.
+
+<b>Yang perlu disiapkan:</b>
+• Akun Bitget terverifikasi KYC
+• Saldo USDT di Futures Wallet (minimum $20 disarankan)
+• API Key dengan permission: <b>Read + Trade</b> (JANGAN aktifkan Withdraw)
+
+<i>Lanjut ke tutorial cara membuat API Key Bitget?</i>
+"""
+
+BITGET_API_TUTORIAL = """
+📘 <b>Tutorial: Buat API Key Bitget</b> 🌸
+
+Ikuti langkah-langkah ini dengan urut. Sekitar <b>3 menit</b> dari awal sampai selesai.
+
+<b>1. Buka halaman API Management</b>
+   • Login ke <a href="https://www.bitget.com/account/newapi">www.bitget.com</a>
+   • Menu: <b>Profil → API Management</b>
+
+<b>2. Klik "Create API"</b> → pilih <b>"System-generated"</b>
+
+<b>3. Isi form API</b>
+   • <b>API Name</b>: <code>KARA-Bot</code>
+   • <b>Passphrase</b>: buat passphrase 8-32 karakter (catat baik-baik!)
+   • <b>Permissions</b>:
+     ✅ Read
+     ✅ Trade
+     ❌ Withdraw  ← <b>JANGAN dicentang</b>
+   • <b>IP Whitelist</b>: kosongkan (atau tambah IP server KARA jika kamu tahu)
+
+<b>4. Verifikasi (2FA / Email / SMS)</b>
+
+<b>5. Salin 3 data ini</b> (sekali lihat saja):
+   • API Key
+   • Secret Key
+   • Passphrase (yang kamu buat di langkah 3)
+
+<b>6. Kirim ke KARA</b> dengan format <b>SATU baris</b> dipisah titik dua:
+<code>API_KEY:SECRET_KEY:PASSPHRASE</code>
+
+Contoh:
+<code>bg_1a2b3c...:abcdef123...:MyPass2026</code>
+
+⚠️ Jangan kirim ke siapa pun selain bot ini. API Key kamu akan dienkripsi otomatis.
+
+<i>Sudah siap? Kirim credentials kamu sekarang, atau ketik /cancel untuk batal.</i>
+"""
+
+BITGET_CONNECTED_TEMPLATE = """
+✅ <b>Bitget Terhubung!</b> 🎉
+
+Akun Bitget kamu sudah aktif untuk eksekusi otomatis KARA.
+
+💰 <b>Saldo USDT</b>: <code>${balance}</code>
+📊 <b>Posisi terbuka</b>: <code>{positions}</code>
+⚡ <b>Max Leverage</b>: <code>{leverage}x</code> (bisa diubah dengan /setleverage)
+
+<b>Selanjutnya:</b>
+• Ketik /status untuk cek saldo & posisi
+• Ketik /settings untuk atur leverage & risk
+• Ketik /bitget untuk info koneksi Bitget
+
+<i>KARA sekarang berjalan dalam <b>LIVE MODE — Bitget Execution</b>. Happy trading! 💜</i>
 """
 
 AGENT_WALLET_CREATED_TEMPLATE = """
@@ -282,21 +358,34 @@ class KaraTelegram:
                 allow_reentry=True
             )
 
-            # Live Setup ConversationHandler
+            # Live Setup ConversationHandler — branches by EXECUTION_EXCHANGE
             live_conv = ConversationHandler(
                 entry_points=[CommandHandler("live", self.cmd_live)],
                 states={
                     WAITING_MAIN_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_main_address)],
+                    WAITING_BITGET_CREDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bitget_creds)],
                 },
                 fallbacks=[CommandHandler("cancel", self.cmd_cancel), CommandHandler("live", self.cmd_live)],
                 per_user=True,
                 allow_reentry=True
             )
 
+            # Bitget leverage ConversationHandler
+            bitget_lev_conv = ConversationHandler(
+                entry_points=[CommandHandler("setbitgetlev", self.cmd_set_bitget_leverage_start)],
+                states={
+                    WAITING_BITGET_LEVERAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bitget_leverage)],
+                },
+                fallbacks=[CommandHandler("cancel", self.cmd_cancel)],
+                per_user=True,
+                allow_reentry=True,
+            )
+
             handlers = [
                 access_conv,
                 settings_conv,
                 live_conv,
+                bitget_lev_conv,
                 CommandHandler("help",     self.cmd_help),
                 CommandHandler("status",   self.cmd_status),
                 CommandHandler("pos",      self.cmd_positions),
@@ -309,13 +398,17 @@ class KaraTelegram:
                 CommandHandler("settings", self.cmd_settings),
                 CommandHandler("signal",   self.cmd_signal),
                 CommandHandler("whatsnew", self.cmd_whatsnew),
-                
+
                 # Direct Config Commands
                 CommandHandler("setleverage",  self.cmd_direct_set_config),
                 CommandHandler("setmaxpos",    self.cmd_direct_set_config),
                 CommandHandler("resetdata",    self.cmd_reset_data),
                 CommandHandler("weblogin",     self.cmd_weblogin),
-                # No more manual whatsnew command, it's automatic now
+
+                # Bitget-specific commands
+                CommandHandler("bitget",       self.cmd_bitget_info),
+                CommandHandler("bitgetreset",  self.cmd_bitget_reset),
+                CommandHandler("bitgettut",    self.cmd_bitget_tutorial),
 
                 CallbackQueryHandler(self.on_callback),
             ]
@@ -341,7 +434,10 @@ class KaraTelegram:
                         BotCommand("signal",   "Lihat sinyal trading terbaru"),
                         BotCommand("journal",  "Statistik & Jurnal performa trading"),
                         BotCommand("paper",    "Kembali ke Paper Mode & Reset Saldo"),
-                        BotCommand("live",     "Setup Live Mode (Agent Wallet)"),
+                        BotCommand("live",     "Setup Live Mode (Agent Wallet / Bitget)"),
+                        BotCommand("bitget",   "Info koneksi Bitget"),
+                        BotCommand("bitgettut","Tutorial buat API Key Bitget"),
+                        BotCommand("setbitgetlev", "Atur leverage max Bitget"),
                         BotCommand("settings", "Pusat Kendali (Threshold & Leverage)"),
                         BotCommand("help",     "Daftar instruksi lengkap"),
                         BotCommand("export",   "Export riwayat trade ke Excel"),
@@ -685,6 +781,297 @@ class KaraTelegram:
             disable_web_page_preview=True
         )
         return ConversationHandler.END
+
+    # ──────────────────────────────────────────
+    # BITGET LIVE SETUP FLOW
+    # ──────────────────────────────────────────
+
+    async def cmd_bitget_tutorial(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Standalone command for /bitgettut — shows tutorial without entering conv flow."""
+        if not self._is_authorized(update): return
+        await update.effective_message.reply_html(
+            BITGET_API_TUTORIAL,
+            disable_web_page_preview=True,
+        )
+
+    async def cmd_bitget_info(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Tampilkan status koneksi Bitget user — saldo, posisi, leverage."""
+        if not self._is_authorized(update): return
+        chat_id = str(update.effective_chat.id)
+        user = user_db.get_user(chat_id)
+        if not user:
+            return
+
+        if not (user.bitget_api_key and user.bitget_authorized):
+            await update.effective_message.reply_html(
+                "🔌 <b>Bitget belum terhubung</b>\n\n"
+                "Ketik /live untuk setup koneksi Bitget,\n"
+                "atau /bitgettut untuk lihat tutorial buat API Key.\n\n"
+                f"<i>Status execution exchange: <b>{config.EXECUTION_EXCHANGE}</b></i>"
+            )
+            return
+
+        bg_client = getattr(self, "bitget_client", None)
+        if not bg_client:
+            await update.effective_message.reply_html(
+                "⚠️ Bitget client belum aktif di server. Coba lagi nanti."
+            )
+            return
+
+        try:
+            user_bg = bg_client.with_credentials(
+                user.bitget_api_key, user.bitget_api_secret, user.bitget_passphrase
+            )
+            acct = await user_bg.get_account()
+            positions = await user_bg.get_open_positions()
+            equity = float(acct.get("accountEquity") or acct.get("equity") or 0)
+            available = float(acct.get("crossedMaxAvailable") or acct.get("available") or 0)
+            pos_count = len([p for p in positions if float(p.get("total", 0) or 0) > 0])
+
+            # User's configured leverage cap
+            cfg = user.config
+            if cfg.bitget_max_leverage > 0:
+                lev_cap = cfg.bitget_max_leverage
+            elif cfg.trading_mode == "scalper":
+                lev_cap = cfg.scl_max_leverage
+            else:
+                lev_cap = cfg.std_max_leverage
+
+            await update.effective_message.reply_html(
+                f"✅ <b>Bitget Status</b> 🌸\n\n"
+                f"🔗 <b>Connected</b> sebagai API key <code>{user.bitget_api_key[:6]}…{user.bitget_api_key[-4:]}</code>\n\n"
+                f"💰 <b>Equity</b>: <code>${equity:.2f}</code>\n"
+                f"💵 <b>Available</b>: <code>${available:.2f}</code>\n"
+                f"📊 <b>Open Positions</b>: <code>{pos_count}</code>\n"
+                f"⚡ <b>Max Leverage</b>: <code>{lev_cap}x</code> (ubah dengan /setbitgetlev)\n\n"
+                f"<i>Execution mode: <b>{config.EXECUTION_EXCHANGE}</b> | "
+                f"Bot mode: <b>{user.config.bot_mode.value}</b></i>"
+            )
+        except Exception as e:
+            await update.effective_message.reply_html(
+                f"❌ <b>Gagal cek Bitget</b>: <code>{html.escape(str(e))}</code>\n\n"
+                "Coba ketik /live lagi untuk reconnect."
+            )
+
+    async def cmd_bitget_reset(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Hapus credentials Bitget user — paksa setup ulang."""
+        if not self._is_authorized(update): return
+        chat_id = str(update.effective_chat.id)
+        user = user_db.get_user(chat_id)
+        if not user:
+            return
+
+        args = ctx.args or []
+        if not args or args[0].lower() != "confirm":
+            await update.effective_message.reply_html(
+                "⚠️ <b>Hapus Credentials Bitget?</b>\n\n"
+                "Ini akan menghapus API Key, Secret, Passphrase Bitget dari KARA.\n"
+                "Posisi yang masih terbuka di Bitget <b>tidak terpengaruh</b> — kelola manual atau setup ulang dengan /live.\n\n"
+                "Ketik <code>/bitgetreset confirm</code> untuk lanjut."
+            )
+            return
+
+        user.bitget_api_key = None
+        user.bitget_api_secret = None
+        user.bitget_passphrase = None
+        user.bitget_authorized = False
+        if config.EXECUTION_EXCHANGE == "bitget":
+            user.config.bot_mode = BotMode.PAPER
+        user_db.update_user(user)
+
+        # Invalidate session
+        if self.bot_app and chat_id in self.bot_app.sessions:
+            del self.bot_app.sessions[chat_id]
+
+        await update.effective_message.reply_html(
+            "✅ <b>Credentials Bitget dihapus.</b>\n\n"
+            "Bot mode di-reset ke <b>PAPER</b>. Ketik /live untuk setup ulang kapan saja."
+        )
+
+    async def handle_bitget_creds(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """
+        User mengirim "API_KEY:SECRET:PASSPHRASE" — verify dan simpan terenkripsi.
+        """
+        if not self._is_authorized(update): return ConversationHandler.END
+
+        chat_id = str(update.effective_chat.id)
+        text = (update.effective_message.text or "").strip()
+
+        # Validasi format
+        parts = text.split(":")
+        if len(parts) < 3:
+            await update.effective_message.reply_html(
+                "❌ <b>Format salah.</b>\n\n"
+                "Kirim dalam format <code>API_KEY:SECRET:PASSPHRASE</code> (dipisah titik dua).\n\n"
+                "Ketik /cancel kalau mau batal."
+            )
+            return WAITING_BITGET_CREDS
+
+        api_key    = parts[0].strip()
+        api_secret = parts[1].strip()
+        passphrase = ":".join(parts[2:]).strip()  # passphrase boleh ada ":" di dalamnya
+
+        if not (api_key and api_secret and passphrase):
+            await update.effective_message.reply_html(
+                "❌ Ada bagian yang kosong. Cek lagi API Key / Secret / Passphrase kamu."
+            )
+            return WAITING_BITGET_CREDS
+
+        # Verify via Bitget API
+        bg_client = getattr(self, "bitget_client", None)
+        if not bg_client:
+            await update.effective_message.reply_html(
+                "⚠️ Bitget belum aktif di server. Hubungi admin."
+            )
+            return ConversationHandler.END
+
+        # Delete the user's plaintext credentials message ASAP — keamanan
+        try:
+            await update.effective_message.delete()
+        except Exception:
+            pass
+
+        await update.effective_chat.send_action("typing")
+
+        try:
+            test_client = bg_client.with_credentials(api_key, api_secret, passphrase)
+            ok, err = await test_client.verify_credentials()
+            if not ok:
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ <b>Verifikasi gagal</b>: {html.escape(err)}\n\n"
+                         "Cek lagi API Key / Secret / Passphrase dan permission (harus ada <b>Trade</b>).\n"
+                         "Kirim ulang credentials, atau /cancel.",
+                    parse_mode=ParseMode.HTML,
+                )
+                return WAITING_BITGET_CREDS
+
+            # Save (encrypted via core.db Fernet)
+            user = user_db.get_user(chat_id)
+            user.bitget_api_key = api_key
+            user.bitget_api_secret = api_secret
+            user.bitget_passphrase = passphrase
+            user.bitget_authorized = True
+            user.config.bot_mode = BotMode.LIVE
+            user_db.update_user(user)
+
+            # Get account info for confirmation message
+            try:
+                acct = await test_client.get_account()
+                balance = float(acct.get("accountEquity") or acct.get("equity") or 0)
+                positions = await test_client.get_open_positions()
+                pos_count = len([p for p in positions if float(p.get("total", 0) or 0) > 0])
+            except Exception:
+                balance = 0.0
+                pos_count = 0
+
+            # Resolve user leverage cap
+            cfg = user.config
+            if cfg.bitget_max_leverage > 0:
+                lev = cfg.bitget_max_leverage
+            elif cfg.trading_mode == "scalper":
+                lev = cfg.scl_max_leverage
+            else:
+                lev = cfg.std_max_leverage
+
+            # Reset session supaya executor di-rebuild sebagai BitgetExecutor
+            if self.bot_app and chat_id in self.bot_app.sessions:
+                del self.bot_app.sessions[chat_id]
+                await self.bot_app.get_session(chat_id)
+
+            await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=BITGET_CONNECTED_TEMPLATE.format(
+                    balance=f"{balance:.2f}",
+                    positions=pos_count,
+                    leverage=lev,
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return ConversationHandler.END
+        except Exception as e:
+            log.error(f"Bitget creds verify failed for {chat_id}: {e}")
+            await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Verifikasi error: <code>{html.escape(str(e))}</code>\n\n"
+                     "Kirim ulang credentials, atau /cancel.",
+                parse_mode=ParseMode.HTML,
+            )
+            return WAITING_BITGET_CREDS
+
+    # ──────────────────────────────────────────
+    # BITGET LEVERAGE SETTING
+    # ──────────────────────────────────────────
+
+    async def cmd_set_bitget_leverage_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Entry /setbitgetlev — pertama tanya angka leverage."""
+        if not self._is_authorized(update): return ConversationHandler.END
+        chat_id = str(update.effective_chat.id)
+        user = user_db.get_user(chat_id)
+        if not user:
+            return ConversationHandler.END
+
+        # Shortcut: kalau ada arg, langsung set
+        args = ctx.args or []
+        if args:
+            try:
+                val = int(args[0])
+                return await self._apply_bitget_leverage(update, user, val)
+            except ValueError:
+                pass
+
+        cur = user.config.bitget_max_leverage
+        cur_display = f"{cur}x" if cur > 0 else "(otomatis dari trading mode)"
+        await update.effective_message.reply_html(
+            f"⚡ <b>Atur Bitget Max Leverage</b>\n\n"
+            f"Setting sekarang: <b>{cur_display}</b>\n\n"
+            f"Ketik angka <b>1-125</b> (Bitget max per-asset bisa lebih kecil — akan auto-cap).\n"
+            f"Ketik <b>0</b> untuk pakai default dari trading mode (scalper={user.config.scl_max_leverage}x).\n\n"
+            f"Atau /cancel untuk batal."
+        )
+        return WAITING_BITGET_LEVERAGE
+
+    async def handle_bitget_leverage(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return ConversationHandler.END
+        chat_id = str(update.effective_chat.id)
+        user = user_db.get_user(chat_id)
+        if not user:
+            return ConversationHandler.END
+
+        text = (update.effective_message.text or "").strip()
+        try:
+            val = int(text)
+        except ValueError:
+            await update.effective_message.reply_text("❌ Harus angka. Coba lagi atau /cancel.")
+            return WAITING_BITGET_LEVERAGE
+        return await self._apply_bitget_leverage(update, user, val)
+
+    async def _apply_bitget_leverage(self, update: Update, user, val: int):
+        if val < 0 or val > 125:
+            await update.effective_message.reply_text("❌ Range 0-125. Coba lagi atau /cancel.")
+            return WAITING_BITGET_LEVERAGE
+        user.config.bitget_max_leverage = val
+        user_db.update_user(user)
+
+        # Invalidate session supaya executor pakai leverage baru
+        chat_id = user.chat_id
+        if self.bot_app and chat_id in self.bot_app.sessions:
+            del self.bot_app.sessions[chat_id]
+
+        if val == 0:
+            msg = (
+                f"✅ <b>Bitget leverage di-reset ke default trading mode</b>\n"
+                f"Akan pakai <code>{user.config.scl_max_leverage}x</code> (scalper) "
+                f"atau <code>{user.config.std_max_leverage}x</code> (standard)."
+            )
+        else:
+            msg = (
+                f"✅ <b>Bitget Max Leverage di-set ke {val}x</b>\n\n"
+                f"<i>Catatan: Bitget per-asset max leverage tetap di-apply otomatis — "
+                f"jika lebih kecil dari {val}x, KARA akan kurangi sesuai limit Bitget.</i>"
+            )
+        await update.effective_message.reply_html(msg)
+        return ConversationHandler.END
         """Handle direct commands like /setleverage 20 or /setmaxpos 3."""
         if not self._is_authorized(update): return
         
@@ -755,6 +1142,11 @@ class KaraTelegram:
             "• /settings — Atur threshold & leverage pribadi\n"
             "• /live     — Aktivasi Live Mode (Risiko Nyata)\n"
             "• /paper    — Kembali ke Paper Mode & Reset saldo\n\n"
+            "🔌 <b>Bitget Execution</b>\n"
+            "• /bitget       — Status koneksi Bitget (saldo, posisi, leverage)\n"
+            "• /bitgettut    — Tutorial buat API Key Bitget (step-by-step)\n"
+            "• /setbitgetlev — Atur max leverage khusus Bitget\n"
+            "• /bitgetreset  — Hapus credentials Bitget (paksa setup ulang)\n\n"
             "📊 <b>Informasi Portofolio</b>\n"
             "• /status   — Status bot, ekuitas, dan float\n"
             "• /pos      — Lihat daftar koin yang sedang jalan\n"
@@ -1641,20 +2033,38 @@ class KaraTelegram:
         )
 
     async def cmd_live(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Start the Live Mode setup with risk warning."""
+        """Start Live Mode setup. Branches by EXECUTION_EXCHANGE."""
         if not self._is_authorized(update): return ConversationHandler.END
         if self._is_throttled(str(update.effective_chat.id), threshold=5, action_key="live"): return ConversationHandler.END
-        
+
+        # Branch: Bitget vs Hyperliquid
+        if config.EXECUTION_EXCHANGE == "bitget":
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📘 Lihat Tutorial API Bitget", callback_data="bitget_setup_tutorial"),
+                ],
+                [
+                    InlineKeyboardButton("🚀 Saya Sudah Punya API Key", callback_data="bitget_setup_creds"),
+                    InlineKeyboardButton("❌ Batal", callback_data="close_settings"),
+                ],
+            ])
+            await update.effective_message.reply_html(
+                BITGET_LIVE_RISK_WARNING,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+            return WAITING_BITGET_CREDS  # waits for either tutorial click or creds DM
+
+        # Default: Hyperliquid Agent Wallet flow (existing behavior)
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🚀 Lanjut Setup", callback_data="setup_live_start"),
                 InlineKeyboardButton("❌ Batal", callback_data="close_settings")
             ]
         ])
-        
         await update.effective_message.reply_html(
             LIVE_SETUP_RISK_WARNING,
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
         return WAITING_MAIN_ADDRESS
 
@@ -2352,6 +2762,19 @@ class KaraTelegram:
         # ── LIVE SETUP FLOW ──
         if query.data == "setup_live_start":
             await query.answer()
+            # [FIX 2026-05-17] Kalau EXECUTION_EXCHANGE=bitget, jangan tampilkan
+            # HL wallet flow — redirect ke Bitget credentials flow.
+            if config.EXECUTION_EXCHANGE == "bitget":
+                await query.edit_message_text(
+                    "🔑 <b>Kirim Credentials Bitget</b>\n\n"
+                    "Format <b>SATU baris</b> dipisah titik dua:\n"
+                    "<code>API_KEY:SECRET_KEY:PASSPHRASE</code>\n\n"
+                    "⚠️ Pastikan API Key sudah punya permission <b>Trade</b>.\n"
+                    "⚠️ JANGAN aktifkan permission Withdraw.\n\n"
+                    "<i>Pesan kamu akan dihapus otomatis setelah diverifikasi. /cancel untuk batal.</i>",
+                    parse_mode=ParseMode.HTML,
+                )
+                return WAITING_BITGET_CREDS
             await query.edit_message_text(
                 "🛡️ <b>LANGKAH 1: IDENTITAS WALLET</b>\n\n"
                 "KARA perlu mengetahui alamat wallet utama kamu untuk memverifikasi izin Agent nantinya.\n\n"
@@ -2360,6 +2783,29 @@ class KaraTelegram:
                 parse_mode=ParseMode.HTML
             )
             return WAITING_MAIN_ADDRESS
+
+        # ── BITGET SETUP FLOW ──
+        if query.data == "bitget_setup_tutorial":
+            await query.answer()
+            await query.edit_message_text(
+                BITGET_API_TUTORIAL,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            return WAITING_BITGET_CREDS
+
+        if query.data == "bitget_setup_creds":
+            await query.answer()
+            await query.edit_message_text(
+                "🔑 <b>Kirim Credentials Bitget</b>\n\n"
+                "Format <b>SATU baris</b> dipisah titik dua:\n"
+                "<code>API_KEY:SECRET_KEY:PASSPHRASE</code>\n\n"
+                "⚠️ Pastikan API Key sudah punya permission <b>Trade</b>.\n"
+                "⚠️ JANGAN aktifkan permission Withdraw.\n\n"
+                "<i>Pesan kamu akan dihapus otomatis setelah diverifikasi. /cancel untuk batal.</i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return WAITING_BITGET_CREDS
 
         elif query.data == "authorize_final":
             await query.answer("Sedang memverifikasi koneksi...", show_alert=False)
