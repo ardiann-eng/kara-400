@@ -753,12 +753,28 @@ class PaperExecutor(BaseExecutor):
 
     async def _get_exchange_max_leverage(self, asset: str) -> int:
         """
-        [AUDIT FIX 2026-05-13] Fetch the actual max leverage allowed by Hyperliquid
-        for a specific asset from exchange metadata.
+        Fetch max leverage allowed by the EXECUTION exchange for this asset.
 
-        This ensures paper mode never simulates leverage higher than what
-        Hyperliquid actually allows — preventing unrealistic ROE projections.
+        [FIX 2026-05-17] Kalau EXECUTION_EXCHANGE=bitget, pakai Bitget max leverage
+        dari SymbolRegistry (sudah di-fetch saat startup). Jangan pakai HL metadata
+        karena HL dan Bitget punya tier leverage berbeda (mis. MANTA: HL=3x, Bitget=20x).
+
+        Fallback ke HL metadata kalau Bitget registry tidak tersedia.
         """
+        import config as _cfg
+        if _cfg.EXECUTION_EXCHANGE == "bitget":
+            try:
+                from utils.symbol_registry import get_registry
+                registry = get_registry()
+                if registry and registry.is_available(asset):
+                    bitget_max = registry.get_max_leverage(asset)
+                    if bitget_max > 0:
+                        log.debug(f"[PAPER-LEV] {asset}: Bitget maxLeverage={bitget_max}x")
+                        return bitget_max
+            except Exception as e:
+                log.debug(f"[PAPER-LEV] {asset}: Bitget registry lookup failed ({e}), fallback HL")
+
+        # Fallback: HL exchange metadata
         try:
             from data.hyperliquid_client import get_client
             client = get_client()
@@ -767,12 +783,11 @@ class PaperExecutor(BaseExecutor):
                 for u in universe:
                     if isinstance(u, dict) and u.get("name") == asset:
                         max_lev = int(u.get("maxLeverage", 50))
-                        log.debug(f"[PAPER-LEV] {asset}: exchange maxLeverage={max_lev}x")
+                        log.debug(f"[PAPER-LEV] {asset}: HL maxLeverage={max_lev}x")
                         return max_lev
         except Exception as e:
             log.debug(f"[PAPER-LEV] {asset}: could not fetch exchange leverage ({e})")
 
-        # Conservative fallback if metadata unavailable
         return 50
 
     def _calculate_liquidation_price(self, entry: float, side: Side, leverage: int) -> float:
