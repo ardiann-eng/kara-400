@@ -324,7 +324,7 @@ class Position(BaseModel):
     realized_vol:      float = 0.02       # daily realized vol at entry — used for trail distance
 
     # [QUANT AGGRESSION] Partial exit & scale-in tracking
-    partial_exits_done: List[float] = Field(default_factory=list)  # track which SL-multiples already hit
+    partial_exits_done: List[str] = Field(default_factory=list)   # track which exits done: "tp1","tp2","tp3","breakeven"
     scaled_in:         bool = False
     original_entry_price: float = 0.0  # untuk breakeven reference
     scale_in_count:    int = 0         # track berapa kali scaled in
@@ -406,7 +406,7 @@ class UserConfig(BaseModel):
     trading_mode:  str = "scalper"          # scalper only
     bot_mode:      BotMode = BotMode.PAPER # paper | live
     risk_pct:      float = 0.02            # 2% of equity
-    
+
     # ── Standard Mode Settings ────────────────
     # Recalibrated: session bonus and OI magnitude removed from score (~13-15 pts lower).
     std_min_score_to_signal:     int = 45   # emit signal ke user (bukan entry gate)
@@ -420,6 +420,12 @@ class UserConfig(BaseModel):
     scl_max_leverage:            int = 20
     scl_max_concurrent_positions: int = 5   # approved: 5 concurrent scalper positions
 
+    # ── Bitget Execution Override ─────────────
+    # Leverage cap khusus saat eksekusi di Bitget. Akan di-min vs
+    # bitget_max_leverage per asset oleh BitgetExecutor.
+    # 0 = pakai scl_max_leverage / std_max_leverage (sesuai trading_mode).
+    bitget_max_leverage: int = 0
+
 class User(BaseModel):
     chat_id:           str
     username:          str = ""
@@ -428,12 +434,19 @@ class User(BaseModel):
     config:            UserConfig = Field(default_factory=UserConfig)
     is_active:         bool = True         # Allow disabling users
     
-    # Live mode auth
+    # Live mode auth — Hyperliquid
     hl_main_address:   Optional[str] = None
     hl_agent_address:  Optional[str] = None
     hl_agent_secret:   Optional[str] = None
     wallet_authorized: bool = False
     tos_agreed:        bool = False
+
+    # Live mode auth — Bitget (USDT-M futures execution)
+    # Disimpan terenkripsi via Fernet (sama seperti hl_agent_secret).
+    bitget_api_key:     Optional[str] = None
+    bitget_api_secret:  Optional[str] = None
+    bitget_passphrase:  Optional[str] = None
+    bitget_authorized:  bool = False    # True setelah verify_credentials sukses
 
     # Access Code Gate
     is_authorized:     bool = False                # True setelah akses code benar

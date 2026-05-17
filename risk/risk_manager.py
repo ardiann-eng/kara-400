@@ -420,7 +420,7 @@ class RiskManager:
         # ── 3. Hard Margin Cap (Safety First - 35% Max Equity) ────────
         max_allowed_margin = account_balance * 0.35
         if size_usd > max_allowed_margin:
-            log.warning(f"[RISK] Margin cap hit: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} (35% limit)")
+            log.debug(f"[RISK] Margin cap: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} (35%)")
             size_usd = max_allowed_margin
 
         # ── 4. Calculate Contracts ────────────────────────────────────
