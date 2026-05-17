@@ -56,6 +56,42 @@ if _is_placeholder(PRIVATE_KEY):
 HL_TESTNET       = MODE == "paper"                       # auto-set from mode
 
 # ──────────────────────────────────────────────
+# BITGET CREDENTIALS & EXECUTION
+# ──────────────────────────────────────────────
+# Global Bitget API credentials (optional fallback untuk user yang belum
+# input credentials sendiri lewat /live di Telegram).
+BITGET_API_KEY    = os.getenv("BITGET_API_KEY", "").strip()
+BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY", "").strip()
+BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE", "").strip()
+
+# Execution exchange — sinyal selalu dari Hyperliquid, eksekusi bisa pilih.
+#   "bitget"      → eksekusi di Bitget USDT-M Futures (default sejak migrasi v8.0.x)
+#   "hyperliquid" → eksekusi di HL (legacy, hanya kalau ada user dengan agent wallet HL)
+# [BLOCKER FIX 2026-05-17] Default diubah ke "bitget" supaya bot tidak salah
+# eksekusi ke HL kalau user lupa set env var setelah migrasi.
+EXECUTION_EXCHANGE = os.getenv("KARA_EXECUTION_EXCHANGE", "bitget").lower()
+
+# Validasi runtime: kalau ada Bitget creds tapi exec masih "hyperliquid",
+# tampilkan warning critical pas startup. User mungkin lupa update env.
+if EXECUTION_EXCHANGE == "hyperliquid" and (BITGET_API_KEY or BITGET_SECRET_KEY):
+    import warnings as _warnings
+    _warnings.warn(
+        "[KARA] EXECUTION_EXCHANGE='hyperliquid' tapi BITGET credentials terdeteksi. "
+        "Order akan diroute ke Hyperliquid, BUKAN Bitget. "
+        "Set KARA_EXECUTION_EXCHANGE=bitget di env kalau ini tidak diinginkan.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+# Bitget demo (paper) mode — gunakan SUSDT-FUTURES product type
+# Auto: paper mode = demo, live mode = real
+BITGET_DEMO_MODE = (TRADE_MODE == "paper")
+
+# Price Bridge config — hubungkan harga HL → Bitget
+PRICE_BRIDGE_MAX_GAP_PCT = float(os.getenv("KARA_PRICE_BRIDGE_MAX_GAP", "0.003"))  # 0.3%
+PRICE_BRIDGE_CACHE_TTL_S = float(os.getenv("KARA_PRICE_BRIDGE_TTL", "2.0"))
+
+# ──────────────────────────────────────────────
 # TELEGRAM
 # ──────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_TOKEN", ""))
@@ -110,10 +146,16 @@ REDIS_URL        = os.getenv("REDIS_URL", "")           # optional
 # ──────────────────────────────────────────────
 WATCHED_ASSETS = ["BTC", "ETH", "SOL", "ARB", "DOGE"]
 
-# SCALPER_ASSETS: berdasarkan hasil paper trading aktual (win-rate terbaik)
-# ZEC: 74.5% WR | kBONK: 60% WR | SPX: 100% WR | COMP: 91.7% WR
-# REZ: 77.8% WR | PYTH: high WR | MON, VVV: emerging high-signal assets
-SCALPER_ASSETS = ["ZEC", "kBONK", "SPX", "COMP", "REZ", "PYTH", "MON", "VVV"]
+# SCALPER_ASSETS: Bitget-compatible asset list (post-migrasi v8.0.x).
+#
+# [BLOCKER FIX 2026-05-17] List sebelumnya berisi 4 HL-only asset
+# (SPX, REZ, MON, VVV) yang tidak ada di Bitget — efektif scalper cuma
+# trade di 4/8 asset. Daftar baru:
+#   - ZEC, kBONK, COMP, PYTH : sudah validate available di Bitget
+#   - BTC, ETH, SOL, DOGE    : major liquidity, fill mudah, fee impact minimal
+# Semua 8 asset ini ada di SymbolRegistry HL_TO_BITGET dan akan di-validate
+# runtime saat startup (kalau Bitget delisting salah satu, otomatis di-skip).
+SCALPER_ASSETS = ["ZEC", "kBONK", "COMP", "PYTH", "BTC", "ETH", "SOL", "DOGE"]
 
 # ──────────────────────────────────────────────
 # RISK MANAGEMENT  (safe defaults for students)

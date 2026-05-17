@@ -19,6 +19,7 @@ from models.schemas import (
     OrderStatus, PositionStatus, BotMode, ExecutionMode
 )
 from risk.risk_manager import RiskManager
+from execution.base_executor import BaseExecutor
 from utils.helpers import gen_id, format_usd, utcnow
 from utils.excel_logger import get_excel_logger
 
@@ -28,7 +29,7 @@ log = logging.getLogger("kara.paper_exec")
 PAPER_INITIAL_BALANCE = 1000.0
 
 
-class PaperExecutor:
+class PaperExecutor(BaseExecutor):
     """
     Paper (simulated) execution engine.
     All trades stored in-memory; persisted to SQLite via main.py.
@@ -43,11 +44,18 @@ class PaperExecutor:
     - Prevents paper mode from using leverage that would be rejected on mainnet
     """
 
-    def __init__(self, risk_manager: RiskManager, initial_balance: float = 1000.0, chat_id: str = "system", market_cache=None):
+    def __init__(self, risk_manager: RiskManager, initial_balance: float = 1000.0, chat_id: str = "system", market_cache=None, user_max_leverage: int = 0):
         self.risk  = risk_manager
         self.mode  = BotMode.PAPER
         self.chat_id = chat_id
         self._market_cache = market_cache  # WS MarketDataCache for orderbook slippage
+        # [BUG FIX 2026-05-17] Explicit user-config leverage cap, sama seperti
+        # BitgetExecutor. 0 = pakai default dari risk_manager._get_user_value.
+        # Kalau diisi (dari user_session berdasarkan user.config.scl_max_leverage
+        # atau std_max_leverage), PaperExecutor akan apply cap ini SEBELUM
+        # calculate_position_size — supaya leverage di log/notif konsisten dengan
+        # setting Telegram user.
+        self.user_max_leverage = int(user_max_leverage) if user_max_leverage and user_max_leverage > 0 else 0
 
         # State
         self._balance:    float = initial_balance
@@ -154,6 +162,21 @@ class PaperExecutor:
             log.warning(f" Trade blocked: {reason}")
             return None
 
+        # ── [BUG FIX 2026-05-17] Explicit USER-CONFIG leverage cap ─────────
+        # Cap leverage SEBELUM exchange cap supaya signal.suggested_leverage
+        # mencerminkan setting Telegram user (scl_max_leverage / std_max_leverage).
+        # Tanpa ini, log/notif menampilkan leverage default scoring engine
+        # (15x scalper) bahkan kalau user set 5x via /settings — bingung user.
+        # Risk_manager.calculate_position_size juga punya triple-cap, tapi
+        # itu hanya cap actual_lev RETURN, bukan modify signal — jadi
+        # pos.leverage final tetap benar tapi notif "Suggested" salah.
+        if self.user_max_leverage > 0 and signal.suggested_leverage > self.user_max_leverage:
+            log.info(
+                f"[PAPER-LEV] {signal.asset}: leverage {signal.suggested_leverage}x "
+                f"> user cap {self.user_max_leverage}x → di-cap (Telegram /settings)"
+            )
+            signal.suggested_leverage = self.user_max_leverage
+
         # ── [AUDIT FIX] Exchange-aware leverage cap ──────────────────────
         # Cap leverage at Hyperliquid's actual maxLeverage for this asset.
         # Prevents paper mode from using leverage that would be rejected live.
@@ -172,6 +195,10 @@ class PaperExecutor:
 
         # ── [AUDIT FIX] Double-check actual_lev against exchange max ─────
         actual_lev = min(actual_lev, exchange_max_lev)
+        # [BUG FIX 2026-05-17] Final cap dengan user_max_leverage juga,
+        # untuk konsistensi dengan BitgetExecutor.
+        if self.user_max_leverage > 0:
+            actual_lev = min(actual_lev, self.user_max_leverage)
         
         # Isolated margin = notional / leverage
         margin = (contracts * signal.entry_price) / actual_lev
@@ -309,6 +336,11 @@ class PaperExecutor:
                     if result:
                         actions.append(result)
 
+        # GC: bersihkan posisi CLOSED yang sudah > 30 menit supaya dict tidak grow infinite.
+        # Posisi CLOSED ditahan sebentar di dict supaya main.py notif loop bisa resolve
+        # via _positions.get(pos_id). Setelah notif terkirim (per cycle), aman dihapus.
+        self._gc_closed_positions(max_age_minutes=30)
+
         # Update peak balance
         total_equity = self._balance + sum(
             p.pnl_unrealized for p in self._positions.values()
@@ -354,9 +386,14 @@ class PaperExecutor:
         self._balance    += floating_pnl
         self._available  += pos.margin_usd + floating_pnl
         self._used_margin-= pos.margin_usd
-        
-        # Remove from in-memory dict and DB
-        self._positions.pop(position_id, None)
+
+        # [BUG FIX 2026-05-17] JANGAN pop dari _positions dict di sini.
+        # Sebelumnya pop langsung → main.py notif loop tidak bisa resolve pos
+        # via _positions.get(pos_id) → notif personal time_exit/momentum_exit/
+        # trailing_stop/stop_loss SILENT (hanya muncul di log Python).
+        # Sekarang: status=CLOSED tetap simpan di dict.
+        # Property `open_positions` sudah filter status=OPEN, jadi closed
+        # tidak akan di-process lagi. Cleanup dilakukan oleh _gc_closed_positions().
         from core.db import user_db
         user_db.remove_paper_position(position_id)
         # Compounding fix: equity = realized balance + unrealized dari posisi lain yang masih buka
@@ -750,3 +787,31 @@ class PaperExecutor:
             return entry * (1 - (1 / leverage) + mmr)
         else:
             return entry * (1 + (1 / leverage) - mmr)
+
+    def _gc_closed_positions(self, max_age_minutes: float = 30.0) -> int:
+        """
+        [BUG FIX 2026-05-17] Bersihkan posisi CLOSED yang lebih lama dari
+        `max_age_minutes` dari _positions dict. Posisi CLOSED ditahan
+        sebentar supaya main.py notif loop bisa resolve `pos` via
+        `_positions.get(pos_id)`. Tanpa GC, dict akan tumbuh infinite.
+
+        Returns: jumlah posisi yang di-GC.
+        """
+        from datetime import datetime, timezone, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        to_remove = []
+        for pid, pos in self._positions.items():
+            if pos.status != PositionStatus.CLOSED:
+                continue
+            closed_at = pos.closed_at
+            if closed_at is None:
+                continue
+            if closed_at.tzinfo is None:
+                closed_at = closed_at.replace(tzinfo=timezone.utc)
+            if closed_at < cutoff:
+                to_remove.append(pid)
+        for pid in to_remove:
+            self._positions.pop(pid, None)
+        if to_remove:
+            log.debug(f"[PAPER-GC] Removed {len(to_remove)} closed position(s) older than {max_age_minutes}m")
+        return len(to_remove)

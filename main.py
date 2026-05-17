@@ -26,10 +26,13 @@ from config import MODE, WATCHED_ASSETS, SIGNAL
 from models.schemas import ExecutionMode
 from data.hyperliquid_client import HyperliquidClient
 from data.ws_client import KaraWebSocketClient, MarketDataCache, market_cache
+from data.bitget_client import BitgetClient
+from data.bitget_ws_client import BitgetWSClient
 from engine.scoring_engine import ScoringEngine
 from risk.risk_manager import RiskManager
 from execution.paper_executor import PaperExecutor
 from execution.live_executor import LiveExecutor
+from execution.bitget_executor import BitgetExecutor
 from notify.telegram import KaraTelegram
 from dashboard.app import init_dashboard, run_dashboard, broadcast
 from core.mode_manager import mode_manager
@@ -37,6 +40,8 @@ from utils.helpers import utcnow
 from core.db import user_db
 from core.user_session import UserSession
 from utils.changelog_generator import ChangelogGenerator
+from utils.symbol_registry import SymbolRegistry, set_registry
+from utils.price_bridge import PriceBridge
 
 # ──────────────────────────────────────────────
 # LOGGING SETUP
@@ -82,6 +87,12 @@ class KaraBot:
         self.hl_client  = HyperliquidClient()
         self.ws_client  = KaraWebSocketClient()
         self.cache      = market_cache
+
+        # Bitget (optional — hanya init kalau EXECUTION_EXCHANGE=bitget atau credentials ada)
+        self.bitget_client: Optional[BitgetClient] = None
+        self.bitget_ws: Optional[BitgetWSClient] = None
+        self.symbol_registry: Optional[SymbolRegistry] = None
+        self.price_bridge: Optional[PriceBridge] = None
 
         self.mode_mgr   = mode_manager
         self.cache      = market_cache
@@ -183,13 +194,45 @@ class KaraBot:
         log.info(f" KARA Bot starting")
         log.info(f" 📡 Data source : {config.DATA_SOURCE.upper()} (live prices)")
         log.info(f" 📄 Execution   : {config.TRADE_MODE.upper()} (simulated trades)")
+        log.info(f" 🏦 Exec venue  : {config.EXECUTION_EXCHANGE.upper()}")
 
-        if config.TRADE_MODE == "live" and not config.PRIVATE_KEY:
-            log.error(" LIVE mode requires HL_PRIVATE_KEY in .env!")
-            sys.exit(1)
+        # ── [BLOCKER FIX 2026-05-17] Validasi konsistensi exchange + credentials ──
+        # Kalau exec=hyperliquid tapi user sudah set Bitget creds, BIG warning —
+        # kemungkinan besar user lupa update env setelah migrasi.
+        if config.EXECUTION_EXCHANGE == "hyperliquid" and (
+            config.BITGET_API_KEY or config.BITGET_SECRET_KEY
+        ):
+            log.critical(
+                "🚨 INCONSISTENCY: KARA_EXECUTION_EXCHANGE=hyperliquid tapi BITGET_API_KEY/SECRET "
+                "terdeteksi di env. Order akan dieksekusi di HYPERLIQUID, bukan Bitget. "
+                "Set KARA_EXECUTION_EXCHANGE=bitget kalau ini tidak diinginkan."
+            )
+
+        # Live mode requirements per exchange
+        if config.TRADE_MODE == "live":
+            if config.EXECUTION_EXCHANGE == "hyperliquid" and not config.PRIVATE_KEY:
+                log.error(" LIVE+Hyperliquid butuh HL_PRIVATE_KEY di .env!")
+                sys.exit(1)
+            elif config.EXECUTION_EXCHANGE == "bitget":
+                # Bitget creds bisa per-user (via /live di Telegram), jadi global creds opsional.
+                # Tapi minimal salah satu user wajib sudah authorize sebelum trade.
+                if not (config.BITGET_API_KEY and config.BITGET_SECRET_KEY and config.BITGET_PASSPHRASE):
+                    log.warning(
+                        "⚠️  LIVE+Bitget tanpa global creds — pastikan setiap user "
+                        "sudah /live untuk input credentials sendiri."
+                    )
 
         # Connect to Hyperliquid
         await self.hl_client.connect()
+
+        # ── BITGET INTEGRATION ──────────────────────────────────────────
+        # Init kalau EXECUTION_EXCHANGE=bitget OR ada credentials global.
+        # Symbol registry + price bridge selalu di-init kalau Bitget aktif,
+        # supaya market scanner bisa pre-filter asset yang tidak ada di Bitget.
+        if config.EXECUTION_EXCHANGE == "bitget" or (
+            config.BITGET_API_KEY and config.BITGET_SECRET_KEY
+        ):
+            await self._init_bitget()
 
         # ── ONE-TIME HARD RESET ──────────────────────────────────────────
         # Set env var KARA_HARD_RESET=true sebelum deploy untuk wipe semua data.
@@ -218,8 +261,19 @@ class KaraBot:
             await asyncio.sleep(10)
             self.watched_assets = await self.hl_client.get_top_volume_markets(top_n=100)
 
+        # Filter ke asset yang ada di Bitget kalau eksekusi di Bitget — supaya
+        # tidak buang resource scan asset yang signal-nya tidak bisa di-execute.
+        if config.EXECUTION_EXCHANGE == "bitget" and self.symbol_registry is not None:
+            original = len(self.watched_assets)
+            self.watched_assets = self.symbol_registry.filter_assets_for_scanning(self.watched_assets)
+            log.info(
+                f"[SCAN-FILTER] Bitget execution mode: {original} → {len(self.watched_assets)} assets "
+                f"(skip HL-only assets)"
+            )
+
         log.info(f"   Markets ({len(self.watched_assets)}): {', '.join(self.watched_assets[:15])}{'...' if len(self.watched_assets) > 15 else ''}")
         log.info(f"   Full-auto: {config.FULL_AUTO}")
+        log.info(f"   Exec exchange: {config.EXECUTION_EXCHANGE}")
         log.info("=" * 60)
 
         # Setup WebSocket subscriptions
@@ -274,13 +328,30 @@ class KaraBot:
         # Initialize User Sessions from DB
         self._enforce_locked_score_thresholds()
         for u in user_db.get_all_users():
-            session = UserSession(u, mode_manager=self.mode_mgr, hl_client=self.hl_client)
+            session = UserSession(
+                u,
+                mode_manager=self.mode_mgr,
+                hl_client=self.hl_client,
+                bitget_client=self.bitget_client,
+                symbol_registry=self.symbol_registry,
+                price_bridge=self.price_bridge,
+            )
             if hasattr(session.executor, 'load_from_db'):
                 session.executor.load_from_db(u.chat_id)
             # Fix #1: connect live client + reconcile chain positions for live users
             await session.initialize()
             self.sessions[u.chat_id] = session
         log.info(f"Loaded {len(self.sessions)} user sessions.")
+
+        # Subscribe Bitget WS untuk semua asset yang punya posisi terbuka di Bitget
+        if self.bitget_ws is not None:
+            for session in self.sessions.values():
+                if not hasattr(session.executor, 'open_positions'):
+                    continue
+                from execution.bitget_executor import BitgetExecutor as _BE
+                if isinstance(session.executor, _BE):
+                    for pos in session.executor.open_positions:
+                        await self._subscribe_bitget_for_position(pos.asset)
 
         # Fix #4: Warn if live users exist but server is not in live mode
         from models.schemas import BotMode
@@ -751,11 +822,82 @@ class KaraBot:
 
             await asyncio.sleep(1)
 
+    async def _init_bitget(self):
+        """Init BitgetClient + SymbolRegistry + PriceBridge + WS. Idempotent."""
+        if self.bitget_client is not None:
+            return
+
+        log.info(f"[BITGET] Initializing Bitget integration (demo_mode={config.BITGET_DEMO_MODE})...")
+        try:
+            self.bitget_client = BitgetClient(
+                api_key=config.BITGET_API_KEY,
+                api_secret=config.BITGET_SECRET_KEY,
+                passphrase=config.BITGET_PASSPHRASE,
+                demo_mode=config.BITGET_DEMO_MODE,
+            )
+            await self.bitget_client.connect()
+
+            # Test connectivity (tanpa auth — pakai ping public)
+            ok = await self.bitget_client.ping()
+            if not ok:
+                log.error("[BITGET] Ping gagal — Bitget tidak reachable, disabled")
+                self.bitget_client = None
+                return
+
+            # Symbol registry — discover assets available di Bitget
+            self.symbol_registry = SymbolRegistry(self.bitget_client)
+            count = await self.symbol_registry.initialize()
+            set_registry(self.symbol_registry)
+            log.info(f"[BITGET] Symbol registry: {count} assets available")
+
+            # WebSocket untuk low-latency price stream
+            self.bitget_ws = BitgetWSClient(
+                product_type=self.bitget_client.product_type
+            )
+            await self.bitget_ws.start()
+
+            # PriceBridge
+            self.price_bridge = PriceBridge(
+                bitget_client=self.bitget_client,
+                symbol_registry=self.symbol_registry,
+                ws_cache=self.bitget_ws.cache,
+                max_gap_pct=config.PRICE_BRIDGE_MAX_GAP_PCT,
+                cache_ttl_s=config.PRICE_BRIDGE_CACHE_TTL_S,
+            )
+
+            # Expose to telegram for /bitget setup
+            self.telegram.bitget_client = self.bitget_client
+            self.telegram.symbol_registry = self.symbol_registry
+            self.telegram.price_bridge = self.price_bridge
+
+            log.info(f"[BITGET] Integration ready (EXECUTION_EXCHANGE={config.EXECUTION_EXCHANGE})")
+        except Exception as e:
+            log.error(f"[BITGET] Init failed: {e}", exc_info=True)
+            self.bitget_client = None
+
+    async def _subscribe_bitget_for_position(self, hl_asset: str):
+        """Subscribe Bitget WS untuk asset yang baru buka posisi (low-latency monitor)."""
+        if self.bitget_ws is None or self.symbol_registry is None:
+            return
+        sym = self.symbol_registry.get_bitget_symbol(hl_asset)
+        if sym:
+            try:
+                await self.bitget_ws.subscribe_ticker(sym)
+            except Exception as e:
+                log.debug(f"[BITGET-WS] subscribe {sym} failed: {e}")
+
     async def get_session(self, chat_id: str) -> Optional[UserSession]:
             if str(chat_id) not in self.sessions:
                 user = user_db.get_user(str(chat_id))
                 if user:
-                    session = UserSession(user, mode_manager=self.mode_mgr, hl_client=self.hl_client)
+                    session = UserSession(
+                        user,
+                        mode_manager=self.mode_mgr,
+                        hl_client=self.hl_client,
+                        bitget_client=self.bitget_client,
+                        symbol_registry=self.symbol_registry,
+                        price_bridge=self.price_bridge,
+                    )
                     # Restore persisted state (balance + open positions) from DB
                     if hasattr(session.executor, 'load_from_db'):
                         session.executor.load_from_db(user.chat_id)
@@ -763,7 +905,7 @@ class KaraBot:
                         await session.initialize()
                     except Exception as e:
                         log.error(f"❌ Failed to initialize session for {chat_id}: {e}")
-                    # Live mode: sync open positions from chain
+                    # Live mode: sync open positions from chain (HL path)
                     if hasattr(session.executor, 'load_from_chain'):
                         try:
                             await session.executor.load_from_chain()
@@ -1128,6 +1270,10 @@ class KaraBot:
                     f"score={user_signal.score} latency={_latency_ms:.0f}ms"
                 )
                 if pos:
+                    # Low-latency: subscribe Bitget WS untuk asset ini supaya monitor pakai push price
+                    from execution.bitget_executor import BitgetExecutor as _BE
+                    if isinstance(session.executor, _BE):
+                        await self._subscribe_bitget_for_position(pos.asset)
                     await self.telegram.send_position_opened(pos, user_signal, target_chat_id=chat_id)
             else:
                 # FULL_AUTO is off — log signal clearly so operator knows it was seen but not executed
@@ -1174,6 +1320,9 @@ class KaraBot:
             f"score={signal.score} latency={_latency_ms:.0f}ms"
         )
         if pos:
+            from execution.bitget_executor import BitgetExecutor as _BE
+            if isinstance(session.executor, _BE):
+                await self._subscribe_bitget_for_position(pos.asset)
             await self.telegram.send_position_opened(pos, signal, target_chat_id=chat_id)
             return True, "ok"
         else:
@@ -1184,22 +1333,51 @@ class KaraBot:
             return False, "executor_failed"
 
     async def _update_positions(self):
-        """Update unrealized PnL and check TP/SL for all users."""
-        # 1. Collect all unique assets across all users
-        all_open_assets = set()
+        """Update unrealized PnL and check TP/SL for all users.
+
+        Routing logic:
+        - Posisi di Bitget executor → harga dari Bitget (WS cache prefer, REST fallback)
+        - Posisi di HL/Paper executor → harga dari Hyperliquid
+        Mixed environment didukung — setiap executor terima dict harga sesuai venue.
+        """
+        from execution.bitget_executor import BitgetExecutor
+
+        # 1. Collect assets per venue
+        hl_open_assets = set()       # asset yang dipantau via HL price
+        bitget_open_assets = set()   # asset yang dipantau via Bitget price
         for chat_id, session in self.sessions.items():
-            if hasattr(session.executor, 'open_positions'):
-                for pos in session.executor.open_positions:
-                    all_open_assets.add(pos.asset)
-        
-        # 2. Fetch prices ONCE — pakai fast path (no semaphore, no sleep)
-        # Position monitor TIDAK boleh diblok oleh data scan semaphore
-        prices = {}
-        for asset in all_open_assets:
+            if not hasattr(session.executor, 'open_positions'):
+                continue
+            is_bitget_exec = isinstance(session.executor, BitgetExecutor)
+            for pos in session.executor.open_positions:
+                if is_bitget_exec:
+                    bitget_open_assets.add(pos.asset)
+                else:
+                    hl_open_assets.add(pos.asset)
+
+        # 2a. Fetch HL prices (existing fast path)
+        hl_prices: Dict[str, float] = {}
+        for asset in hl_open_assets:
             try:
-                prices[asset] = await self.hl_client.get_mark_price_fast(asset)
+                hl_prices[asset] = await self.hl_client.get_mark_price_fast(asset)
             except Exception as e:
-                log.debug(f"Failed to fetch market price for {asset}: {e}")
+                log.debug(f"Failed to fetch HL price for {asset}: {e}")
+
+        # 2b. Fetch Bitget prices (WS cache → REST fallback)
+        bitget_prices: Dict[str, float] = {}
+        if bitget_open_assets and self.price_bridge:
+            for asset in bitget_open_assets:
+                try:
+                    px = await self.price_bridge.get_bitget_price(asset)
+                    if px > 0:
+                        bitget_prices[asset] = px
+                except Exception as e:
+                    log.debug(f"Failed to fetch Bitget price for {asset}: {e}")
+
+        # Unified `prices` for HL-path candle refresh (mark price reference)
+        # — even Bitget positions can use HL candles for momentum exit logic.
+        prices = {**hl_prices, **bitget_prices}
+        all_open_assets = hl_open_assets | bitget_open_assets
 
         # 2b. Fetch 1m candle OHLCV penuh per asset untuk exit logic
         # Hanya diambil sekali per asset, dishare ke semua user yang hold asset tsb.
@@ -1286,7 +1464,15 @@ class KaraBot:
             if not hasattr(session.executor, 'open_positions') or len(session.executor.open_positions) == 0:
                 continue
 
-            actions = await session.executor.update_positions(prices)
+            # Pilih price dict sesuai executor:
+            # Bitget executor → harga Bitget (kalau tidak ada, fallback ke HL supaya SL tetap dicek)
+            # HL/Paper executor → harga HL
+            if isinstance(session.executor, BitgetExecutor):
+                exec_prices = {**hl_prices, **bitget_prices}
+            else:
+                exec_prices = hl_prices
+
+            actions = await session.executor.update_positions(exec_prices)
             early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "momentum_exit", "early_trail")]
             # Exclude semua early_exit dari other_actions agar tidak dikirim dua kali
             other_actions = [a for a in actions if a.get("action") not in ("time_exit", "momentum_exit", "early_trail")]
@@ -1339,8 +1525,12 @@ class KaraBot:
                         subtext = f"<i>Posisi ditutup otomatis setelah {hold_min} menit~</i>"
                         exit_detail = ""
 
-                    # Akumulasi total PnL: semua partial close (pnl_realized) + final close ini
-                    total_pnl   = getattr(pos, "pnl_realized", 0.0) + pnl
+                    # Akumulasi total PnL = pos.pnl_realized (sudah include semua partial
+                    # close + final close di kedua executor). [BUG FIX 2026-05-17]
+                    # Sebelumnya `pos.pnl_realized + pnl` → double-count karena baik
+                    # paper maupun Bitget _do_close menambah `pnl` ke pos.pnl_realized
+                    # SEBELUM return ke caller.
+                    total_pnl   = float(getattr(pos, "pnl_realized", pnl) or pnl)
                     total_sign  = "+" if total_pnl >= 0 else ""
                     total_idr   = total_pnl * USD_TO_IDR
                     total_idr_str = (
@@ -1501,6 +1691,19 @@ class KaraBot:
         try:
             await self.hl_client.close()
         except: pass
+
+        # Bitget cleanup
+        try:
+            if self.bitget_ws is not None:
+                await self.bitget_ws.stop()
+        except Exception as e:
+            log.debug(f"Bitget WS stop warning: {e}")
+
+        try:
+            if self.bitget_client is not None:
+                await self.bitget_client.close()
+        except Exception as e:
+            log.debug(f"Bitget client close warning: {e}")
 
         log.info("✅ KARA stopped. Goodbye!")
 
