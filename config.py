@@ -14,7 +14,7 @@ load_dotenv()
 # ──────────────────────────────────────────────
 # ENVIRONMENT
 # ──────────────────────────────────────────────
-KARA_VERSION = "8.0.1"  # Observability Protocol: Railway telemetry, rule-based autopsy, dynamic changelog generator
+KARA_VERSION = "8.1.0"  # Bitget migration + notif fix + leverage paper fix
 DATA_SOURCE = os.getenv("KARA_DATA_SOURCE", "mainnet").lower() # "mainnet" | "testnet"
 TRADE_MODE  = os.getenv("KARA_TRADE_MODE", "paper").lower()    # "paper" | "live"
 FULL_AUTO   = os.getenv("KARA_FULL_AUTO", "true").lower() == "true"

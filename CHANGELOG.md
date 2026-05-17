@@ -4,6 +4,30 @@ Semua perubahan teknis dan pembaruan arsitektur pada bot KARA dicatat di sini.
 
 ---
 
+## [8.1.0] — 2026-05-17 — BITGET MIGRATION + NOTIF FIX + LEVERAGE FIX
+
+> **"Signal dari Hyperliquid, eksekusi di Bitget — fee lebih rendah, kontrol lebih baik."**
+
+### 🏦 BITGET EXECUTION ENGINE
+- **BitgetClient**: REST client Bitget v2 USDT-M Futures (httpx HTTP/2, HMAC-SHA256 auth, demo mode otomatis saat paper).
+- **BitgetExecutor**: Hedge mode, isolated margin, on-exchange SL via TPSL, partial close reduce_only.
+- **Order Cascade**: `post_only (3s) → IOC → market` — prioritas maker fee 0.02% vs taker 0.06%.
+- **SymbolRegistry**: Mapping HL→Bitget ~75 asset, k-prefix multiplier ×1000, validasi runtime saat startup.
+- **PriceBridge**: Adjust signal HL price → Bitget price, gap filter 0.3%, recalculate SL/TP dari harga Bitget.
+- **BitgetWSClient**: WebSocket mark price cache untuk low-latency position monitor.
+
+### 🔧 BLOCKER FIXES
+- **EXECUTION_EXCHANGE default** diubah `hyperliquid` → `bitget`. Bot tidak salah route ke HL kalau env tidak diset.
+- **SCALPER_ASSETS** diperbarui: buang HL-only (SPX/REZ/MON/VVV), ganti dengan BTC/ETH/SOL/DOGE yang tersedia di Bitget.
+- **Runtime warning** kalau `exec=hyperliquid` tapi Bitget credentials terdeteksi di env.
+
+### 🐛 BUG FIXES
+- **Notif time_exit/momentum_exit/ATR/stop_loss hilang**: `paper_executor` tidak lagi pop posisi dari dict saat close — main.py notif loop bisa resolve posisi untuk format pesan. GC cleanup 30 menit ditambahkan.
+- **Double-count PnL di notif**: `pos.pnl_realized + pnl` → `pos.pnl_realized` (sudah cumulative).
+- **Leverage paper tidak ngikutin Telegram**: `PaperExecutor` sekarang terima `user_max_leverage` dari `user.config.scl_max_leverage` via `UserSession` — leverage di log/notif konsisten dengan setting `/settings`.
+
+---
+
 ## [8.0.1] — 2026-05-12 — OBSERVABILITY & AUTOPSY PROTOCOL
 
 > **"If you can't measure it, you can't improve it. If you can't explain it, you can't trust it."**
