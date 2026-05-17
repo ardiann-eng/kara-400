@@ -162,43 +162,18 @@ class PaperExecutor(BaseExecutor):
             log.warning(f" Trade blocked: {reason}")
             return None
 
-        # ── [BUG FIX 2026-05-17] Explicit USER-CONFIG leverage cap ─────────
-        # Cap leverage SEBELUM exchange cap supaya signal.suggested_leverage
-        # mencerminkan setting Telegram user (scl_max_leverage / std_max_leverage).
-        # Tanpa ini, log/notif menampilkan leverage default scoring engine
-        # (15x scalper) bahkan kalau user set 5x via /settings — bingung user.
-        # Risk_manager.calculate_position_size juga punya triple-cap, tapi
-        # itu hanya cap actual_lev RETURN, bukan modify signal — jadi
-        # pos.leverage final tetap benar tapi notif "Suggested" salah.
+        # ── User-config leverage cap (dari /settings Telegram) ─────────────
         if self.user_max_leverage > 0 and signal.suggested_leverage > self.user_max_leverage:
-            log.info(
-                f"[PAPER-LEV] {signal.asset}: leverage {signal.suggested_leverage}x "
-                f"> user cap {self.user_max_leverage}x → di-cap (Telegram /settings)"
-            )
+            log.info(f"[PAPER-LEV] {signal.asset}: {signal.suggested_leverage}x → {self.user_max_leverage}x (user cap)")
             signal.suggested_leverage = self.user_max_leverage
-
-        # ── [AUDIT FIX] Exchange-aware leverage cap ──────────────────────
-        # Cap leverage at Hyperliquid's actual maxLeverage for this asset.
-        # Prevents paper mode from using leverage that would be rejected live.
-        exchange_max_lev = await self._get_exchange_max_leverage(signal.asset)
-        if signal.suggested_leverage > exchange_max_lev:
-            log.info(
-                f"[PAPER-LEV] {signal.asset}: leverage {signal.suggested_leverage}x "
-                f"> exchange max {exchange_max_lev}x → capped"
-            )
-            signal.suggested_leverage = exchange_max_lev
 
         # Calculate size & leverage
         size_usd, contracts, actual_lev = self.risk.calculate_position_size(
             signal, self._balance
         )
-
-        # ── [AUDIT FIX] Double-check actual_lev against exchange max ─────
-        actual_lev = min(actual_lev, exchange_max_lev)
-        # [BUG FIX 2026-05-17] Final cap dengan user_max_leverage juga,
-        # untuk konsistensi dengan BitgetExecutor.
         if self.user_max_leverage > 0:
             actual_lev = min(actual_lev, self.user_max_leverage)
+        exchange_max_lev = self.user_max_leverage or 125  # for log display only
         
         # Isolated margin = notional / leverage
         margin = (contracts * signal.entry_price) / actual_lev
