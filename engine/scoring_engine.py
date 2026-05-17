@@ -1218,15 +1218,9 @@ class ScoringEngine:
             time_exit_min = min(time_exit_min, 12)
             reasons.append("FADE: tight SL 0.8×, wide TP 1.5×, max 12min")
 
-        # Cap leverage against exchange-allowed max for this asset
-        _exchange_max_lev = 50
-        if self.client._market_cache:
-            _universe, _ = self.client._market_cache
-            for _u in _universe:
-                if isinstance(_u, dict) and _u.get("name") == asset:
-                    _exchange_max_lev = int(_u.get("maxLeverage", 50))
-                    break
-        leverage = min(scfg.default_leverage, scfg.max_leverage, _exchange_max_lev)
+        # Leverage hanya dari config — HL exchange cap dihapus.
+        # User cap diterapkan di executor (paper/bitget), bukan di signal.
+        leverage = min(scfg.default_leverage, scfg.max_leverage)
 
         if side == Side.LONG:
             stop_loss = round(mark_price * (1 - sl_pct), 8)
@@ -1917,17 +1911,10 @@ class ScoringEngine:
             tp1       = round(mark_price * (1 - tp1_pct), 8)
             tp2       = round(mark_price * (1 - tp2_pct), 8)
 
-        # Leverage: scale with score, capped by exchange-allowed max
-        _exchange_max_lev = 50
-        if self.client._market_cache:
-            _universe, _ = self.client._market_cache
-            for _u in _universe:
-                if isinstance(_u, dict) and _u.get("name") == asset:
-                    _exchange_max_lev = int(_u.get("maxLeverage", 50))
-                    break
-        leverage = min(RISK.default_leverage, _exchange_max_lev)
+        # Leverage hanya dari config — HL exchange cap dihapus.
+        leverage = min(RISK.default_leverage, RISK.max_leverage)
         if score >= 75:
-            leverage = min(RISK.default_leverage + 2, RISK.max_leverage, _exchange_max_lev)
+            leverage = min(RISK.default_leverage + 2, RISK.max_leverage)
 
         return TradeSignal(
             signal_id=str(uuid.uuid4())[:8].upper(),
