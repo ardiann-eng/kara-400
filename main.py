@@ -1235,6 +1235,12 @@ class KaraBot:
                     )
                 continue
 
+            # Inject user leverage ke signal SEBELUM calculate_position_size
+            # supaya notif Telegram menampilkan leverage yang benar (dari /settings user),
+            # bukan default scoring engine (15x).
+            if hasattr(session.executor, 'user_max_leverage') and session.executor.user_max_leverage > 0:
+                user_signal.suggested_leverage = session.executor.user_max_leverage
+
             # Enrich signal with position sizing for THIS user
             size_usd, contracts, actual_lev = session.risk_mgr.calculate_position_size(
                 user_signal, acc.total_equity
