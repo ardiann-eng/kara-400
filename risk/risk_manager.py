@@ -339,32 +339,13 @@ class RiskManager:
         if sl_pct <= 0:
             sl_pct = RISK.default_sl_pct
 
-        # ── Leverage: Triple-Cap (Signal vs User vs Exchange) ──────────
-        # Scale leverage and risk parameter
+        # ── Leverage: pakai signal.suggested_leverage (sudah di-set executor dari user config)
         cfg = self._cfg()
         default_lev = signal.suggested_leverage
-        actual_lev = min(int(default_lev), cfg.max_leverage)
         user_max_lev = self._get_user_value("max_leverage", cfg.max_leverage)
-        
-        # Get exchange-allowed max for this specific asset (Market-Aware)
-        from data.hyperliquid_client import get_client
-        client = get_client()
-        exchange_max = 50 # Default
-        if client._market_cache:
-            universe, _ = client._market_cache
-            for u in universe:
-                if isinstance(u, dict) and u.get("name") == signal.asset:
-                    exchange_max = int(u.get("maxLeverage", 50))
-                    break
-        
-        # Apply the triple cap
-        lev = min(actual_lev, user_max_lev, exchange_max)
-
-        if lev != signal.suggested_leverage:
-            log.debug(
-                f"🛡️ [RISK] {signal.asset} Leverage capped: "
-                f"signal={signal.suggested_leverage}x, user={user_max_lev}x, exchange={exchange_max}x -> using {lev}x"
-            )
+        # Pakai signal leverage (sudah mencerminkan user setting dari executor).
+        # Tidak ada HL exchange cap — user yang tentukan leverage via /settings.
+        lev = max(1, int(default_lev))
 
         # ── 1. Determine size_usd (margin) — mode-aware ───────────────
         cfg = self._cfg()

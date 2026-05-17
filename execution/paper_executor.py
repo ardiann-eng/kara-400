@@ -162,9 +162,13 @@ class PaperExecutor(BaseExecutor):
             log.warning(f" Trade blocked: {reason}")
             return None
 
-        # ── User-config leverage cap (dari /settings Telegram) ─────────────
-        if self.user_max_leverage > 0 and signal.suggested_leverage > self.user_max_leverage:
-            log.info(f"[PAPER-LEV] {signal.asset}: {signal.suggested_leverage}x → {self.user_max_leverage}x (user cap)")
+        # ── User-config leverage: SELALU pakai user_max_leverage dari /settings ──
+        # Signal dari scoring engine pakai default config (15x scalper).
+        # User bisa set lebih tinggi atau lebih rendah via /settings.
+        # Kita REPLACE suggested_leverage dengan user setting, bukan hanya cap.
+        if self.user_max_leverage > 0:
+            if signal.suggested_leverage != self.user_max_leverage:
+                log.info(f"[PAPER-LEV] {signal.asset}: {signal.suggested_leverage}x → {self.user_max_leverage}x (user /settings)")
             signal.suggested_leverage = self.user_max_leverage
 
         # Calculate size & leverage
