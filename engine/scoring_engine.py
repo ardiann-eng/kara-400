@@ -1389,11 +1389,11 @@ class ScoringEngine:
         _sl_max = getattr(scfg, 'sl_pct_max', 0.015)
         time_exit_min = 20  # default
         if score >= 66 or (fade_mode and score >= 60):
-            # HIGH CONVICTION → TP multiplier dikecilkan agar realistis dalam 25m
+            # HIGH CONVICTION → TP1 dekat (achievable 20m), TP2 lebih jauh untuk runner
             sl_pct = max(sl_pct, 0.010)
             sl_pct = min(sl_pct, _sl_max)
-            tp1_pct = max(tp1_pct, sl_pct * 1.0)   # was 1.5×
-            tp2_pct = max(tp2_pct, sl_pct * 1.8)   # was 2.5×
+            tp1_pct = max(tp1_pct, sl_pct * 0.6)   # 0.6% — achievable dalam 20m
+            tp2_pct = max(tp2_pct, sl_pct * 1.5)   # 1.5% — runner target
             time_exit_min = 25
             reasons.append(f"🏃 RUNNER mode: score={score}, SL={sl_pct*100:.2f}%, TP2={tp2_pct*100:.2f}%, hold={time_exit_min}m")
         elif score >= 61:
