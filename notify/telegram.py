@@ -1373,8 +1373,7 @@ class KaraTelegram:
                 f"<b>{asset_html} {side_str} {pos.leverage}x</b>   {pnl_emoji} {pnl_sign}{float_pct:.2f}% (ROE)\n"
                 f"Entry: ${format_price(pos.entry_price)} → ${format_price(current)}\n"
                 f"🛡️ SL: ${format_price(pos.stop_loss)}{sl_note} | 💥 Liq: ${format_price(pos.liquidation_price) if pos.liquidation_price else '?'}\n"
-                f"{tp1_icon} TP1: ${format_price(pos.tp1)}  {tp2_icon} TP2: ${format_price(pos.tp2)}  "
-                f"{tp3_icon} TP3: ${format_price(tp3_val) if tp3_val else '—'}  | {duration} lalu"
+                f"{tp1_icon} TP1: ${format_price(pos.tp1)}  {tp2_icon} TP2: ${format_price(pos.tp2)}  | {duration} lalu"
                 f"{trail_part}\n"
             )
 
