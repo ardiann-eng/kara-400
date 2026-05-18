@@ -2644,7 +2644,8 @@ class KaraTelegram:
                     chat_id=cid,
                     text=message,
                     parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True
                 )
             except Exception as e:
                 log.error(f"Telegram send error for {cid}: {e}")
