@@ -147,7 +147,7 @@ BYBIT_API_TUTORIAL = """
 Ikuti langkah-langkah ini. Sekitar <b>3 menit</b> dari awal sampai selesai.
 
 <b>1. Buka halaman API Management</b>
-   • Login ke <a href="https://www.bybit.com/app/user/api-management">www.bybit.com</a>
+   • Login ke <a href="https://www.bybit-global.com/app/user/api-management">www.bybit-global.com</a>
    • Menu: <b>Account &amp; Security → API</b>
 
 <b>2. Klik "Create New Key"</b> → pilih <b>"System-generated API Keys"</b>
@@ -1364,7 +1364,7 @@ class KaraTelegram:
 
             # ── Concise Card ───────────────────────────────────────────────
             url_ticker = pos.asset[1:] if pos.asset.startswith('k') and len(pos.asset) > 1 else pos.asset
-            bybit_link = f"https://www.bybit.com/trade/usdt/{url_ticker}USDT"
+            bybit_link = f"https://www.bybit-global.com/trade/usdt/{url_ticker}USDT"
             asset_html = f"<a href='{bybit_link}'>{pos.asset}</a>"
             tp3_val    = getattr(pos, 'tp3', 0.0)
 
@@ -1403,12 +1403,15 @@ class KaraTelegram:
         if update.callback_query:
             try:
                 await update.callback_query.edit_message_text(
-                    text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
+                    text, parse_mode=ParseMode.HTML, reply_markup=reply_markup,
+                    disable_web_page_preview=True
                 )
             except Exception as e:
                 log.debug(f"Refresh skip (no change): {e}")
         else:
-            await update.effective_message.reply_html(text, reply_markup=reply_markup)
+            await update.effective_message.reply_html(
+                text, reply_markup=reply_markup, disable_web_page_preview=True
+            )
 
     async def cmd_journal(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Show full trade journal to the user."""
@@ -2276,7 +2279,7 @@ class KaraTelegram:
             keyboard = [
                 [
                     InlineKeyboardButton("🔍 Lihat Alasan KARA", callback_data=f"reasons:{signal.signal_id}"),
-                    InlineKeyboardButton("📈 Chart", url=f"https://www.bybit.com/trade/usdt/{signal.asset}USDT")
+                    InlineKeyboardButton("📈 Chart", url=f"https://www.bybit-global.com/trade/usdt/{signal.asset}USDT")
                 ]
             ]
 
@@ -2299,7 +2302,7 @@ class KaraTelegram:
         # Style & Narrative
         text = (
             f"🌸 <b>KARA SYSTEM: Position Executed</b>\n"
-            f"<i>Saya baru saja menganalisis pasar dan berhasil membuka posisi <b>{pos.side.value.upper()}</b> untuk <b><a href='https://www.bybit.com/trade/usdt/{pos.asset}USDT'>{pos.asset}</a></b>.</i>\n\n"
+            f"<i>Saya baru saja menganalisis pasar dan berhasil membuka posisi <b>{pos.side.value.upper()}</b> untuk <b><a href='https://www.bybit-global.com/trade/usdt/{pos.asset}USDT'>{pos.asset}</a></b>.</i>\n\n"
             
             f"📦 <b>Market Details</b>\n"
             f"  • Entry   : <code>${format_price(pos.entry_price)}</code>\n"

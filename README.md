@@ -1,6 +1,6 @@
 # KARA — Crypto Futures Trading Bot
 
-**KARA** is an automated futures trading bot with a multi-factor scoring engine, adaptive risk management, Telegram integration, and a real-time web dashboard. Uses [Hyperliquid](https://hyperliquid.xyz) for market data and [Bybit](https://bybit.com) for trade execution.
+**KARA** is an automated futures trading bot with a multi-factor scoring engine, adaptive risk management, Telegram integration, and a real-time web dashboard. Uses [Hyperliquid](https://hyperliquid.xyz) for market data and [Bybit](https://www.bybit-global.com) for trade execution.
 
 > Current version: **8.1.0** | Mode: Scalper | Data: Hyperliquid | Execution: Bybit Perpetuals
 
