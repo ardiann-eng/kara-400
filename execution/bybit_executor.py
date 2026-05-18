@@ -110,6 +110,36 @@ class BybitExecutor(BaseExecutor):
         except Exception as e:
             log.warning(f"[{symbol}] SL/TP set failed: {e}")
 
+        # 7. [P1-5] Set Bybit Conditional Trailing Stop
+        # Aktivasi: saat harga naik +0.3% dari entry (scalper micro-move)
+        # Callback: 0.2% trailing distance
+        # Ini REAL-TIME di exchange, tidak tergantung bot polling interval
+        try:
+            if fill_price > 0:
+                trail_activate_pct = 0.003   # +0.3% dari entry
+                trail_callback_pct = 0.002   # 0.2% callback
+
+                if signal.side == Side.LONG:
+                    active_price = fill_price * (1 + trail_activate_pct)
+                else:
+                    active_price = fill_price * (1 - trail_activate_pct)
+
+                trailing_distance = fill_price * trail_callback_pct
+
+                await self.client.set_trailing_stop(
+                    symbol=symbol,
+                    trailing_stop=str(round(trailing_distance, 6)),
+                    active_price=str(round(active_price, 6)),
+                    position_idx=0,
+                )
+                log.info(
+                    f"🎯 [{symbol}] Trailing stop set: activate@{active_price:.6f} "
+                    f"(+{trail_activate_pct*100:.1f}%), trail={trailing_distance:.6f} "
+                    f"({trail_callback_pct*100:.1f}% callback)"
+                )
+        except Exception as e:
+            log.warning(f"[{symbol}] Trailing stop set failed (non-critical): {e}")
+
         # 7. Create Position object
         pos = Position(
             id=gen_id(),

@@ -62,11 +62,12 @@ class OrderbookAnalyzer:
             reasons.append(
                 f"Moderate bid imbalance {imb*100:.0f}% -> LONG tilt"
             )
-        elif imb > 0.10:
-            pts = 3 + int((imb - 0.10) * 20)   # 3-5pts
+        elif imb > 0.05:
+            pts = 3 + int((imb - 0.05) * 25)   # 3-8pts
+            pts = min(pts, 8)
             bull += pts
             reasons.append(
-                f"Slight bid imbalance {imb*100:.0f}% -> minor LONG lean"
+                f"Mild bid pressure ({imb:.2f})"
             )
         elif imb < -0.50:
             pts = 14 + int((abs(imb) - 0.50) * 20)  # 14-18pts
@@ -81,11 +82,12 @@ class OrderbookAnalyzer:
             reasons.append(
                 f"Moderate ask imbalance {abs(imb)*100:.0f}% -> SHORT tilt"
             )
-        elif imb < -0.10:
-            pts = 3 + int((abs(imb) - 0.10) * 20)
+        elif imb < -0.05:
+            pts = 3 + int((abs(imb) - 0.05) * 25)
+            pts = min(pts, 8)
             bear += pts
             reasons.append(
-                f"Slight ask imbalance {abs(imb)*100:.0f}% -> minor SHORT lean"
+                f"Mild ask pressure ({imb:.2f})"
             )
         else:
             # True equilibrium (-0.10 to +0.10)

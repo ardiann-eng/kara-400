@@ -80,9 +80,9 @@ class OIFundingAnalyzer:
                 f"bias=bear | pts=12 | direction=contrarian"
             )
         elif fr > 0.00005:                                 # > 0.005%/8h - mild positive
-            bull += 3    # mild positive = some demand still building (small same-side tilt)
+            bull += 5    # mild positive = demand building
             reasons.append(
-                f"Mild positive funding {fr*100:.4f}%/8h -> minor LONG tilt"
+                f"Mild positive funding {fr*100:.4f}%/8h -> LONG tilt (+5)"
             )
         elif fr < -SIGNAL.funding_extreme_threshold * 2:   # < -0.0006
             bull += 18   # [QUANT AGGRESSION] contrarian: crowded shorts → squeeze potential
@@ -103,9 +103,9 @@ class OIFundingAnalyzer:
                 f"bias=bull | pts=12 | direction=contrarian"
             )
         elif fr < -0.00005:                                # < -0.005%/8h - mild negative
-            bear += 3
+            bear += 5
             reasons.append(
-                f"Mild negative funding {fr*100:.4f}%/8h -> minor SHORT tilt"
+                f"Mild negative funding {fr*100:.4f}%/8h -> SHORT tilt (+5)"
             )
         else:
             reasons.append(f"Flat/noise funding {fr*100:.4f}%/8h -> no signal")
@@ -161,31 +161,39 @@ class OIFundingAnalyzer:
                         f"Predicted funding shifting negative -> shorts crowding further -> contrarian bull"
                     )
 
-        # ── 4. OI Change Analysis ─────────────────────────────────────
+        # ── 4. OI Change Analysis (graduated scoring) ──────────────────
+        # [FIX 2026-05-18] Sebelumnya all-or-nothing: 0 atau 22 poin.
+        # Sekarang graduated: OI kecil = sedikit poin, OI besar = banyak poin.
         oi_chg = oi.oi_change_pct
-        if price_change_1h > 0.002 and oi_chg > SIGNAL.oi_change_threshold_pct:
-            bull += 22  # increased from 18
-            reasons.append(
-                f"OI +{oi_chg*100:.1f}% with price up -> STRONG LONG confirmed"
-            )
-        elif price_change_1h < -0.002 and oi_chg > SIGNAL.oi_change_threshold_pct:
-            bear += 22  # increased from 18
-            reasons.append(
-                f"OI +{oi_chg*100:.1f}% with price down -> STRONG SHORT confirmed"
-            )
+        oi_threshold = SIGNAL.oi_change_threshold_pct  # 0.3%
+
+        if price_change_1h > 0.001 and oi_chg > oi_threshold * 3:  # > 0.9%
+            bull += 22
+            reasons.append(f"📊 OI/Funding bullish (+22)")
+        elif price_change_1h > 0.001 and oi_chg > oi_threshold * 1.5:  # > 0.45%
+            bull += 14
+            reasons.append(f"📊 OI/Funding bullish (+14)")
+        elif price_change_1h > 0.001 and oi_chg > oi_threshold:  # > 0.3%
+            bull += 8
+            reasons.append(f"📊 OI/Funding bullish (+8)")
+        elif price_change_1h < -0.001 and oi_chg > oi_threshold * 3:
+            bear += 22
+            reasons.append(f"📊 OI/Funding bearish (+22)")
+        elif price_change_1h < -0.001 and oi_chg > oi_threshold * 1.5:
+            bear += 14
+            reasons.append(f"📊 OI/Funding bearish (+14)")
+        elif price_change_1h < -0.001 and oi_chg > oi_threshold:
+            bear += 8
+            reasons.append(f"📊 OI/Funding bearish (+8)")
         elif price_change_1h > 0.005 and oi_chg < -0.005:
             bear += 3
-            warnings.append(
-                f"Price up but OI falling -> weak move, short covering"
-            )
-        elif oi_chg < -SIGNAL.oi_change_threshold_pct:
+            warnings.append(f"Price up but OI falling -> weak move, short covering")
+        elif oi_chg < -oi_threshold:
             if price_change_1h > 0:
                 bull += 5
             else:
                 bear += 5
-            reasons.append(
-                f"OI dropping {oi_chg*100:.1f}% -> position unwinding"
-            )
+            reasons.append(f"OI dropping {oi_chg*100:.1f}% -> position unwinding")
 
         # ── 5. OI Magnitude (context label only — no longer a score adder) ────
         # FIX #9: Removed magnitude_bonus from bull/bear score.

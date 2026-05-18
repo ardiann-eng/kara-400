@@ -312,6 +312,29 @@ class BybitClient:
         """Cancel SL/TP by setting them to empty."""
         return await self.place_tpsl_order(symbol, "", position_idx=position_idx)
 
+    async def set_trailing_stop(
+        self,
+        symbol: str,
+        trailing_stop: str,
+        active_price: str = "",
+        position_idx: int = 0,
+    ) -> Dict[str, Any]:
+        """Set trailing stop on existing position via /v5/position/trading-stop.
+        
+        Args:
+            trailing_stop: Trailing distance in price (e.g. "0.50" for $0.50 trail)
+            active_price: Price at which trailing activates (optional)
+        """
+        body = {
+            "category": self.CATEGORY,
+            "symbol": symbol,
+            "positionIdx": position_idx,
+            "trailingStop": trailing_stop,
+        }
+        if active_price:
+            body["activePrice"] = active_price
+        return await self._request("POST", "/v5/position/trading-stop", body=body, auth=True)
+
     async def verify_credentials(self) -> Tuple[bool, str]:
         """Verify API credentials are valid."""
         try:

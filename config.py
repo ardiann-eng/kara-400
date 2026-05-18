@@ -292,8 +292,8 @@ class ScalperConfig:
     time_exit_early_trail_pct:   float = 0.003   # 0.3% floating → aktifkan trailing
     time_exit_early_trail_width: float = 0.0015  # trail width 0.15% dari peak
     # Early loss cut: jangan tunggu max_hold jika posisi langsung turun
-    time_exit_early_loss_pct:    float = -0.005  # -0.5% floating → cut segera
-    time_exit_early_loss_mins:   float = 8.0     # setelah 8m hold (bukan noise lagi)
+    time_exit_early_loss_pct:    float = -0.008  # -0.8% floating → cut segera (was -0.5%, terlalu sensitif)
+    time_exit_early_loss_mins:   float = 10.0    # setelah 10m hold (was 8m, kasih ruang lebih)
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold — HARD THRESHOLD SCALPER (TIDAK BISA DIUBAH USER)
@@ -449,7 +449,7 @@ class SignalConfig:
     asia_session_penalty:    int   = -5       # [FIX 2026-05-18] Was -10, terlalu ketat setelah session bonus split. Threshold naik 5 (bukan 10) di Asia.
 
     # OI / Funding thresholds
-    oi_change_threshold_pct: float = 0.008     # 0.8% OI change = significant
+    oi_change_threshold_pct: float = 0.003     # 0.3% OI change = significant (was 0.8%, terlalu tinggi untuk 5-min window)
     funding_extreme_threshold: float = 0.0003  # 0.03% per 8h = crowded
     funding_neutral_zone:    float = 0.00005   # ignore below this
 

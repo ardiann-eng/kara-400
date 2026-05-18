@@ -539,10 +539,83 @@ class ScoringEngine:
         score = max(0, min(score, 100))
         reasons.extend(session_reasons)
 
-        # Effective threshold: session lowers bar proportionally + 4h regime adjustment
+        # ── [P0-2 FIX 2026-05-18] FUNDING RATE HARD GATE ──────────────
+        # Data audit: funding_extreme adalah satu-satunya fitur dengan r>0 terhadap PnL.
+        # Kalau funding crowded di sisi yang sama = market over-leveraged = mean reversion imminent.
+        # HARD BLOCK kalau sangat crowded, half-size kalau moderate.
+        _fr = funding.funding_rate if funding else 0.0
+        _fr_crowded_hard = 0.0005   # 0.05%/8h — sangat crowded (was 0.03%, terlalu ketat)
+        _fr_crowded_soft = 0.0001   # 0.01%/8h — moderate crowded
+        if side == Side.LONG and _fr > _fr_crowded_hard:
+            log.info(
+                f"[P0-2 BLOCK] {asset} LONG: funding {_fr*100:.4f}% > {_fr_crowded_hard*100:.4f}% "
+                f"(market over-leveraged long, mean reversion risk)"
+            )
+            self.skip_counters["other"] = self.skip_counters.get("other", 0) + 1
+            return None, score
+        elif side == Side.SHORT and _fr < -_fr_crowded_hard:
+            log.info(
+                f"[P0-2 BLOCK] {asset} SHORT: funding {_fr*100:.4f}% < -{_fr_crowded_hard*100:.4f}% "
+                f"(market over-leveraged short, mean reversion risk)"
+            )
+            self.skip_counters["other"] = self.skip_counters.get("other", 0) + 1
+            return None, score
+
+        # ── [P0-3 FIX 2026-05-18] LIQUIDATION CASCADE ENTRY TRIGGER ───
+        # Data: WR 20% tanpa timing = spray-and-pray.
+        # Solusi: untuk score marginal (<65), WAJIB ada liquidation di sisi berlawanan
+        # sebagai entry catalyst. Score >=65 = sinyal kuat, boleh tanpa trigger.
+        if score < 65:
+            _target_liq_side = "short" if side == Side.LONG else "long"
+            _now_ts_liq = time.time()
+            _opposing_liqs = [
+                e for e in recent_liqs
+                if e.get("coin", e.get("asset", "")) == asset
+                and e.get("side", "") in (
+                    (_target_liq_side, "buy") if _target_liq_side == "long" else (_target_liq_side, "sell")
+                )
+            ]
+            # Filter by time jika tersedia, otherwise pakai semua (cache = recent)
+            _filtered = []
+            for e in _opposing_liqs:
+                _evt_time = float(e.get("time", 0) or 0) / 1000  # HL uses ms
+                if _evt_time > 0 and _evt_time > _now_ts_liq - 300:
+                    _filtered.append(e)
+                elif _evt_time == 0:
+                    _filtered.append(e)  # no timestamp = assume recent
+            _liq_notional = sum(
+                float(e.get("sz", e.get("size", 0))) * float(e.get("px", e.get("price", 0)))
+                for e in _filtered
+            )
+            # Butuh minimal $10k liquidation di sisi berlawanan sebagai catalyst
+            if _liq_notional < 10_000:
+                if not (hasattr(liq_map, 'cascade_risk') and liq_map.cascade_risk > 0.3):
+                    log.info(
+                        f"[P0-3 SKIP] {asset} {side.value.upper()} score={score}: "
+                        f"no liq trigger (opposing=${_liq_notional:.0f}<$10k, "
+                        f"cascade={getattr(liq_map, 'cascade_risk', 0):.2f})"
+                    )
+                    self.skip_counters["other"] = self.skip_counters.get("other", 0) + 1
+                    return None, score
+
+        # Effective threshold: overlap = market efisien, butuh sinyal LEBIH kuat
+        # [P0-1 FIX 2026-05-18] Data: overlap WR=6.1% karena threshold terlalu rendah.
+        # Sekarang: overlap NAIKKAN threshold (bukan turunkan).
+        hour = datetime.now(timezone.utc).hour
+        is_ny_lon_overlap = (
+            config.SIGNAL.ny_session_start_utc <= hour < config.SIGNAL.london_end_utc
+            and config.SIGNAL.london_start_utc <= hour < config.SIGNAL.ny_session_end_utc
+        )
+        if is_ny_lon_overlap:
+            overlap_threshold_adj = 5  # overlap = efisien, butuh sinyal kuat
+        elif config.SIGNAL.ny_session_start_utc <= hour < config.SIGNAL.ny_session_end_utc:
+            overlap_threshold_adj = 2  # NY only
+        else:
+            overlap_threshold_adj = 0
+
         effective_threshold = (
             config.SCALPER.min_score_to_enter
-            - session_threshold_add         # NY: threshold drops by 7
+            + overlap_threshold_adj         # [P0-1] overlap: +8, NY-only: +3
             + session_threshold_delta       # Asia: threshold rises
             + htf_threshold_adj             # 4h regime: aligned=-3, counter=+8, choppy=+2
         )
@@ -891,18 +964,18 @@ class ScoringEngine:
             except Exception:
                 imb = 0.0
 
-            if imb > 0.60:
+            if imb > 0.45:
                 bull_pts += 20; _c_ob = 20; _ob_signed = 20
                 reasons.append(f"📗 Strong bid wall (imbalance {imb:.2f}) → LONG")
-            elif imb < -0.60:
+            elif imb < -0.45:
                 bear_pts += 20; _c_ob = 20; _ob_signed = -20
                 reasons.append(f"📕 Strong ask wall (imbalance {imb:.2f}) → SHORT")
-            elif imb > 0.40:
-                bull_pts += 8; _c_ob = 8; _ob_signed = 8
-                reasons.append(f"🟢 Mild bid pressure ({imb:.2f})")
-            elif imb < -0.40:
-                bear_pts += 8; _c_ob = 8; _ob_signed = -8
-                reasons.append(f"🔴 Mild ask pressure ({imb:.2f})")
+            elif imb > 0.20:
+                bull_pts += 10; _c_ob = 10; _ob_signed = 10
+                reasons.append(f"🟢 Bid pressure ({imb:.2f})")
+            elif imb < -0.20:
+                bear_pts += 10; _c_ob = 10; _ob_signed = -10
+                reasons.append(f"🔴 Ask pressure ({imb:.2f})")
 
         # ── OI + Funding Analysis (from standard pipeline — zero API calls) ──────
         # [FIX 2026-05-09] Sebelumnya scalper hanya pakai teknikal.
@@ -1102,11 +1175,11 @@ class ScoringEngine:
             cvd_total = buy_vol + sell_vol
             if cvd_total > 0:
                 cvd_ratio = (buy_vol - sell_vol) / cvd_total
-                if cvd_ratio > 0.25:
-                    bull_pts += 10; _c_cvd = 10
+                if cvd_ratio > 0.15:
+                    bull_pts += 12; _c_cvd = 12
                     reasons.append(f"💚 CVD bullish ({cvd_ratio*100:.0f}% net buy pressure)")
-                elif cvd_ratio < -0.25:
-                    bear_pts += 10; _c_cvd = 10
+                elif cvd_ratio < -0.15:
+                    bear_pts += 12; _c_cvd = 12
                     reasons.append(f"❤️ CVD bearish ({cvd_ratio*100:.0f}% net sell pressure)")
 
         # ── Volume Surge (2min vs 10min average) ──────────────────────
