@@ -5,6 +5,11 @@
 hyperliquid-python-sdk>=0.1.0
 aiohttp>=3.9.0
 
+# === Bitget (REST + WebSocket execution) ===
+# HTTP/2 dipakai BitgetClient untuk low-latency execution
+httpx[http2]>=0.25.0
+websockets>=12.0
+
 # === FastAPI & Web ===
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0

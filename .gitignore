@@ -76,3 +76,10 @@ tmp/
 !tsconfig.json
 !zeabur.json
 !railway.json
+
+# Audit data — internal production data, never push
+audit_score_analysis/data/
+audit_score_analysis/*.pkl
+audit_score_analysis/*.csv
+*_b64.txt
+kara_railway_b64.txt

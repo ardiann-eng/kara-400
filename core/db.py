@@ -627,15 +627,14 @@ class UserDB:
                     data = json.load(f)
                     for chat_id, u_data in data.items():
                         user_obj = User(**u_data)
-                        if user_obj.hl_agent_secret and _fernet:
-                            try:
-                                # First we check if it is already encrypted (starts with gAAAA...)
-                                secret = user_obj.hl_agent_secret
-                                if secret.startswith("gAAAA"):
-                                    user_obj.hl_agent_secret = _fernet.decrypt(secret.encode()).decode()
-                            except Exception as e:
-                                log.debug(f"Failed to decrypt secret for {chat_id}: {e}")
-                                # keep as is if decryption fails (might be plaintext or wrong key)
+                        # Decrypt HL agent secret + Bitget secret + passphrase
+                        for attr in ("hl_agent_secret", "bitget_api_secret", "bitget_passphrase"):
+                            val = getattr(user_obj, attr, None)
+                            if val and _fernet and val.startswith("gAAAA"):
+                                try:
+                                    setattr(user_obj, attr, _fernet.decrypt(val.encode()).decode())
+                                except Exception as e:
+                                    log.debug(f"Failed to decrypt {attr} for {chat_id}: {e}")
                         self.users[chat_id] = user_obj
                 log.info(f"Loaded {len(self.users)} users from JSON database.")
             except Exception as e:
@@ -649,21 +648,22 @@ class UserDB:
                     data = {}
                     for k, v in self.users.items():
                         udict = v.model_dump() if hasattr(v, 'model_dump') else v.dict()
-                        # Encrypt secret before saving
-                        if udict.get("hl_agent_secret"):
-                            secret = udict["hl_agent_secret"]
+                        # Encrypt sensitive fields: HL agent secret, Bitget secret + passphrase.
+                        # API key bukan rahasia tunggal (perlu signature) tapi tetap sensitif.
+                        for attr in ("hl_agent_secret", "bitget_api_secret", "bitget_passphrase"):
+                            val = udict.get(attr)
+                            if not val:
+                                continue
                             if _fernet:
                                 try:
-                                    # Only encrypt if not already encrypted (Fernet tokens start with gAAAA)
-                                    if not secret.startswith("gAAAA"):
-                                        udict["hl_agent_secret"] = _fernet.encrypt(secret.encode()).decode()
+                                    if not val.startswith("gAAAA"):
+                                        udict[attr] = _fernet.encrypt(val.encode()).decode()
                                 except Exception as e:
-                                    log.error(f"Failed to encrypt secret for {k}: {e}")
+                                    log.error(f"Failed to encrypt {attr} for {k}: {e}")
                             else:
-                                # No encryption key — redact in log but keep value so user isn't locked out
                                 log.error(
-                                    f"⚠️  Saving agent secret for {k} WITHOUT encryption. "
-                                    "Set HL_FERNET_KEY to protect user wallet keys."
+                                    f"⚠️  Saving {attr} for {k} WITHOUT encryption. "
+                                    "Set HL_FERNET_KEY to protect user keys."
                                 )
                         data[k] = udict
                     # handle datetime parsing issues in basic json

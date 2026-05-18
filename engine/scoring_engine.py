@@ -459,11 +459,15 @@ class ScoringEngine:
         vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
 
         # 4b. Compute scalper indicators (enriched with fundamental data)
+        # [F1 FIX 2026-05-18] Capture per-analyzer signed contributions
+        _scalper_components: dict = {}
         score, side, reasons = self._calculate_scalper_score(
             asset, mark_price, candles, mtf_trend,
             oi_bull=oi_bull, oi_bear=oi_bear,
             liq_bull=liq_bull, liq_bear=liq_bear,
             fund_reasons=oi_reasons[:2], liq_reasons=liq_reasons[:2],
+            out_components=_scalper_components,
+            trend_pct=trend_pct,
         )
 
         # 4c. [QUANT AGGRESSION] Regime multiplier — trending = boost, late trend flagged.
@@ -489,13 +493,25 @@ class ScoringEngine:
         score = max(0, min(score, 100))
         reasons.append(f"🌐 Regime: {_regime_cat} (×{_regime_mult}, {score_pre}→{score})")
 
-        # FIX #5: Session adjusts entry threshold, not score.
+        # [SESSION FIX 2026-05-18]: Split session bonus — small portion to score,
+        # majority to threshold. Old: +14 all to score → inflated top decile (21% WR).
+        # New: +4 to score (NY+3, London+1), rest lowers threshold.
+        # Rationale: session IS a mild edge (more liquidity, tighter spreads),
+        # but should not be the primary driver of a high score.
         session_bonus, session_reasons, session_threshold_delta = self._get_session_bonus()
-        score += session_bonus  # NY/London bonus adds to score
+        SESSION_SCORE_RATIO = 0.30  # 30% of bonus goes to score, 70% to threshold
+        session_score_add = int(round(session_bonus * SESSION_SCORE_RATIO))  # NY=+3, London=+1
+        session_threshold_add = session_bonus - session_score_add            # NY=+7, London=+3
+        score += session_score_add
         score = max(0, min(score, 100))
         reasons.extend(session_reasons)
 
-        effective_threshold = config.SCALPER.min_score_to_enter + session_threshold_delta
+        # Effective threshold: session lowers bar proportionally
+        effective_threshold = (
+            config.SCALPER.min_score_to_enter
+            - session_threshold_add         # NY: threshold drops by 7
+            + session_threshold_delta       # Asia: threshold rises
+        )
         if score < effective_threshold:
             log.info(
                 f"[SKIP] {asset} | score={score} | side={side.value} | "
@@ -591,6 +607,10 @@ class ScoringEngine:
             session_bonus, realized_vol, trend_pct, atr_pct=atr_pct_now,
             fade_mode=fade_mode,
             late_trend=late_trend,
+            # [F1 FIX 2026-05-18] Pass per-analyzer signed scores for breakdown telemetry
+            oi_signed=_scalper_components.get("oi_signed", 0),
+            liq_signed=_scalper_components.get("liq_signed", 0),
+            ob_signed=_scalper_components.get("ob_signed", 0),
         )
 
         # Attach last-known funding rate for Telegram warning
@@ -760,11 +780,23 @@ class ScoringEngine:
         oi_bull: float = 0, oi_bear: float = 0,
         liq_bull: float = 0, liq_bear: float = 0,
         fund_reasons: list = None, liq_reasons: list = None,
+        out_components: dict = None,
+        trend_pct: float = 0.0,
     ) -> Tuple[int, Side, List[str]]:
         """
         Fast scalper scoring using technical indicators on 1m candles
         + fundamental data (OI, Funding, Liquidation) from standard pipeline.
         Returns (score: int, side: Side, reasons: List[str])
+
+        out_components (optional): if provided, will be populated with signed
+        per-analyzer contributions for breakdown telemetry:
+          ob_signed:  positive = bid-heavy (bullish), negative = ask-heavy (bearish)
+          oi_signed:  oi_bull - oi_bear (passed through)
+          liq_signed: liq_bull - liq_bear (passed through)
+
+        trend_pct: 1h price change. If |trend_pct| >= 0.015 (1.5%) we treat the
+        market as TRENDING and invert RSI level + divergence signals
+        (momentum continuation). Otherwise we keep classic mean-reversion logic.
         """
         score = 0
         bull_pts = 0
@@ -782,6 +814,8 @@ class ScoringEngine:
         _c_cvd = 0
         _c_vol = 0
         _c_mtf = 0
+        # [F1 FIX 2026-05-18] Signed component for breakdown telemetry
+        _ob_signed = 0
 
         # ── Orderbook Imbalance (from cache) ─────────────────────────
         ob = self.cache.orderbook.get(asset) if hasattr(self.cache, 'orderbook') else None
@@ -818,16 +852,16 @@ class ScoringEngine:
                 imb = 0.0
 
             if imb > 0.60:
-                bull_pts += 20; _c_ob = 20
+                bull_pts += 20; _c_ob = 20; _ob_signed = 20
                 reasons.append(f"📗 Strong bid wall (imbalance {imb:.2f}) → LONG")
             elif imb < -0.60:
-                bear_pts += 20; _c_ob = 20
+                bear_pts += 20; _c_ob = 20; _ob_signed = -20
                 reasons.append(f"📕 Strong ask wall (imbalance {imb:.2f}) → SHORT")
             elif imb > 0.40:
-                bull_pts += 8; _c_ob = 8
+                bull_pts += 8; _c_ob = 8; _ob_signed = 8
                 reasons.append(f"🟢 Mild bid pressure ({imb:.2f})")
             elif imb < -0.40:
-                bear_pts += 8; _c_ob = 8
+                bear_pts += 8; _c_ob = 8; _ob_signed = -8
                 reasons.append(f"🔴 Mild ask pressure ({imb:.2f})")
 
         # ── OI + Funding Analysis (from standard pipeline — zero API calls) ──────
@@ -868,6 +902,11 @@ class ScoringEngine:
             bull_candles = 0
             bear_candles = 0
             score = min(total, 100)
+            # [F1 FIX 2026-05-18] Populate breakdown telemetry on early return
+            if out_components is not None:
+                out_components["ob_signed"]  = int(_ob_signed)
+                out_components["oi_signed"]  = int(oi_bull - oi_bear)
+                out_components["liq_signed"] = int(liq_bull - liq_bear)
             return score, side, reasons
 
         # Extract OHLCV
@@ -885,6 +924,11 @@ class ScoringEngine:
 
         if len(closes) < 10:
             side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
+            # [F1 FIX 2026-05-18] Populate breakdown telemetry on early return
+            if out_components is not None:
+                out_components["ob_signed"]  = int(_ob_signed)
+                out_components["oi_signed"]  = int(oi_bull - oi_bear)
+                out_components["liq_signed"] = int(liq_bull - liq_bear)
             return min(bull_pts + bear_pts, 100), side, reasons
 
         # ── [AUDIT Phase 1] Momentum Candles REMOVED — redundant with EMA cross ──
@@ -925,27 +969,52 @@ class ScoringEngine:
             else:
                 rsi = 100.0
 
-            # [FIX 2026-05-09] RSI zones diperlebar — sebelumnya <35/>65 terlalu ketat
-            # untuk 1m timeframe. RSI 1m jarang menyentuh extreme, jadi zone diperluas
-            # agar RSI lebih sering berkontribusi ke skor.
-            if rsi < 30:
-                bull_pts += 10; _c_rsi = 10
-                reasons.append(f"📊 RSI extreme oversold ({rsi:.1f}) → strong buy")
-            elif rsi < 40:
-                bull_pts += 5; _c_rsi = 5
-                reasons.append(f"📊 RSI oversold ({rsi:.1f}) → buy signal")
-            elif rsi > 70:
-                bear_pts += 10; _c_rsi = 10
-                reasons.append(f"📊 RSI extreme overbought ({rsi:.1f}) → strong sell")
-            elif rsi > 60:
-                bear_pts += 5; _c_rsi = 5
-                reasons.append(f"📊 RSI overbought ({rsi:.1f}) → sell signal")
-            else:
-                reasons.append(f"📊 RSI neutral ({rsi:.1f})")
+            # ── RSI regime-gated weight ──────────────────────────────
+            # [F5 FIX 2026-05-18] Audit: RSI overbought/divergence had r=-0.22 with PnL
+            # in production (all NY session = trending). Root cause: mean-reversion RSI
+            # logic fails in trending markets.
+            # Solution: invert RSI level + divergence in TRENDING regime (|trend_pct|>=1.5%),
+            # keep classic mean-reversion in RANGING regime.
+            _is_trending = abs(trend_pct) >= 0.015
 
-            # ── Bearish RSI Divergence: price HH tapi RSI LH ───────────
-            # Butuh minimal 20 candles: hitung RSI di t-5 dan t-10 untuk bandingan
-            if len(closes) >= 20:
+            if _is_trending:
+                # TRENDING: RSI overbought = momentum continuation = BULL
+                #           RSI oversold  = momentum continuation = BEAR
+                if rsi > 70:
+                    bull_pts += 10; _c_rsi = 10
+                    reasons.append(f"📊 RSI overbought ({rsi:.1f}) + trending → momentum LONG +10")
+                elif rsi > 60:
+                    bull_pts += 5; _c_rsi = 5
+                    reasons.append(f"📊 RSI high ({rsi:.1f}) + trending → momentum LONG +5")
+                elif rsi < 30:
+                    bear_pts += 10; _c_rsi = 10
+                    reasons.append(f"📊 RSI oversold ({rsi:.1f}) + trending → momentum SHORT +10")
+                elif rsi < 40:
+                    bear_pts += 5; _c_rsi = 5
+                    reasons.append(f"📊 RSI low ({rsi:.1f}) + trending → momentum SHORT +5")
+                else:
+                    reasons.append(f"📊 RSI neutral ({rsi:.1f}) trending")
+            else:
+                # RANGING: classic mean-reversion
+                if rsi < 30:
+                    bull_pts += 10; _c_rsi = 10
+                    reasons.append(f"📊 RSI extreme oversold ({rsi:.1f}) → strong buy")
+                elif rsi < 40:
+                    bull_pts += 5; _c_rsi = 5
+                    reasons.append(f"📊 RSI oversold ({rsi:.1f}) → buy signal")
+                elif rsi > 70:
+                    bear_pts += 10; _c_rsi = 10
+                    reasons.append(f"📊 RSI extreme overbought ({rsi:.1f}) → strong sell")
+                elif rsi > 60:
+                    bear_pts += 5; _c_rsi = 5
+                    reasons.append(f"📊 RSI overbought ({rsi:.1f}) → sell signal")
+                else:
+                    reasons.append(f"📊 RSI neutral ({rsi:.1f})")
+
+            # ── RSI Divergence (regime-gated) ────────────────────────
+            # In TRENDING: divergence is noise on 1m — skip entirely.
+            # In RANGING:  divergence is valid mean-reversion signal.
+            if len(closes) >= 20 and not _is_trending:
                 def _rsi_at(cl, window=14):
                     g = [max(cl[i] - cl[i-1], 0) for i in range(1, len(cl))]
                     l = [max(cl[i-1] - cl[i], 0) for i in range(1, len(cl))]
@@ -958,8 +1027,6 @@ class ScoringEngine:
                 price_now = closes[-1]
                 price_5ago = closes[-6]
 
-                # [FIX 2026-05-10] Divergence dikurangi dari 10→7 pts — divergence
-                # pada 1m timeframe sering false signal karena noise.
                 if price_now > price_5ago * 1.002 and rsi_now < rsi_5ago - 3:
                     bear_pts += 5; _c_div = 5
                     reasons.append(f"📉 Bearish RSI divergence (price ↑ tapi RSI {rsi_5ago:.0f}→{rsi_now:.0f}) → SHORT")
@@ -1051,6 +1118,30 @@ class ScoringEngine:
                     log.debug(f"[{asset}] SCALPER REJECT: Against 15m MTF trend")
                     return 0, side, reasons + ["REJECT: Counter-trend MTF"]
 
+        # ── [LATE ENTRY FIX 2026-05-18] Price Displacement Filter ──────────
+        # Problem: bot enters LONG after pump already happened, SHORT after dump.
+        # Root cause: EMA cross + CVD + volume surge are all lagging indicators.
+        # Fix: if price has already moved > threshold from the 5-candle-ago close,
+        # the move is "stale" — penalize score to discourage chasing.
+        #
+        # Threshold: 0.8% displacement = roughly 1× ATR on 1m for most assets.
+        # Above this, the entry is likely at exhaustion, not at the start.
+        if len(closes) >= 6:
+            price_5ago = closes[-6]
+            if price_5ago > 0:
+                displacement = (closes[-1] - price_5ago) / price_5ago
+                DISP_THRESHOLD = 0.008  # 0.8% in 5 candles = stale move
+                if side == Side.LONG and displacement > DISP_THRESHOLD:
+                    penalty = min(int((displacement - DISP_THRESHOLD) * 1000), 20)
+                    raw = max(0, raw - penalty)
+                    reasons.append(f"⚠️ Late LONG: price already +{displacement*100:.2f}% in 5m (-{penalty} pts)")
+                    log.info(f"[LATE-ENTRY] {asset} LONG displacement={displacement*100:.2f}% penalty={penalty}")
+                elif side == Side.SHORT and displacement < -DISP_THRESHOLD:
+                    penalty = min(int((abs(displacement) - DISP_THRESHOLD) * 1000), 20)
+                    raw = max(0, raw - penalty)
+                    reasons.append(f"⚠️ Late SHORT: price already {displacement*100:.2f}% in 5m (-{penalty} pts)")
+                    log.info(f"[LATE-ENTRY] {asset} SHORT displacement={displacement*100:.2f}% penalty={penalty}")
+
         # ── [QUANT AGGRESSION] Mean-Reversion Guard REMOVED ───────────────
         # Previously capped score to 60 when RSI>60 + price>EMA21.
         # Data analysis shows: high scores aren't the problem, BAD EXITS are.
@@ -1067,6 +1158,12 @@ class ScoringEngine:
             f"CVD={_c_cvd} VOL={_c_vol} FUND={_c_fund} LIQ={_c_liq} MTF={_c_mtf} | "
             f"bull={bull_pts} bear={bear_pts}"
         )
+
+        # [F1 FIX 2026-05-18] Populate breakdown telemetry for downstream persistence
+        if out_components is not None:
+            out_components["ob_signed"]  = int(_ob_signed)
+            out_components["oi_signed"]  = int(oi_bull - oi_bear)
+            out_components["liq_signed"] = int(liq_bull - liq_bear)
 
         return score, side, reasons
 
@@ -1105,6 +1202,10 @@ class ScoringEngine:
         atr_pct: float = 0.0,
         fade_mode: bool = False,
         late_trend: bool = False,
+        # [F1 FIX 2026-05-18] Per-analyzer signed contributions for breakdown telemetry
+        oi_signed: int = 0,
+        liq_signed: int = 0,
+        ob_signed: int = 0,
     ) -> TradeSignal:
         """Build a TradeSignal with scalper-specific dynamic TP/SL levels."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
@@ -1158,7 +1259,7 @@ class ScoringEngine:
         # actually below the RR floor.
         tp1_min_rr = getattr(scfg, 'tp1_min_rr_to_sl', 0.6)
         tp2_min_rr = getattr(scfg, 'tp2_min_rr_to_sl', 1.5)
-        TP1_ABS_CAP = 0.012   # 1.2% — keep TP1 reachable in 20m hold
+        TP1_ABS_CAP = 0.008   # [F4 FIX 2026-05-18] 1.2%→0.8%: keep TP1 reachable, trailing activates sooner
         TP2_ABS_CAP = 0.020   # 2.0% — keep TP2 reachable in 20m hold
         tp1_floor = min(sl_pct * tp1_min_rr, TP1_ABS_CAP)
         tp2_floor = min(sl_pct * tp2_min_rr, TP2_ABS_CAP)
@@ -1233,6 +1334,11 @@ class ScoringEngine:
 
         strength = SignalStrength.STRONG if score >= 70 else SignalStrength.MODERATE
         breakdown = ScoreBreakdown(
+            # [F1 FIX 2026-05-18] Persist signed analyzer contributions
+            # so per-component edge can be audited via DB.
+            oi_funding_score=oi_signed,
+            liquidation_score=liq_signed,
+            orderbook_score=ob_signed,
             raw_score=score,
             final_score=score,
             session_bonus=session_bonus,

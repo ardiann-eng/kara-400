@@ -20,13 +20,14 @@ from models.schemas import (
 )
 from data.hyperliquid_client import HyperliquidClient
 from risk.risk_manager import RiskManager
+from execution.base_executor import BaseExecutor
 from utils.helpers import gen_id, format_usd, utcnow
 from utils.excel_logger import get_excel_logger
 
 log = logging.getLogger("kara.live_exec")
 
 
-class LiveExecutor:
+class LiveExecutor(BaseExecutor):
     """
     Live trading executor. Mirrors PaperExecutor interface.
     Always uses Isolated margin, defaults to Post-Only limit orders.

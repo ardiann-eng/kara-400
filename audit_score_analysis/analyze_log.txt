@@ -1,0 +1,128 @@
+﻿Loaded: 338 trades, 338 signals, 91 meta
+Joined trades: 338 (from 338 trades)
+Match rate: 100.0%
+
+=== SUMMARY ===
+Total: 338 | Wins: 165 | Losses: 173
+Win Rate: 48.8%
+Total PnL: $-67.22
+Avg Win: $0.67 | Avg Loss: $-1.03
+Profit Factor: 0.653
+Expectancy/trade: $-0.1989
+
+Features: 27
+
+=== CORRELATION (feature vs pnl_usd) ===
+                 feature   pearson  p_value  spearman
+  sig_has_rsi_divergence -0.217225 0.000056 -0.155585
+    sig_has_volume_surge -0.153412 0.004702 -0.235597
+ sig_has_funding_extreme  0.137833 0.011188  0.177768
+       sig_has_mtf_align -0.104201 0.055643 -0.107306
+     sig_has_ema_bearish  0.097175 0.074401  0.071965
+  sig_has_london_session -0.080138 0.141502  0.114470
+      sig_has_ny_session  0.073979 0.174808  0.122700
+     sig_has_cvd_bullish  0.070450 0.196350  0.097149
+sig_has_strong_imbalance -0.067638 0.214854 -0.016731
+  sig_suggested_leverage  0.061153 0.262218  0.093107
+           sig_entry_atr -0.055061 0.312831  0.088435
+    sig_has_rsi_oversold -0.045375 0.405668 -0.142544
+       sig_session_bonus  0.040295 0.460287  0.155920
+           sig_n_reasons  0.027821 0.610266  0.111787
+        sig_realized_vol  0.026091 0.632665  0.085647
+
+=== CORRELATION (feature vs outcome [win=1]) ===
+                feature   pearson  p_value
+   sig_has_volume_surge -0.200027 0.000215
+sig_has_funding_extreme  0.194815 0.000315
+   sig_has_rsi_oversold -0.188860 0.000482
+ sig_has_london_session  0.144766 0.007683
+          sig_n_reasons  0.138654 0.010710
+ sig_suggested_leverage  0.121499 0.025500
+      sig_has_mtf_align -0.117894 0.030235
+ sig_has_rsi_divergence -0.113121 0.037647
+      sig_session_bonus  0.111393 0.040686
+       sig_realized_vol  0.110188 0.042924
+          sig_entry_atr  0.108368 0.046501
+    sig_has_cvd_bullish  0.092418 0.089806
+    sig_has_ema_bearish  0.081719 0.133790
+     sig_has_ny_session  0.071928 0.187105
+ sig_has_rsi_overbought -0.048987 0.369283
+
+=== RANDOM FOREST IMPORTANCE ===
+RF Train acc: 0.958
+RF Test  acc: 0.931
+                feature   native  permutation  permutation_std
+          sig_entry_atr 0.212480 6.372549e-02         0.015029
+sig_has_funding_extreme 0.044311 2.549020e-02         0.011765
+ sig_suggested_leverage 0.043494 1.764706e-02         0.007337
+       sig_realized_vol 0.175036 1.715686e-02         0.015463
+   sig_has_volume_surge 0.049558 1.225490e-02         0.011957
+              sig_score 0.101427 7.843137e-03         0.013006
+          sig_n_reasons 0.091016 2.941176e-03         0.005459
+          sig_raw_score 0.099396 1.960784e-03         0.011846
+   sig_has_rsi_oversold 0.014866 1.470588e-03         0.007121
+      sig_has_mtf_align 0.028706 9.803922e-04         0.005280
+ sig_has_london_session 0.025274 9.803922e-04         0.004273
+ sig_has_rsi_overbought 0.013363 2.220446e-17         0.006201
+      sig_session_bonus 0.027627 5.551115e-18         0.003100
+    sig_has_ema_bearish 0.014376 0.000000e+00         0.000000
+    sig_has_ema_bullish 0.017530 0.000000e+00         0.000000
+
+=== RANDOM FOREST REGRESSOR (pnl) ===
+R� on test: 0.383
+sig_entry_atr             3.964919e-01
+sig_has_volume_surge      1.030204e-01
+sig_has_rsi_divergence    4.709160e-02
+sig_realized_vol          3.721835e-02
+sig_n_reasons             2.214103e-02
+sig_suggested_leverage    5.693624e-03
+sig_has_mtf_align         1.834177e-03
+sig_has_rsi_overbought    1.600884e-03
+sig_total_bear            1.110223e-17
+sig_regime_multiplier     5.551115e-18
+
+=== SCORE WEIGHT REVERSE-ENGINEER ===
+Components -> final_score weights:
+  sig_oi_funding_score          : +0.000
+  sig_liquidation_score         : +0.000
+  sig_orderbook_score           : +0.000
+  sig_session_bonus             : -0.332
+  intercept: +67.507
+  R�: 0.053
+
+=== COMPONENT vs PnL ===
+  sig_oi_funding_score: zero variance
+  sig_liquidation_score: zero variance
+  sig_orderbook_score: zero variance
+  sig_session_bonus              mean=+8.95  pearson=+0.040  p=0.460
+
+=== SCORE DECILE ===
+ score_decile  n  win_rate   avg_pnl  total_pnl  score_min  score_max
+            0 62  0.532258  0.075206   4.662750         57         58
+            1 15  0.466667 -0.984651 -14.769766         59         59
+            2 31  0.580645  0.114632   3.553602         60         60
+            3 48  0.291667 -0.974769 -46.788900         62         62
+            4 16  1.000000  1.248215  19.971438         63         63
+            5 44  0.318182 -0.574120 -25.261297         64         66
+            6 20  0.500000  0.004357   0.087142         67         67
+            7 52  0.673077  0.185195   9.630136         68         69
+            8 17  0.647059  0.230802   3.923639         70         71
+            9 33  0.212121 -0.673628 -22.229724         73         97
+
+=== EXIT REASON BREAKDOWN ===
+  exit_reason   n  win_rate  total_pnl   avg_pnl
+    time_exit 274  0.481752 -22.055355 -0.080494
+    stop_loss  35  0.400000 -29.755730 -0.850164
+trailing_stop  14  1.000000  19.119382  1.365670
+momentum_exit   9  0.000000 -38.108666 -4.234296
+    close_all   5  0.800000   2.415862  0.483172
+ manual_close   1  1.000000   1.163525  1.163525
+
+=== SAVED ===
+  audit_score_analysis/data/merged_trades_signals.csv
+  audit_score_analysis/data/correlations.csv
+  audit_score_analysis/data/feature_importance.csv
+  audit_score_analysis/data/score_decile.csv
+  audit_score_analysis/data/exit_reason.csv
+  audit_score_analysis/data/summary.json
+Done.

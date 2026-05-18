@@ -1346,16 +1346,24 @@ class RiskManager:
         # menangani kasus yang sama dengan lebih baik. Vol spike sering
         # false-positive karena perbandingan 2 candle terlalu noisy.
 
-        # ── Rule E: [QUANT AGGRESSION] Score-driven time exit ──────────────
-        # Time exit is NO LONGER the primary exit. Variable based on conviction:
-        #   score >= 66: 25min | score >= 61: 20min | score >= 56: 15min | else: 10min
-        # Grace period for runners: if TP1 already hit, extend by 50%.
-        # If in profit and near TP, don't force exit.
+        # ── Rule E: [TIME EXIT REDESIGN 2026-05-18] ────────────────────────
+        #
+        # Masalah lama: time exit flat di menit X → winner dipotong paksa,
+        # loser diberi grace period yang tidak perlu.
+        #
+        # Desain baru — 3 layer:
+        #   L1. Early profit-lock: jika floating > 0.3% sebelum TP1 hit →
+        #       aktifkan trailing stop 0.15% dari peak. Biarkan runner.
+        #   L2. Early loss cut: jika floating < -0.5% dan hold > 8m →
+        #       exit segera. Posisi yang langsung turun = sinyal salah.
+        #   L3. Hard time limit: jika hold >= max_hold →
+        #       - profit: exit (ambil sisa)
+        #       - loss: grace HANYA jika posisi pernah profit (max_unrealized_loss > 0)
         if getattr(position, 'trade_mode', 'scalper') == 'scalper':
             scfg = SCALPER
             entry_score = getattr(position, 'entry_score', 50)
 
-            # Score-driven max_hold (FIX 3 from scoring engine sets this)
+            # Score-driven max_hold
             if entry_score >= 66:
                 max_hold = 25.0
             elif entry_score >= 61:
@@ -1365,8 +1373,14 @@ class RiskManager:
             else:
                 max_hold = 10.0
 
-            grace      = getattr(scfg, 'max_hold_grace_minutes', 35.0)
-            soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.020)
+            grace      = getattr(scfg, 'max_hold_grace_minutes', 10.0)
+            soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.010)
+
+            # Threshold baru dari config
+            early_trail_pct   = getattr(scfg, 'time_exit_early_trail_pct',   0.003)
+            early_trail_width = getattr(scfg, 'time_exit_early_trail_width',  0.0015)
+            early_loss_pct    = getattr(scfg, 'time_exit_early_loss_pct',    -0.005)
+            early_loss_mins   = getattr(scfg, 'time_exit_early_loss_mins',    8.0)
 
             now    = _dt.now(_tz.utc)
             opened = position.opened_at
@@ -1375,20 +1389,53 @@ class RiskManager:
             hold_minutes = (now - opened).total_seconds() / 60.0
 
             # Runner grace: jika TP1 sudah hit, extend deadline 50%
-            effective_max = max_hold
-            if position.tp1_hit:
-                effective_max = max_hold * 1.5
+            effective_max = max_hold * 1.5 if position.tp1_hit else max_hold
 
+            # ── L1: Early profit-lock trailing ──────────────────────────────
+            # Aktif sebelum TP1 hit, saat floating sudah cukup untuk di-lock.
+            # Daripada tunggu time exit, aktifkan trailing sekarang.
+            if (not position.tp1_hit
+                    and not getattr(position, 'trailing_active', False)
+                    and floating >= early_trail_pct):
+                # Hitung trailing stop price dari current price
+                if position.side == Side.LONG:
+                    trail_price = current_price * (1.0 - early_trail_width)
+                else:
+                    trail_price = current_price * (1.0 + early_trail_width)
+                position.trailing_active    = True
+                position.trailing_high      = current_price
+                position.trailing_stop_price = trail_price
+                # Tidak return — biarkan trailing stop check di atas yang handle exit
+                # (trailing_active sudah True, scan berikutnya akan cek)
+
+            # ── L2: Early loss cut ───────────────────────────────────────────
+            # Posisi yang langsung turun -0.5% dalam 8m = sinyal salah, bukan noise.
+            # Jangan tunggu max_hold — cut sekarang.
+            if (hold_minutes >= early_loss_mins
+                    and floating <= early_loss_pct
+                    and not position.tp1_hit):
+                # Hanya cut jika posisi TIDAK PERNAH profit (max_unrealized_loss proxy)
+                # max_unrealized_loss disimpan sebagai nilai negatif terkecil yang pernah dicapai
+                max_unreal = getattr(position, 'max_unrealized_loss', 0.0)
+                never_profited = max_unreal <= 0.0  # tidak pernah floating positif
+                if never_profited:
+                    return {
+                        "action":      "time_exit",
+                        "close_ratio": 1.0,
+                        "price":       current_price,
+                        "pnl":         position.pnl_unrealized,
+                        "position_id": position.position_id,
+                        "message":     (
+                            f"⏱️ Early loss cut {hold_minutes:.0f}m: "
+                            f"floating {floating*100:.2f}% < {early_loss_pct*100:.1f}%, "
+                            f"tidak pernah profit. Cut sekarang."
+                        )
+                    }
+
+            # ── L3: Hard time limit ──────────────────────────────────────────
             if hold_minutes >= effective_max:
-                is_in_loss     = floating < 0
-                is_in_profit   = floating > 0
-                is_within_grace   = hold_minutes < (effective_max + grace)
-                is_recoverable    = floating > soft_floor
-
-                # Saat profit: exit segera — jangan tahan lebih lama dari max_hold.
-                # Quick-profit exit (Rule F0) mestinya sudah handle sebelum ini,
-                # tapi sebagai safety net: jika masih di sini dan profit → exit.
-                if is_in_profit:
+                if floating > 0:
+                    # Profit saat time limit → exit, ambil sisa
                     return {
                         "action":      "time_exit",
                         "close_ratio": 1.0,
@@ -1397,19 +1444,28 @@ class RiskManager:
                         "position_id": position.position_id,
                         "message":     (
                             f"⏱️ Time exit (profit) {hold_minutes:.0f}m/{effective_max:.0f}m "
-                            f"(score={entry_score}). PnL: +{floating*100:.2f}%. Ambil profit."
+                            f"(score={entry_score}). PnL: +{floating*100:.2f}%."
                         )
                     }
 
-                # Saat loss: beri grace period untuk recovery
-                if is_in_loss and is_within_grace and is_recoverable:
-                    pass  # loss tapi masih dalam batas recovery → tunggu
+                # Loss saat time limit:
+                # Grace HANYA untuk posisi yang pernah profit (pernah floating > 0)
+                max_unreal = getattr(position, 'max_unrealized_loss', 0.0)
+                ever_profited = max_unreal > 0.0
+                is_within_grace  = hold_minutes < (effective_max + grace)
+                is_recoverable   = floating > soft_floor
+
+                if ever_profited and is_within_grace and is_recoverable:
+                    pass  # pernah profit, masih dalam grace, masih recoverable → tunggu
                 else:
-                    grace_note = ""
-                    if is_in_loss and not is_recoverable:
-                        grace_note = f" (loss {floating*100:.2f}% > floor {soft_floor*100:.1f}%, cut loss)"
-                    elif is_in_loss and not is_within_grace:
-                        grace_note = f" (grace habis, total hold {hold_minutes:.0f}m)"
+                    if ever_profited and not is_within_grace:
+                        note = f" (grace habis, total {hold_minutes:.0f}m)"
+                    elif ever_profited and not is_recoverable:
+                        note = f" (loss {floating*100:.2f}% > floor {soft_floor*100:.1f}%)"
+                    elif not ever_profited:
+                        note = f" (tidak pernah profit, cut)"
+                    else:
+                        note = ""
                     return {
                         "action":      "time_exit",
                         "close_ratio": 1.0,
@@ -1418,7 +1474,7 @@ class RiskManager:
                         "position_id": position.position_id,
                         "message":     (
                             f"⏱️ Time exit {hold_minutes:.0f}m/{effective_max:.0f}m "
-                            f"(score={entry_score}). PnL: {floating*100:.2f}%.{grace_note}"
+                            f"(score={entry_score}). PnL: {floating*100:.2f}%.{note}"
                         )
                     }
 

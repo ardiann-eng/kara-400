@@ -285,7 +285,7 @@ class ScalperConfig:
     # RR enforcement: TP1 minimum = sl_pct × tp1_min_rr ; TP2 minimum = sl_pct × tp2_min_rr
     tp1_min_rr_to_sl:        float = 0.6      # TP1 ≥ 0.6× SL distance
     tp2_min_rr_to_sl:        float = 1.5      # TP2 ≥ 1.5× SL distance (positive RR enforcement)
-    tp1_pct:                 float = 0.0060   # [AUDIT] 0.75%→0.60%: more achievable in 20m
+    tp1_pct:                 float = 0.0040   # [F4 FIX 2026-05-18] 0.60%→0.40%: trailing activates sooner, more winners locked
     tp2_pct:                 float = 0.0100   # [AUDIT] 1.25%→1.00%: more achievable in 20m
     trailing_pct:            float = 0.0040   # [AUDIT] 0.50%→0.40%: tighter trail
 
@@ -293,8 +293,16 @@ class ScalperConfig:
     # Sebelum: 20m + 35m grace = 55m max hold → 23 big losses dari posisi yang terseret
     # Sesudah: 20m + 10m grace = 30m max hold → cut loss lebih cepat
     max_hold_minutes:        float = 20.0     # force close after 20min if no TP hit
-    max_hold_grace_minutes:  float = 10.0     # [AUDIT] 35→10m: total max 30m, bukan 55m
+    max_hold_grace_minutes:  float = 10.0     # [AUDIT] 35→10m: grace HANYA untuk posisi yang pernah profit
     max_hold_soft_floor_pct: float = -0.010   # [AUDIT] -2%→-1%: cut loss lebih cepat (1%×15x = -15% ROE)
+
+    # ── [TIME EXIT REDESIGN 2026-05-18] ──────────────────────────────────────
+    # Early profit-lock: aktifkan trailing sebelum TP1 jika sudah profit cukup
+    time_exit_early_trail_pct:   float = 0.003   # 0.3% floating → aktifkan trailing
+    time_exit_early_trail_width: float = 0.0015  # trail width 0.15% dari peak
+    # Early loss cut: jangan tunggu max_hold jika posisi langsung turun
+    time_exit_early_loss_pct:    float = -0.005  # -0.5% floating → cut segera
+    time_exit_early_loss_mins:   float = 8.0     # setelah 8m hold (bukan noise lagi)
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold — HARD THRESHOLD SCALPER (TIDAK BISA DIUBAH USER)
@@ -334,7 +342,7 @@ class ScalperConfig:
     # Root cause kegagalan sebelumnya: HTF override → 2% threshold × 25x = -50% ROE.
     # Dengan 15x: 2% threshold × 15x = -30% ROE → masih besar tapi survivable.
     # Dikurangi ke 1.5% × 15x = -22.5% ROE max.
-    momentum_exit_enabled:            bool  = True    # [AUDIT] RE-ENABLED: safe at 15x leverage
+    momentum_exit_enabled:            bool  = False   # [F2 FIX 2026-05-18] DISABLED: 0/9 wins, -$38 in production. Re-enable only after refactor (require 4/5 layers, raise pullback to 1.5%).
     momentum_exit_min_minutes:        float = 3.0     # min hold 3 menit
 
     # Layer 1 — Minimum pullback (anti-noise)
