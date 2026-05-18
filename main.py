@@ -393,41 +393,6 @@ class KaraBot:
             log.warning(f"  Telegram startup failed: {e}")
             log.warning("   Bot will continue without Telegram notifications")
 
-        # ── Update Notification System ────────────────────────────────
-        if self.telegram and self.telegram._bot_started:
-            # Only notify chats that haven't seen this release_tag yet.
-            # Also cover chats in _authorized_chat_ids with no/stale DB record.
-            needs_update: set = {u.chat_id for u in users_to_update}
-            for cid in self.telegram._authorized_chat_ids:
-                db_user = user_db.get_user(cid)
-                if db_user is None or db_user.last_seen_version != release_tag:
-                    needs_update.add(cid)
-            target_chat_ids = list(needs_update)
-
-            if target_chat_ids:
-                log.info(
-                    f"📢 Sending update notification to {len(target_chat_ids)} chat(s) "
-                    f"(release={release_tag}, deploy_id={'yes' if short_dep else 'no'}, sha={'yes' if short_sha else 'no'})"
-                )
-                for chat_id in target_chat_ids:
-                    extra_notes = []
-                    if did_release_reset:
-                        extra_notes.append(
-                            "Reset khusus update ini: semua posisi sebelumnya dikosongkan dan saldo dikembalikan ke saldo normal."
-                        )
-                    success = await self.telegram.send_update_notification(
-                        chat_id,
-                        extra_notes=extra_notes
-                    )
-                    if success:
-                        u = user_db.get_user(chat_id)
-                        if u:
-                            u.last_seen_version = release_tag
-                            user_db.update_user(u)
-                    await asyncio.sleep(0.1) # Rate limit safety
-            else:
-                log.info(f"📭 No target chats for update notification ({release_tag})")
-
         # ── Calibration Check ─────────────────────────────────────────
         try:
             from models.schemas import MarketRegime
@@ -705,9 +670,6 @@ class KaraBot:
         Pemisahan ini krusial: saat scan sedang throttled oleh data_sem,
         position monitor tetap jalan dan TP/SL tetap tereksekusi tepat waktu.
         """
-        # [TELEGRAM] Send dynamic update notification once at startup
-        asyncio.create_task(self._send_startup_notification())
-
         asyncio.create_task(self._position_monitor_loop(), name="position_monitor")
         asyncio.create_task(self._ws_watchdog_loop(), name="ws_watchdog")
         asyncio.create_task(self._scan_loop(), name="scan_loop")
