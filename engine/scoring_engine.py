@@ -458,6 +458,13 @@ class ScoringEngine:
         # 4a. Fetch regime BEFORE scoring for regime_multiplier [AUDIT Phase 1]
         vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
 
+        # 4a2. [4H REGIME FILTER 2026-05-18] Fetch 4h market regime.
+        # Aligns 1m scalp direction with higher-timeframe trend.
+        # TRENDING_UP:   only LONG allowed at normal threshold; SHORT needs +8 extra score
+        # TRENDING_DOWN: only SHORT allowed at normal threshold; LONG needs +8 extra score
+        # CHOPPY:        both directions allowed but threshold raised +5 (lower edge)
+        htf_regime = await self._fetch_4h_regime(asset)
+
         # 4b. Compute scalper indicators (enriched with fundamental data)
         # [F1 FIX 2026-05-18] Capture per-analyzer signed contributions
         _scalper_components: dict = {}
@@ -469,6 +476,32 @@ class ScoringEngine:
             out_components=_scalper_components,
             trend_pct=trend_pct,
         )
+
+        # 4b2. Apply 4h regime adjustment to score and leverage
+        htf_threshold_adj = 0
+        htf_leverage_adj  = 0
+        if htf_regime == "TRENDING_UP":
+            if side == Side.LONG:
+                htf_threshold_adj = -3   # easier entry — aligned with 4h trend
+                htf_leverage_adj  = +2   # slightly more conviction
+                reasons.append(f"📈 4H TRENDING_UP — LONG aligned (+lev, -threshold)")
+            else:  # SHORT against 4h trend
+                htf_threshold_adj = +8   # need much stronger signal to fade 4h trend
+                htf_leverage_adj  = -3
+                reasons.append(f"⚠️ 4H TRENDING_UP — SHORT counter-trend (+8 threshold)")
+        elif htf_regime == "TRENDING_DOWN":
+            if side == Side.SHORT:
+                htf_threshold_adj = -3
+                htf_leverage_adj  = +2
+                reasons.append(f"📉 4H TRENDING_DOWN — SHORT aligned (+lev, -threshold)")
+            else:  # LONG against 4h trend
+                htf_threshold_adj = +8
+                htf_leverage_adj  = -3
+                reasons.append(f"⚠️ 4H TRENDING_DOWN — LONG counter-trend (+8 threshold)")
+        else:  # CHOPPY
+            htf_threshold_adj = +5   # choppy 4h = lower edge, need stronger 1m signal
+            htf_leverage_adj  = -2
+            reasons.append(f"〰️ 4H CHOPPY — threshold +5, leverage reduced")
 
         # 4c. [QUANT AGGRESSION] Regime multiplier — trending = boost, late trend flagged.
         # Original AUDIT logic penalized late trend (×0.7) but data shows this just kills
@@ -506,11 +539,12 @@ class ScoringEngine:
         score = max(0, min(score, 100))
         reasons.extend(session_reasons)
 
-        # Effective threshold: session lowers bar proportionally
+        # Effective threshold: session lowers bar proportionally + 4h regime adjustment
         effective_threshold = (
             config.SCALPER.min_score_to_enter
             - session_threshold_add         # NY: threshold drops by 7
             + session_threshold_delta       # Asia: threshold rises
+            + htf_threshold_adj             # 4h regime: aligned=-3, counter=+8, choppy=+5
         )
         if score < effective_threshold:
             log.info(
@@ -612,6 +646,12 @@ class ScoringEngine:
             liq_signed=_scalper_components.get("liq_signed", 0),
             ob_signed=_scalper_components.get("ob_signed", 0),
         )
+
+        # Apply 4h regime leverage adjustment
+        if signal and htf_leverage_adj != 0:
+            scfg = config.SCALPER
+            new_lev = max(3, min(scfg.max_leverage, signal.suggested_leverage + htf_leverage_adj))
+            signal.suggested_leverage = new_lev
 
         # Attach last-known funding rate for Telegram warning
         _fr_cache = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
@@ -1936,6 +1976,96 @@ class ScoringEngine:
             old_price = old_pts[-1][1]
         current = history[-1][1]
         return (current - old_price) / old_price
+
+    # ──────────────────────────────────────────
+    # 4H REGIME DETECTION
+    # ──────────────────────────────────────────
+
+    async def _fetch_4h_regime(self, asset: str) -> str:
+        """
+        Classify 4h market regime for an asset.
+        Returns: "TRENDING_UP" | "TRENDING_DOWN" | "CHOPPY"
+        Cached 4 hours per asset.
+
+        Logic:
+          - Fetch last 20 × 4h candles (~3.3 days)
+          - EMA10 vs EMA20 on 4h closes → direction
+          - ADX proxy (avg true range vs avg body) → trend strength
+          - TRENDING_UP:   EMA10 > EMA20 and trend strong
+          - TRENDING_DOWN: EMA10 < EMA20 and trend strong
+          - CHOPPY:        EMAs close or trend weak
+        """
+        cache_key = f"4h_{asset}"
+        cached = self._vol_cache.get(cache_key)
+        if cached and (time.monotonic() - cached[0]) < 14400:  # 4h cache
+            return cached[1]
+
+        try:
+            async with self.candle_sem:
+                await asyncio.sleep(0.2)
+                now_ms   = int(time.time() * 1000)
+                start_ms = now_ms - (20 * 4 * 3600 * 1000)  # 20 × 4h candles
+                resp, succ = await self.client._call_info_endpoint(
+                    "candleSnapshot",
+                    {"req": {"coin": asset, "interval": "4h",
+                             "startTime": start_ms, "endTime": now_ms}}
+                )
+
+            if not succ or not isinstance(resp, list) or len(resp) < 8:
+                self._vol_cache[cache_key] = (time.monotonic(), "CHOPPY")
+                return "CHOPPY"
+
+            closes = []
+            highs  = []
+            lows   = []
+            for c in resp:
+                if isinstance(c, dict):
+                    try:
+                        closes.append(float(c["c"]))
+                        highs.append(float(c["h"]))
+                        lows.append(float(c["l"]))
+                    except (ValueError, TypeError):
+                        pass
+
+            if len(closes) < 8:
+                self._vol_cache[cache_key] = (time.monotonic(), "CHOPPY")
+                return "CHOPPY"
+
+            # EMA helper
+            def _ema(data, p):
+                k = 2 / (p + 1)
+                e = data[0]
+                for v in data[1:]:
+                    e = v * k + e * (1 - k)
+                return e
+
+            ema10 = _ema(closes[-10:], 10) if len(closes) >= 10 else closes[-1]
+            ema20 = _ema(closes[-20:], 20) if len(closes) >= 20 else closes[-1]
+
+            # Trend strength: ratio of directional move vs total range
+            # High ratio = trending, low ratio = choppy
+            n = min(len(closes), 10)
+            total_range = sum(highs[-n:][i] - lows[-n:][i] for i in range(n))
+            net_move    = abs(closes[-1] - closes[-n])
+            strength    = net_move / total_range if total_range > 0 else 0
+
+            STRENGTH_THRESHOLD = 0.30  # net move must be >30% of total range
+
+            if ema10 > ema20 * 1.002 and strength >= STRENGTH_THRESHOLD:
+                regime = "TRENDING_UP"
+            elif ema10 < ema20 * 0.998 and strength >= STRENGTH_THRESHOLD:
+                regime = "TRENDING_DOWN"
+            else:
+                regime = "CHOPPY"
+
+            self._vol_cache[cache_key] = (time.monotonic(), regime)
+            log.info(f"[4H-REGIME] {asset}: {regime} | EMA10={ema10:.4f} EMA20={ema20:.4f} strength={strength:.2f}")
+            return regime
+
+        except Exception as e:
+            log.debug(f"[4H-REGIME] {asset}: fetch failed ({e}), defaulting CHOPPY")
+            self._vol_cache[cache_key] = (time.monotonic(), "CHOPPY")
+            return "CHOPPY"
 
     # ──────────────────────────────────────────
     # SESSION BIAS
