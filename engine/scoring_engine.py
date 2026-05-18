@@ -562,10 +562,11 @@ class ScoringEngine:
             return None, score
 
         # ── [P0-3 FIX 2026-05-18] LIQUIDATION CASCADE ENTRY TRIGGER ───
-        # Data: WR 20% tanpa timing = spray-and-pray.
-        # Solusi: untuk score marginal (<65), WAJIB ada liquidation di sisi berlawanan
-        # sebagai entry catalyst. Score >=65 = sinyal kuat, boleh tanpa trigger.
-        if score < 65:
+        # Untuk score marginal, butuh konfirmasi tambahan.
+        # Jika liquidation data tersedia → gunakan sebagai catalyst.
+        # Jika TIDAK tersedia (common di HL) → fallback ke minimum technical score.
+        if score < 55:
+            # Score sangat rendah — butuh liquidation catalyst ATAU strong technical
             _target_liq_side = "short" if side == Side.LONG else "long"
             _now_ts_liq = time.time()
             _opposing_liqs = [
@@ -575,19 +576,18 @@ class ScoringEngine:
                     (_target_liq_side, "buy") if _target_liq_side == "long" else (_target_liq_side, "sell")
                 )
             ]
-            # Filter by time jika tersedia, otherwise pakai semua (cache = recent)
             _filtered = []
             for e in _opposing_liqs:
-                _evt_time = float(e.get("time", 0) or 0) / 1000  # HL uses ms
+                _evt_time = float(e.get("time", 0) or 0) / 1000
                 if _evt_time > 0 and _evt_time > _now_ts_liq - 300:
                     _filtered.append(e)
                 elif _evt_time == 0:
-                    _filtered.append(e)  # no timestamp = assume recent
+                    _filtered.append(e)
             _liq_notional = sum(
                 float(e.get("sz", e.get("size", 0))) * float(e.get("px", e.get("price", 0)))
                 for e in _filtered
             )
-            # Butuh minimal $10k liquidation di sisi berlawanan sebagai catalyst
+            # Block hanya kalau TIDAK ada liq trigger DAN score rendah
             if _liq_notional < 10_000:
                 if not (hasattr(liq_map, 'cascade_risk') and liq_map.cascade_risk > 0.3):
                     log.info(
