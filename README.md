@@ -1,8 +1,8 @@
-# KARA — Hyperliquid Futures Trading Bot
+# KARA — Crypto Futures Trading Bot
 
-**KARA** is an automated futures trading bot for [Hyperliquid](https://hyperliquid.xyz) with a multi-factor scoring engine, adaptive risk management, Telegram integration, and a real-time web dashboard.
+**KARA** is an automated futures trading bot with a multi-factor scoring engine, adaptive risk management, Telegram integration, and a real-time web dashboard. Uses [Hyperliquid](https://hyperliquid.xyz) for market data and [Bybit](https://bybit.com) for trade execution.
 
-> Current version: **8.0.1** | Mode: Scalper | Exchange: Hyperliquid Perpetuals
+> Current version: **8.1.0** | Mode: Scalper | Data: Hyperliquid | Execution: Bybit Perpetuals
 
 ---
 
@@ -45,7 +45,7 @@ kara-bot/
 │
 ├── execution/
 │   ├── paper_executor.py        # Simulated trades (paper mode)
-│   └── live_executor.py         # Real execution on Hyperliquid mainnet
+│   └── live_executor.py         # Real execution on Bybit Perpetuals
 │
 ├── backtest/backtester.py       # Vectorized backtesting engine
 ├── dashboard/app.py             # FastAPI web UI
@@ -99,7 +99,8 @@ Every asset is scored 0–100 each scan cycle. A trade is only opened if the sco
 ### Requirements
 
 - Python 3.11+
-- Hyperliquid account (testnet or mainnet)
+- Hyperliquid account (for market data)
+- Bybit account (for trade execution)
 - Telegram Bot token (optional but recommended)
 
 ### Environment Variables

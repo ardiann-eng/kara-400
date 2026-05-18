@@ -1126,8 +1126,8 @@ class KaraBot:
                     nm_str = ", ".join([f"{a}:{s}" for a, s in near_miss])
                     sess_tag = f"+{_sess_delta}" if _sess_delta > 0 else (f"{_sess_delta}" if _sess_delta < 0 else "±0")
                     log.info(
-                        f"📊 [NEAR-MISS] Top scorers vs entry gate {effective_entry} "
-                        f"(base={scl_base} sess={sess_tag}): [{nm_str}]"
+                        f"📊 [NEAR-MISS] Top scorers vs base gate {effective_entry} "
+                        f"(base={scl_base} sess={sess_tag}, +htf adj per-asset): [{nm_str}]"
                     )
             
             # Persist OI snapshots to prevent amnesia

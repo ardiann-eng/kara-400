@@ -462,7 +462,7 @@ class ScoringEngine:
         # Aligns 1m scalp direction with higher-timeframe trend.
         # TRENDING_UP:   only LONG allowed at normal threshold; SHORT needs +8 extra score
         # TRENDING_DOWN: only SHORT allowed at normal threshold; LONG needs +8 extra score
-        # CHOPPY:        both directions allowed but threshold raised +5 (lower edge)
+        # CHOPPY:        both directions allowed but threshold raised +2 (lower edge)
         htf_regime = await self._fetch_4h_regime(asset)
 
         # 4b. Compute scalper indicators (enriched with fundamental data)
@@ -499,9 +499,9 @@ class ScoringEngine:
                 htf_leverage_adj  = -3
                 reasons.append(f"⚠️ 4H TRENDING_DOWN — LONG counter-trend (+8 threshold)")
         else:  # CHOPPY
-            htf_threshold_adj = +5   # choppy 4h = lower edge, need stronger 1m signal
+            htf_threshold_adj = +2   # choppy 4h = lower edge, need stronger 1m signal
             htf_leverage_adj  = -2
-            reasons.append(f"〰️ 4H CHOPPY — threshold +5, leverage reduced")
+            reasons.append(f"〰️ 4H CHOPPY — threshold +2, leverage reduced")
 
         # 4c. [QUANT AGGRESSION] Regime multiplier — trending = boost, late trend flagged.
         # Original AUDIT logic penalized late trend (×0.7) but data shows this just kills
@@ -544,7 +544,7 @@ class ScoringEngine:
             config.SCALPER.min_score_to_enter
             - session_threshold_add         # NY: threshold drops by 7
             + session_threshold_delta       # Asia: threshold rises
-            + htf_threshold_adj             # 4h regime: aligned=-3, counter=+8, choppy=+5
+            + htf_threshold_adj             # 4h regime: aligned=-3, counter=+8, choppy=+2
         )
         if score < effective_threshold:
             log.info(
@@ -1193,7 +1193,7 @@ class ScoringEngine:
 
         # ── Per-coin SCORE-DEBUG log (info level for Railway visibility) ──
         log.info(
-            f"[SCORE-DEBUG] {asset} | {side.value.upper()} score={score} | "
+            f"[SCORE-DEBUG] {asset} | {side.value.upper()} score={score} (pre-adj) | "
             f"OB={_c_ob} EMA={_c_ema} RSI={_c_rsi} DIV={_c_div} WICK={_c_wick} "
             f"CVD={_c_cvd} VOL={_c_vol} FUND={_c_fund} LIQ={_c_liq} MTF={_c_mtf} | "
             f"bull={bull_pts} bear={bear_pts}"
