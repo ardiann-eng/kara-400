@@ -29,12 +29,14 @@ class UserSession:
         bitget_client=None,
         symbol_registry=None,
         price_bridge=None,
+        bybit_client=None,
     ):
         self.user = user
         self.hl_client = hl_client       # global HL client (read-only context)
         self.bitget_client = bitget_client
         self.symbol_registry = symbol_registry
         self.price_bridge = price_bridge
+        self.bybit_client = bybit_client
 
         self.risk_mgr = RiskManager(chat_id=self.user.chat_id)
         self.risk_mgr.reset_daily(self.user.paper_balance_usd)
@@ -82,6 +84,8 @@ class UserSession:
 
         if exec_exchange == "bitget":
             return self._build_bitget_executor() or self._fallback_paper(market_cache, reason="bitget_not_ready")
+        elif exec_exchange == "bybit":
+            return self._build_bybit_executor() or self._fallback_paper(market_cache, reason="bybit_not_ready")
 
         # Default: Hyperliquid live
         return self._build_hl_executor() or self._fallback_paper(market_cache, reason="hl_not_ready")
@@ -147,6 +151,33 @@ class UserSession:
             private_key=self.user.hl_agent_secret,
         )
         return LiveExecutor(self.user.chat_id, self.user_client, self.risk_mgr)
+
+    def _build_bybit_executor(self):
+        if not self.bybit_client:
+            log.error(f"[SESSION {self.user.chat_id}] EXECUTION_EXCHANGE=bybit tapi bybit_client belum di-inject. Fallback ke paper.")
+            return None
+
+        api_key    = config.BYBIT_API_KEY
+        api_secret = config.BYBIT_SECRET_KEY
+
+        if not (api_key and api_secret):
+            log.error(f"[SESSION {self.user.chat_id}] Bybit credentials kosong. Fallback ke paper.")
+            return None
+
+        user_bybit = self.bybit_client.with_credentials(api_key, api_secret)
+
+        cfg = self.user.config
+        user_max_lev = cfg.scl_max_leverage if cfg.trading_mode == "scalper" else cfg.std_max_leverage
+
+        from execution.bybit_executor import BybitExecutor
+        executor = BybitExecutor(
+            chat_id=self.user.chat_id,
+            bybit_client=user_bybit,
+            risk_manager=self.risk_mgr,
+            user_max_leverage=user_max_lev,
+        )
+        log.info(f"[SESSION {self.user.chat_id}] BybitExecutor active (user_max_lev={user_max_lev}x)")
+        return executor
 
     def _fallback_paper(self, market_cache, reason: str):
         log.warning(f"[SESSION {self.user.chat_id}] Fallback to paper ({reason})")

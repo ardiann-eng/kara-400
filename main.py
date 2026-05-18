@@ -28,11 +28,14 @@ from data.hyperliquid_client import HyperliquidClient
 from data.ws_client import KaraWebSocketClient, MarketDataCache, market_cache
 from data.bitget_client import BitgetClient
 from data.bitget_ws_client import BitgetWSClient
+from data.bybit_client import BybitClient
+from data.bybit_ws_client import BybitWSClient
 from engine.scoring_engine import ScoringEngine
 from risk.risk_manager import RiskManager
 from execution.paper_executor import PaperExecutor
 from execution.live_executor import LiveExecutor
 from execution.bitget_executor import BitgetExecutor
+from execution.bybit_executor import BybitExecutor
 from notify.telegram import KaraTelegram
 from dashboard.app import init_dashboard, run_dashboard, broadcast
 from core.mode_manager import mode_manager
@@ -93,6 +96,10 @@ class KaraBot:
         self.bitget_ws: Optional[BitgetWSClient] = None
         self.symbol_registry: Optional[SymbolRegistry] = None
         self.price_bridge: Optional[PriceBridge] = None
+
+        # Bybit (optional — hanya init kalau EXECUTION_EXCHANGE=bybit)
+        self.bybit_client: Optional[BybitClient] = None
+        self.bybit_ws: Optional[BybitWSClient] = None
 
         self.mode_mgr   = mode_manager
         self.cache      = market_cache
@@ -226,13 +233,16 @@ class KaraBot:
         await self.hl_client.connect()
 
         # ── BITGET INTEGRATION ──────────────────────────────────────────
-        # Init kalau EXECUTION_EXCHANGE=bitget OR ada credentials global.
-        # Symbol registry + price bridge selalu di-init kalau Bitget aktif,
-        # supaya market scanner bisa pre-filter asset yang tidak ada di Bitget.
         if config.EXECUTION_EXCHANGE == "bitget" or (
             config.BITGET_API_KEY and config.BITGET_SECRET_KEY
         ):
             await self._init_bitget()
+
+        # ── BYBIT INTEGRATION ───────────────────────────────────────────
+        if config.EXECUTION_EXCHANGE == "bybit" or (
+            config.BYBIT_API_KEY and config.BYBIT_SECRET_KEY
+        ):
+            await self._init_bybit()
 
         # ── ONE-TIME HARD RESET ──────────────────────────────────────────
         # Set env var KARA_HARD_RESET=true sebelum deploy untuk wipe semua data.
@@ -261,8 +271,7 @@ class KaraBot:
             await asyncio.sleep(10)
             self.watched_assets = await self.hl_client.get_top_volume_markets(top_n=100)
 
-        # Filter ke asset yang ada di Bitget kalau eksekusi di Bitget — supaya
-        # tidak buang resource scan asset yang signal-nya tidak bisa di-execute.
+        # Filter ke asset yang ada di exchange eksekusi
         if config.EXECUTION_EXCHANGE == "bitget" and self.symbol_registry is not None:
             original = len(self.watched_assets)
             self.watched_assets = self.symbol_registry.filter_assets_for_scanning(self.watched_assets)
@@ -270,6 +279,10 @@ class KaraBot:
                 f"[SCAN-FILTER] Bitget execution mode: {original} → {len(self.watched_assets)} assets "
                 f"(skip HL-only assets)"
             )
+        elif config.EXECUTION_EXCHANGE == "bybit" and self.bybit_client is not None:
+            # Bybit uses simple {ASSET}USDT format — no registry needed for filtering
+            # All HL assets with USDT pair are likely available on Bybit
+            log.info(f"[SCAN-FILTER] Bybit execution mode: {len(self.watched_assets)} assets (no filter needed)")
 
         log.info(f"   Markets ({len(self.watched_assets)}): {', '.join(self.watched_assets[:15])}{'...' if len(self.watched_assets) > 15 else ''}")
         log.info(f"   Full-auto: {config.FULL_AUTO}")
@@ -335,6 +348,7 @@ class KaraBot:
                 bitget_client=self.bitget_client,
                 symbol_registry=self.symbol_registry,
                 price_bridge=self.price_bridge,
+                bybit_client=self.bybit_client,
             )
             if hasattr(session.executor, 'load_from_db'):
                 session.executor.load_from_db(u.chat_id)
@@ -886,6 +900,48 @@ class KaraBot:
             except Exception as e:
                 log.debug(f"[BITGET-WS] subscribe {sym} failed: {e}")
 
+    async def _init_bybit(self):
+        """Init BybitClient + WS. Idempotent."""
+        if self.bybit_client is not None:
+            return
+
+        log.info(f"[BYBIT] Initializing Bybit integration (testnet={config.BYBIT_TESTNET})...")
+        try:
+            self.bybit_client = BybitClient(
+                api_key=config.BYBIT_API_KEY,
+                api_secret=config.BYBIT_SECRET_KEY,
+                testnet=config.BYBIT_TESTNET,
+            )
+            await self.bybit_client.connect()
+
+            ok = await self.bybit_client.ping()
+            if not ok:
+                log.error("[BYBIT] Ping failed — Bybit not reachable, disabled")
+                self.bybit_client = None
+                return
+
+            # WebSocket for low-latency price stream
+            self.bybit_ws = BybitWSClient(testnet=config.BYBIT_TESTNET)
+            await self.bybit_ws.start()
+
+            # Expose to telegram
+            self.telegram.bybit_client = self.bybit_client
+
+            log.info(f"[BYBIT] Integration ready (EXECUTION_EXCHANGE={config.EXECUTION_EXCHANGE})")
+        except Exception as e:
+            log.error(f"[BYBIT] Init failed: {e}", exc_info=True)
+            self.bybit_client = None
+
+    async def _subscribe_bybit_for_position(self, hl_asset: str):
+        """Subscribe Bybit WS for position price monitoring."""
+        if self.bybit_ws is None:
+            return
+        symbol = f"{hl_asset}USDT"
+        try:
+            await self.bybit_ws.subscribe_ticker(symbol)
+        except Exception as e:
+            log.debug(f"[BYBIT-WS] subscribe {symbol} failed: {e}")
+
     async def get_session(self, chat_id: str) -> Optional[UserSession]:
             if str(chat_id) not in self.sessions:
                 user = user_db.get_user(str(chat_id))
@@ -897,6 +953,7 @@ class KaraBot:
                         bitget_client=self.bitget_client,
                         symbol_registry=self.symbol_registry,
                         price_bridge=self.price_bridge,
+                        bybit_client=self.bybit_client,
                     )
                     # Restore persisted state (balance + open positions) from DB
                     if hasattr(session.executor, 'load_from_db'):

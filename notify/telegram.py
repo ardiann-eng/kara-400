@@ -122,67 +122,66 @@ Kamu akan mengaktifkan trading dengan dana nyata di Hyperliquid. Baca ini sebelu
 <i>Lanjut untuk membuat Agent Wallet dan mengaktifkan Live Mode?</i>
 """
 
-BITGET_LIVE_RISK_WARNING = """
-⚠️ <b>Live Mode — Bitget Execution</b> 🌸
+BYBIT_LIVE_RISK_WARNING = """
+⚠️ <b>Live Mode — Bybit Execution</b> 🌸
 
-Mode ini akan menggunakan dana nyata di akun <b>Bitget USDT-M Futures</b> kamu.
+Mode ini akan menggunakan dana nyata di akun <b>Bybit USDT Perpetual</b> kamu.
 
 <b>Bagaimana cara kerjanya:</b>
 1. 🧠 Sinyal trading dianalisis dari data <b>Hyperliquid</b> (data terbaik untuk scalping).
-2. 💸 Eksekusi <b>otomatis</b> di akun <b>Bitget</b> kamu via API.
-3. 🛡️ Stop-Loss dipasang langsung di server Bitget — tetap aktif walau bot offline.
+2. 💸 Eksekusi <b>otomatis</b> di akun <b>Bybit</b> kamu via API.
+3. 🛡️ Stop-Loss dipasang langsung di server Bybit — tetap aktif walau bot offline.
 4. 🔐 API Key kamu dienkripsi (Fernet) dan tidak pernah keluar dari server KARA.
 
 <b>Yang perlu disiapkan:</b>
-• Akun Bitget terverifikasi KYC
-• Saldo USDT di Futures Wallet (minimum $20 disarankan)
+• Akun Bybit terverifikasi KYC
+• Saldo USDT di Unified Trading Account (minimum $20 disarankan)
 • API Key dengan permission: <b>Read + Trade</b> (JANGAN aktifkan Withdraw)
 
-<i>Lanjut ke tutorial cara membuat API Key Bitget?</i>
+<i>Lanjut ke tutorial cara membuat API Key Bybit?</i>
 """
 
-BITGET_API_TUTORIAL = """
-📘 <b>Tutorial: Buat API Key Bitget</b> 🌸
+BYBIT_API_TUTORIAL = """
+📘 <b>Tutorial: Buat API Key Bybit</b> 🌸
 
-Ikuti langkah-langkah ini dengan urut. Sekitar <b>3 menit</b> dari awal sampai selesai.
+Ikuti langkah-langkah ini. Sekitar <b>3 menit</b> dari awal sampai selesai.
 
 <b>1. Buka halaman API Management</b>
-   • Login ke <a href="https://www.bitget.com/account/newapi">www.bitget.com</a>
-   • Menu: <b>Profil → API Management</b>
+   • Login ke <a href="https://www.bybit.com/app/user/api-management">www.bybit.com</a>
+   • Menu: <b>Account &amp; Security → API</b>
 
-<b>2. Klik "Create API"</b> → pilih <b>"System-generated"</b>
+<b>2. Klik "Create New Key"</b> → pilih <b>"System-generated API Keys"</b>
 
 <b>3. Isi form API</b>
-   • <b>API Name</b>: <code>KARA-Bot</code>
-   • <b>Passphrase</b>: buat passphrase 8-32 karakter (catat baik-baik!)
-   • <b>Permissions</b>:
-     ✅ Read
-     ✅ Trade
+   • <b>Name</b>: <code>KARA-Bot</code>
+   • <b>API Key Permissions</b>:
+     ✅ Read-Write (Contract - Order, Position)
      ❌ Withdraw  ← <b>JANGAN dicentang</b>
-   • <b>IP Whitelist</b>: kosongkan (atau tambah IP server KARA jika kamu tahu)
+     ❌ Transfer  ← <b>JANGAN dicentang</b>
+   • <b>IP Restriction</b>: pilih "No restriction" (atau tambah IP server KARA)
+   • <b>Unified Trading</b>: pastikan tercentang
 
-<b>4. Verifikasi (2FA / Email / SMS)</b>
+<b>4. Verifikasi (2FA / Email)</b>
 
-<b>5. Salin 3 data ini</b> (sekali lihat saja):
+<b>5. Salin 2 data ini</b> (hanya ditampilkan sekali):
    • API Key
    • Secret Key
-   • Passphrase (yang kamu buat di langkah 3)
 
 <b>6. Kirim ke KARA</b> dengan format <b>SATU baris</b> dipisah titik dua:
-<code>API_KEY:SECRET_KEY:PASSPHRASE</code>
+<code>API_KEY:SECRET_KEY</code>
 
 Contoh:
-<code>bg_1a2b3c...:abcdef123...:MyPass2026</code>
+<code>xK7mB2nP...:aB3cD4eF...</code>
 
 ⚠️ Jangan kirim ke siapa pun selain bot ini. API Key kamu akan dienkripsi otomatis.
 
 <i>Sudah siap? Kirim credentials kamu sekarang, atau ketik /cancel untuk batal.</i>
 """
 
-BITGET_CONNECTED_TEMPLATE = """
-✅ <b>Bitget Terhubung!</b> 🎉
+BYBIT_CONNECTED_TEMPLATE = """
+✅ <b>Bybit Terhubung!</b> 🎉
 
-Akun Bitget kamu sudah aktif untuk eksekusi otomatis KARA.
+Akun Bybit kamu sudah aktif untuk eksekusi otomatis KARA.
 
 💰 <b>Saldo USDT</b>: <code>${balance}</code>
 📊 <b>Posisi terbuka</b>: <code>{positions}</code>
@@ -406,9 +405,7 @@ class KaraTelegram:
                 CommandHandler("weblogin",     self.cmd_weblogin),
 
                 # Bitget-specific commands
-                CommandHandler("bitget",       self.cmd_bitget_info),
-                CommandHandler("bitgetreset",  self.cmd_bitget_reset),
-                CommandHandler("bitgettut",    self.cmd_bitget_tutorial),
+                CommandHandler("exchange",     self.cmd_bitget_info),
 
                 CallbackQueryHandler(self.on_callback),
             ]
@@ -428,17 +425,13 @@ class KaraTelegram:
             try:
                 await self._app.bot.set_my_commands(
                     commands=[
-                        BotCommand("status",   "Status akun & saldo virtual"),
+                        BotCommand("status",   "Status akun, saldo & exchange"),
                         BotCommand("mode",     "Ganti gaya trading"),
                         BotCommand("pos",      "Posisi terbuka saat ini"),
                         BotCommand("signal",   "Lihat sinyal trading terbaru"),
-                        BotCommand("journal",  "Statistik & Jurnal performa trading"),
-                        BotCommand("paper",    "Kembali ke Paper Mode & Reset Saldo"),
-                        BotCommand("live",     "Setup Live Mode (Agent Wallet / Bitget)"),
-                        BotCommand("bitget",   "Info koneksi Bitget"),
-                        BotCommand("bitgettut","Tutorial buat API Key Bitget"),
-                        BotCommand("setbitgetlev", "Atur leverage max Bitget"),
-                        BotCommand("settings", "Pusat Kendali (Threshold & Leverage)"),
+                        BotCommand("journal",  "Statistik & performa trading"),
+                        BotCommand("live",     "Setup Live Mode (Bybit API)"),
+                        BotCommand("settings", "Atur leverage, risk & threshold"),
                         BotCommand("help",     "Daftar instruksi lengkap"),
                         BotCommand("export",   "Export riwayat trade ke Excel"),
                         BotCommand("whatsnew", "Lihat pembaruan fitur terbaru"),
@@ -799,10 +792,10 @@ class KaraTelegram:
     # ──────────────────────────────────────────
 
     async def cmd_bitget_tutorial(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Standalone command for /bitgettut — shows tutorial without entering conv flow."""
+        """Standalone command for /bitgettut — shows Bybit tutorial."""
         if not self._is_authorized(update): return
         await update.effective_message.reply_html(
-            BITGET_API_TUTORIAL,
+            BYBIT_API_TUTORIAL,
             disable_web_page_preview=True,
         )
 
@@ -817,7 +810,7 @@ class KaraTelegram:
         if not (user.bitget_api_key and user.bitget_authorized):
             await update.effective_message.reply_html(
                 "🔌 <b>Bitget belum terhubung</b>\n\n"
-                "Ketik /live untuk setup koneksi Bitget,\n"
+                "Ketik /live untuk setup koneksi Bybit,\n"
                 "atau /bitgettut untuk lihat tutorial buat API Key.\n\n"
                 f"<i>Status execution exchange: <b>{config.EXECUTION_EXCHANGE}</b></i>"
             )
@@ -887,7 +880,7 @@ class KaraTelegram:
         user.bitget_api_secret = None
         user.bitget_passphrase = None
         user.bitget_authorized = False
-        if config.EXECUTION_EXCHANGE == "bitget":
+        if config.EXECUTION_EXCHANGE in ("bitget", "bybit"):
             user.config.bot_mode = BotMode.PAPER
         user_db.update_user(user)
 
@@ -1371,8 +1364,8 @@ class KaraTelegram:
 
             # ── Concise Card ───────────────────────────────────────────────
             url_ticker = pos.asset[1:] if pos.asset.startswith('k') and len(pos.asset) > 1 else pos.asset
-            hl_link    = f"https://app.hyperliquid.xyz/trade/{url_ticker}"
-            asset_html = f"<a href='{hl_link}'>{pos.asset}</a>"
+            bybit_link = f"https://www.bybit.com/trade/usdt/{url_ticker}USDT"
+            asset_html = f"<a href='{bybit_link}'>{pos.asset}</a>"
             tp3_val    = getattr(pos, 'tp3', 0.0)
 
             text += (
@@ -2053,8 +2046,25 @@ class KaraTelegram:
         if not self._is_authorized(update): return ConversationHandler.END
         if self._is_throttled(str(update.effective_chat.id), threshold=5, action_key="live"): return ConversationHandler.END
 
-        # Branch: Bitget vs Hyperliquid
-        if config.EXECUTION_EXCHANGE == "bitget":
+        # Branch: Bybit vs Bitget vs Hyperliquid
+        if config.EXECUTION_EXCHANGE == "bybit":
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📘 Lihat Tutorial API Bybit", callback_data="bitget_setup_tutorial"),
+                ],
+                [
+                    InlineKeyboardButton("🚀 Saya Sudah Punya API Key", callback_data="bitget_setup_creds"),
+                    InlineKeyboardButton("❌ Batal", callback_data="close_settings"),
+                ],
+            ])
+            await update.effective_message.reply_html(
+                BYBIT_LIVE_RISK_WARNING,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+            return WAITING_BITGET_CREDS
+
+        elif config.EXECUTION_EXCHANGE == "bitget":
             keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("📘 Lihat Tutorial API Bitget", callback_data="bitget_setup_tutorial"),
@@ -2065,11 +2075,11 @@ class KaraTelegram:
                 ],
             ])
             await update.effective_message.reply_html(
-                BITGET_LIVE_RISK_WARNING,
+                BYBIT_LIVE_RISK_WARNING,  # fallback — Bitget templates removed
                 reply_markup=keyboard,
                 disable_web_page_preview=True,
             )
-            return WAITING_BITGET_CREDS  # waits for either tutorial click or creds DM
+            return WAITING_BITGET_CREDS
 
         # Default: Hyperliquid Agent Wallet flow (existing behavior)
         keyboard = InlineKeyboardMarkup([
@@ -2267,7 +2277,7 @@ class KaraTelegram:
             keyboard = [
                 [
                     InlineKeyboardButton("🔍 Lihat Alasan KARA", callback_data=f"reasons:{signal.signal_id}"),
-                    InlineKeyboardButton("📈 TradingView", url=f"https://app.hyperliquid.xyz/trade/{signal.asset}")
+                    InlineKeyboardButton("📈 Chart", url=f"https://www.bybit.com/trade/usdt/{signal.asset}USDT")
                 ]
             ]
 
@@ -2290,7 +2300,7 @@ class KaraTelegram:
         # Style & Narrative
         text = (
             f"🌸 <b>KARA SYSTEM: Position Executed</b>\n"
-            f"<i>Saya baru saja menganalisis pasar dan berhasil membuka posisi <b>{pos.side.value.upper()}</b> untuk <b><a href='https://app.hyperliquid.xyz/trade/{pos.asset}'>{pos.asset}</a></b>.</i>\n\n"
+            f"<i>Saya baru saja menganalisis pasar dan berhasil membuka posisi <b>{pos.side.value.upper()}</b> untuk <b><a href='https://www.bybit.com/trade/usdt/{pos.asset}USDT'>{pos.asset}</a></b>.</i>\n\n"
             
             f"📦 <b>Market Details</b>\n"
             f"  • Entry   : <code>${format_price(pos.entry_price)}</code>\n"
@@ -2778,15 +2788,14 @@ class KaraTelegram:
         # ── LIVE SETUP FLOW ──
         if query.data == "setup_live_start":
             await query.answer()
-            # [FIX 2026-05-17] Kalau EXECUTION_EXCHANGE=bitget, jangan tampilkan
-            # HL wallet flow — redirect ke Bitget credentials flow.
-            if config.EXECUTION_EXCHANGE == "bitget":
+            # [FIX 2026-05-18] Kalau EXECUTION_EXCHANGE=bybit atau bitget, redirect ke creds flow.
+            if config.EXECUTION_EXCHANGE in ("bitget", "bybit"):
                 await query.edit_message_text(
-                    "🔑 <b>Kirim Credentials Bitget</b>\n\n"
+                    "🔑 <b>Kirim Credentials Bybit</b>\n\n"
                     "Format <b>SATU baris</b> dipisah titik dua:\n"
-                    "<code>API_KEY:SECRET_KEY:PASSPHRASE</code>\n\n"
-                    "⚠️ Pastikan API Key sudah punya permission <b>Trade</b>.\n"
-                    "⚠️ JANGAN aktifkan permission Withdraw.\n\n"
+                    "<code>API_KEY:SECRET_KEY</code>\n\n"
+                    "⚠️ Pastikan API Key sudah punya permission <b>Read-Write (Contract)</b>.\n"
+                    "⚠️ JANGAN aktifkan permission Withdraw/Transfer.\n\n"
                     "<i>Pesan kamu akan dihapus otomatis setelah diverifikasi. /cancel untuk batal.</i>",
                     parse_mode=ParseMode.HTML,
                 )
@@ -2800,11 +2809,11 @@ class KaraTelegram:
             )
             return WAITING_MAIN_ADDRESS
 
-        # ── BITGET SETUP FLOW ──
+        # ── BYBIT/BITGET SETUP FLOW ──
         if query.data == "bitget_setup_tutorial":
             await query.answer()
             await query.edit_message_text(
-                BITGET_API_TUTORIAL,
+                BYBIT_API_TUTORIAL,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
@@ -2813,11 +2822,11 @@ class KaraTelegram:
         if query.data == "bitget_setup_creds":
             await query.answer()
             await query.edit_message_text(
-                "🔑 <b>Kirim Credentials Bitget</b>\n\n"
+                "🔑 <b>Kirim Credentials Bybit</b>\n\n"
                 "Format <b>SATU baris</b> dipisah titik dua:\n"
-                "<code>API_KEY:SECRET_KEY:PASSPHRASE</code>\n\n"
-                "⚠️ Pastikan API Key sudah punya permission <b>Trade</b>.\n"
-                "⚠️ JANGAN aktifkan permission Withdraw.\n\n"
+                "<code>API_KEY:SECRET_KEY</code>\n\n"
+                "⚠️ Pastikan API Key sudah punya permission <b>Read-Write (Contract)</b>.\n"
+                "⚠️ JANGAN aktifkan permission Withdraw/Transfer.\n\n"
                 "<i>Pesan kamu akan dihapus otomatis setelah diverifikasi. /cancel untuk batal.</i>",
                 parse_mode=ParseMode.HTML,
             )

@@ -58,33 +58,24 @@ HL_TESTNET       = MODE == "paper"                       # auto-set from mode
 # ──────────────────────────────────────────────
 # BITGET CREDENTIALS & EXECUTION
 # ──────────────────────────────────────────────
-# Global Bitget API credentials (optional fallback untuk user yang belum
-# input credentials sendiri lewat /live di Telegram).
 BITGET_API_KEY    = os.getenv("BITGET_API_KEY", "").strip()
 BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY", "").strip()
 BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE", "").strip()
 
+# ──────────────────────────────────────────────
+# BYBIT CREDENTIALS
+# ──────────────────────────────────────────────
+BYBIT_API_KEY     = os.getenv("BYBIT_API_KEY", "").strip()
+BYBIT_SECRET_KEY  = os.getenv("BYBIT_SECRET_KEY", "").strip()
+BYBIT_TESTNET     = os.getenv("BYBIT_TESTNET", "").lower() in ("true", "1", "yes")
+
 # Execution exchange — sinyal selalu dari Hyperliquid, eksekusi bisa pilih.
-#   "bitget"      → eksekusi di Bitget USDT-M Futures (default sejak migrasi v8.0.x)
-#   "hyperliquid" → eksekusi di HL (legacy, hanya kalau ada user dengan agent wallet HL)
-# [BLOCKER FIX 2026-05-17] Default diubah ke "bitget" supaya bot tidak salah
-# eksekusi ke HL kalau user lupa set env var setelah migrasi.
-EXECUTION_EXCHANGE = os.getenv("KARA_EXECUTION_EXCHANGE", "bitget").lower()
+#   "bybit"       → eksekusi di Bybit USDT-M Futures (default sejak v8.1.x)
+#   "bitget"      → eksekusi di Bitget USDT-M Futures
+#   "hyperliquid" → eksekusi di HL (legacy)
+EXECUTION_EXCHANGE = os.getenv("KARA_EXECUTION_EXCHANGE", "bybit").lower()
 
-# Validasi runtime: kalau ada Bitget creds tapi exec masih "hyperliquid",
-# tampilkan warning critical pas startup. User mungkin lupa update env.
-if EXECUTION_EXCHANGE == "hyperliquid" and (BITGET_API_KEY or BITGET_SECRET_KEY):
-    import warnings as _warnings
-    _warnings.warn(
-        "[KARA] EXECUTION_EXCHANGE='hyperliquid' tapi BITGET credentials terdeteksi. "
-        "Order akan diroute ke Hyperliquid, BUKAN Bitget. "
-        "Set KARA_EXECUTION_EXCHANGE=bitget di env kalau ini tidak diinginkan.",
-        RuntimeWarning,
-        stacklevel=2,
-    )
-
-# Bitget demo (paper) mode — gunakan SUSDT-FUTURES product type
-# Auto: paper mode = demo, live mode = real
+# Bitget demo mode (paper = demo)
 BITGET_DEMO_MODE = (TRADE_MODE == "paper")
 
 # Price Bridge config — hubungkan harga HL → Bitget
@@ -306,7 +297,7 @@ class ScalperConfig:
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold — HARD THRESHOLD SCALPER (TIDAK BISA DIUBAH USER)
-    min_score_to_enter:      int   = 57       # ⚠️ HARD: scalper entry gate
+    min_score_to_enter:      int   = 48       # [FIX 2026-05-18] Was 57. Lowered because session bonus no longer inflates score (+14→+4 max). Raw score 48 + session threshold adj = effective ~55 during NY.
     signal_cooldown_minutes: int   = 5        # 5 min cooldown scalper
     mtf_confirm_enabled:     bool  = True     # require 15m trend confirmation
     mtf_confirm_interval:    str   = "15m"
@@ -455,7 +446,7 @@ class SignalConfig:
     # Session score bonuses / penalties (Hyperliquid volume distribution 2026)
     ny_session_bonus:        int   = 10       # NY dominates ~40% daily volume (slightly dampened)
     london_session_bonus:    int   = 4        # London-NY overlap ~25% volume
-    asia_session_penalty:    int   = -10      # Asia 22:00-07:00 UTC ~20% volume — reduced penalty
+    asia_session_penalty:    int   = -5       # [FIX 2026-05-18] Was -10, terlalu ketat setelah session bonus split. Threshold naik 5 (bukan 10) di Asia.
 
     # OI / Funding thresholds
     oi_change_threshold_pct: float = 0.008     # 0.8% OI change = significant
