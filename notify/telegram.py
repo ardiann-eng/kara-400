@@ -1478,13 +1478,31 @@ class KaraTelegram:
                 # Tambahkan info posisi aktif jika ada
                 if open_positions:
                     text += "⏳ <b>Posisi Sedang Berjalan:</b>\n"
-                    for p in open_positions:
-                        # Estimate floating PnL
-                        price = 0
-                        if self.bot_app and self.bot_app.cache:
+                    # Batch fetch prices for all open positions
+                    _journal_prices = {}
+                    if self.bot_app and self.bot_app.cache:
+                        for p in open_positions:
                             ctx = self.bot_app.cache.funding.get(p.asset)
-                            if ctx: price = float(ctx.get("markPx", 0))
-                        
+                            if ctx and "markPx" in ctx:
+                                try: _journal_prices[p.asset] = float(ctx["markPx"])
+                                except: pass
+                    # Fallback: batch API call for missing prices
+                    missing = [p.asset for p in open_positions if p.asset not in _journal_prices]
+                    if missing and self.hl_client:
+                        try:
+                            all_meta = await self.hl_client.get_all_market_data()
+                            if all_meta and len(all_meta) >= 2:
+                                universe = all_meta[0]
+                                contexts = all_meta[1]
+                                for i, ctx in enumerate(contexts):
+                                    if i < len(universe):
+                                        name = universe[i].get("name")
+                                        if name in missing:
+                                            _journal_prices[name] = float(ctx.get("markPx", 0))
+                        except: pass
+
+                    for p in open_positions:
+                        price = _journal_prices.get(p.asset, 0)
                         f_pnl = p.unrealized_pnl(price) if price > 0 else 0
                         p_sign = "+" if f_pnl >= 0 else ""
                         text += f"  • {p.asset} {p.side.value.upper()}: <b>{p_sign}{format_idr(f_pnl)}</b> (floating)\n"
