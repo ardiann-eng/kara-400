@@ -47,6 +47,13 @@
 | Score-driven max_hold thresholds | 66/61/56 | **70/60/50** | `risk/risk_manager.py` |
 | **Learning Engine** | — | **NEW: Pattern Memory + ML Model** | `engine/learning_engine.py` |
 | **Bot Brain Dashboard** | — | **NEW: Real-time reasoning flow** | `dashboard/` |
+| **Ranked Execution** | Execute sinyal pertama yang lolos | **Sort by score, execute top-N per user** | `main.py` |
+| **Minimum margin floor** | 0 (disabled) | **$8 minimum per trade** | `config.py`, `risk_manager.py` |
+| **Force scalper mode** | User bisa di standard mode | **Semua user di-force scalper saat startup** | `main.py` |
+| **P0-3 gate threshold** | score < 55 | **score < 35** (was blocking all signals) | `engine/scoring_engine.py` |
+| **quick_profit_threshold** | 0.80% | **0.35%** | `config.py` |
+| **quick_profit_retrace** | 0.30% | **0.12%** | `config.py` |
+| **Telegram close notification** | Plain text | **KARA theme dengan mood message** | `notify/telegram.py` |
 
 ---
 
@@ -660,16 +667,16 @@ Pemisahan dari scan loop krusial: bahkan jika scan sedang lambat karena throttle
 
 | Leverage Posisi | Floating Threshold | Retrace Threshold | Trigger Behavior |
 |---|---|---|---|
-| ≤ 5× (low-lev assets: BLUR, KAITO, dll) | **0.5%** | **0.2%** | Close FULL posisi langsung |
-| > 5× (BTC, ETH, FARTCOIN, dll) | **0.8%** | **0.3%** | Close FULL posisi langsung |
+| ≤ 5× (low-lev assets) | **0.25%** | **0.10%** | Close FULL posisi langsung |
+| > 5× | **0.35%** | **0.12%** | Close FULL posisi langsung |
 
 **Konfigurasi (`config.py` → ScalperConfig):**
 ```
 quick_profit_enabled:           True
-quick_profit_threshold_pct:     0.008  (0.8% — untuk leverage > 5x)
-quick_profit_retrace_pct:       0.003  (0.3% retrace)
-quick_profit_low_lev_threshold: 0.005  (0.5% — untuk leverage <= 5x)
-quick_profit_low_lev_retrace:   0.002  (0.2% retrace)
+quick_profit_threshold_pct:     0.0035  (0.35% — untuk leverage > 5x)
+quick_profit_retrace_pct:       0.0012  (0.12% retrace)
+quick_profit_low_lev_threshold: 0.0025  (0.25% — untuk leverage <= 5x)
+quick_profit_low_lev_retrace:   0.0010  (0.10% retrace)
 ```
 
 **Contoh trigger:**
@@ -1019,6 +1026,97 @@ Section "Bot Brain" di admin dashboard (`/admin/reasoning` atau sidebar → Bot 
 - WebSocket broadcast to connected dashboard clients
 
 **Files:** `dashboard/reasoning_logger.py`, `dashboard/app.py`, `dashboard/templates/dashboard.html`
+
+---
+
+## BAGIAN 11: RANKED EXECUTION (BARU 2026-05-20)
+
+### Masalah Sebelumnya
+
+Bot execute sinyal **pertama yang lolos** dalam scan cycle. Karena scan paralel, ETH (score 57) bisa masuk duluan sementara ZRO (score 78) datang belakangan dan di-block karena slot penuh.
+
+### Solusi: Batch + Sort + Distribute
+
+```
+Scan 100 markets (14 detik)
+  → Kumpulkan SEMUA sinyal yang lolos filter ke all_signals_batch
+  → Sort by score descending: ZRO=78, COMP=69, SOL=62...
+  → Per user: hitung slot kosong, execute top-N
+  → User A (0 posisi) → dapat ZRO, COMP, SOL
+  → User B (2 posisi) → dapat ZRO saja
+  → User C (3 posisi) → skip semua
+```
+
+**Tidak ada tambahan latency** — scan sudah 14 detik, ranked execution hanya mengubah urutan execute di akhir cycle.
+
+**File:** `main.py` — `_scan_all_assets()` + `_handle_signals()`
+
+---
+
+## BAGIAN 12: PERUBAHAN LAIN (2026-05-20)
+
+### 12a. Minimum Margin Floor
+
+Setiap trade dijamin minimum margin $8 (selama balance ≥ $40):
+
+```python
+# config.py, ScalperConfig:
+fixed_margin_per_position: float = 8.0  # minimum $8 margin per trade
+
+# risk_manager.py, calculate_position_size():
+min_margin = cfg.fixed_margin_per_position  # = 8.0
+if min_margin > 0 and size_usd < min_margin:
+    if min_margin <= account_balance * 0.20:
+        size_usd = min_margin
+```
+
+Dengan leverage 13-20x: margin $8 = notional $104-160.
+
+### 12b. Force Scalper Mode
+
+Semua user di-force ke scalper mode saat startup via `_enforce_locked_score_thresholds()`:
+
+```python
+if getattr(cfg, 'trading_mode', 'standard') != 'scalper':
+    cfg.trading_mode = 'scalper'
+    dirty = True
+```
+
+Mencegah user yang tersimpan di DB dengan mode "standard" tetap trading di mode yang salah.
+
+### 12c. P0-3 Gate Diturunkan
+
+Filter liquidation cascade (P0-3) diturunkan dari `score < 55` ke `score < 35`:
+
+- **Sebelum:** Semua sinyal score 35-54 di-block karena tidak ada live liquidation data (Hyperliquid jarang kirim event). Ini menyebabkan 0 trades.
+- **Sesudah:** Hanya sinyal sangat lemah (score < 35) yang butuh liquidation catalyst. Sinyal score 35+ bisa lolos tanpa liq data.
+
+### 12d. Telegram UI — KARA Theme
+
+Close position notification diperbarui:
+
+**Manual close:**
+```
+🌸 KARA SYSTEM: Position Closed
+
+{asset} berhasil ditutup.
+
+  • Realized PnL: +Rp8.760
+  • Exit Price  : $17.264
+  • Reason      : manual
+
+Profit diamankan~
+```
+
+**Close all confirmation:**
+```
+🌸 KARA SYSTEM: Close All Positions
+
+Akan menutup 2 posisi yang sedang terbuka.
+Semua posisi akan ditutup di harga market saat ini.
+
+[Ya, tutup semua]  [Batal]
+```
 
 ---
 
