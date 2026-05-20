@@ -263,7 +263,7 @@ class ScalperConfig:
     risk_per_trade_pct:      float = 0.20     # baseline untuk lev=15x (naik dari 5%)
     max_risk_per_trade_pct:  float = 0.28     # absolute cap (naik dari 8%)
     min_risk_per_trade_pct:  float = 0.015    # floor minimum (naik dari 0.5%)
-    fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
+    fixed_margin_per_position: float = 8.0    # [PROFIT-LOCK] minimum $8 margin per trade (was 0=disabled)
 
     # ── [C3 FIX] SL/TP — dikalibrasi untuk 15x leverage ──
     # SL max ROE: 1.5% × 15x = -22.5% (survivable)

@@ -399,12 +399,17 @@ class RiskManager:
             log.warning(f"[RISK] Drawdown guard active (DD: {drawdown*100:.1f}% >= 15%). Risk halved to {risk_pct/2*100:.1f}%.")
 
         # ── 3. Hard Margin Cap — 15% balance untuk modal kecil ($62.50)
-        # 15% = ~$9.37 margin → notional $234 (lev 25x) → SL 0.7% = -$1.64 = 2.6% balance
-        # Survival: 5-6 SL berturut sebelum daily limit 15% kena.
         max_allowed_margin = account_balance * 0.15
         if size_usd > max_allowed_margin:
             log.debug(f"[RISK] Margin cap: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} (15%)")
             size_usd = max_allowed_margin
+
+        # ── 3b. Minimum margin floor — ensure meaningful trade size
+        min_margin = getattr(cfg, 'fixed_margin_per_position', 0.0)
+        if min_margin > 0 and size_usd < min_margin:
+            # Only apply if we can afford it (don't exceed 20% balance)
+            if min_margin <= account_balance * 0.20:
+                size_usd = min_margin
 
         # ── 4. Calculate Contracts ────────────────────────────────────
         # isolated margin = notional / leverage -> notional = margin * leverage
