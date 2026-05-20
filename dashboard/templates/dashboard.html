@@ -656,6 +656,13 @@
         </svg>
         Recent Trades
       </div>
+      <div class="nav-item" onclick="navigate('bot-brain')" data-page="bot-brain">
+        <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <path d="M12 2a8 8 0 0 0-8 8c0 3.4 2.1 6.3 5 7.4V20h6v-2.6c2.9-1.1 5-4 5-7.4a8 8 0 0 0-8-8z"/>
+          <path d="M9 22h6M12 2v1M8 10h1M15 10h1M9 14c.8.8 1.8 1 3 1s2.2-.2 3-1"/>
+        </svg>
+        Bot Brain
+      </div>
     </nav>
     <div class="glow-line my-4 mx-2"></div>
     <div class="px-3 mt-auto">
@@ -988,6 +995,77 @@
           </div>
           <!-- Mobile card list -->
           <div id="trades-cards"></div>
+        </div>
+      </div>
+
+      <!-- PAGE: Bot Brain (Learning Engine + Reasoning) -->
+      <div id="page-bot-brain" class="page">
+        <!-- Stats Cards -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div class="glass stat-card p-4">
+            <div class="stat-label">Patterns Learned</div>
+            <div class="stat-value" id="brain-patterns">0</div>
+          </div>
+          <div class="glass stat-card p-4">
+            <div class="stat-label">Flips Triggered</div>
+            <div class="stat-value" id="brain-flips">0</div>
+          </div>
+          <div class="glass stat-card p-4">
+            <div class="stat-label">ML Predictions</div>
+            <div class="stat-value" id="brain-ml-total">0</div>
+          </div>
+          <div class="glass stat-card p-4">
+            <div class="stat-label">ML Accuracy</div>
+            <div class="stat-value" id="brain-ml-acc">—</div>
+          </div>
+        </div>
+
+        <!-- Real-time Reasoning Flow -->
+        <div class="glass p-4 md:p-6 mb-4">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="font-display text-base font-semibold text-white">🧠 Live Reasoning Flow</h2>
+            <span class="text-xs px-2 py-1 rounded" style="background:rgba(52,211,153,.15);color:#34d399" id="brain-ws-status">Connecting...</span>
+          </div>
+          <div id="brain-live-feed" style="max-height:400px;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.8">
+            <div style="color:rgba(196,181,253,.3)">Waiting for bot decisions...</div>
+          </div>
+        </div>
+
+        <!-- Pattern Memory: Top Winners & Losers -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div class="glass p-4 md:p-5">
+            <h3 class="text-xs font-semibold uppercase tracking-widest mb-3" style="color:rgba(52,211,153,.6)">🏆 Top Winning Patterns</h3>
+            <div id="brain-winners" style="font-size:12px;line-height:2">
+              <span style="color:rgba(196,181,253,.3)">Loading...</span>
+            </div>
+          </div>
+          <div class="glass p-4 md:p-5">
+            <h3 class="text-xs font-semibold uppercase tracking-widest mb-3" style="color:rgba(248,113,113,.6)">💀 Top Losing Patterns</h3>
+            <div id="brain-losers" style="font-size:12px;line-height:2">
+              <span style="color:rgba(196,181,253,.3)">Loading...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Decision Log Table -->
+        <div class="glass overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3" style="border-bottom:1px solid rgba(196,181,253,.05)">
+            <h2 class="font-display text-base font-semibold text-white">📋 Decision Log</h2>
+            <button onclick="loadBrainDecisions()" class="btn-ghost py-1.5 px-3 text-xs">Refresh</button>
+          </div>
+          <div style="overflow-x:auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th><th>Asset</th><th>Side</th><th>Score</th>
+                  <th>Decision</th><th>Learning</th><th>Steps</th>
+                </tr>
+              </thead>
+              <tbody id="brain-decisions-tbody">
+                <tr><td colspan="7" class="text-center py-8" style="color:rgba(196,181,253,.3)">No decisions yet</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -1563,6 +1641,95 @@
       if (S.page === 'overview') loadOverview();
     }, 10000);
     loadOverview();
+
+    // ── BOT BRAIN PAGE ──────────────────────────────────────────────────
+    let brainWs = null;
+
+    async function loadBrainStats() {
+      try {
+        const d = await api('/api/admin/learning/stats');
+        document.getElementById('brain-patterns').textContent = d.patterns?.total_patterns || 0;
+        document.getElementById('brain-flips').textContent = d.patterns?.flips_triggered || 0;
+        document.getElementById('brain-ml-total').textContent = d.ml?.total_predictions || 0;
+        const acc = d.ml?.accuracy;
+        document.getElementById('brain-ml-acc').textContent = acc > 0 ? (acc * 100).toFixed(1) + '%' : '—';
+
+        // Winners & Losers
+        const winners = d.patterns?.top_winners || [];
+        const losers = d.patterns?.top_losers || [];
+        document.getElementById('brain-winners').innerHTML = winners.length
+          ? winners.map(p => `<div class="flex justify-between"><span style="color:#34d399">${p.key}</span><span class="font-mono text-white">WR ${p.wr} (n=${p.n}) $${p.pnl > 0 ? '+' : ''}${p.pnl}</span></div>`).join('')
+          : '<span style="color:rgba(196,181,253,.3)">No data yet (need 3+ trades per pattern)</span>';
+        document.getElementById('brain-losers').innerHTML = losers.length
+          ? losers.map(p => `<div class="flex justify-between"><span style="color:#f87171">${p.key}</span><span class="font-mono text-white">WR ${p.wr} (n=${p.n}) $${p.pnl > 0 ? '+' : ''}${p.pnl}</span></div>`).join('')
+          : '<span style="color:rgba(196,181,253,.3)">No data yet</span>';
+      } catch (e) { console.warn('Brain stats error:', e); }
+    }
+
+    async function loadBrainDecisions() {
+      try {
+        const decisions = await api('/api/admin/reasoning/decisions');
+        const tbody = document.getElementById('brain-decisions-tbody');
+        if (!decisions.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center py-8" style="color:rgba(196,181,253,.3)">No decisions yet</td></tr>'; return; }
+        tbody.innerHTML = decisions.slice(0, 50).map(d => {
+          const time = new Date(d.timestamp * 1000).toLocaleTimeString();
+          const decBadge = d.final_decision === 'execute' ? 'badge-green' : d.final_decision === 'skip' ? 'badge-amber' : 'badge-red';
+          const sideBadge = d.side === 'long' ? 'badge-green' : d.side === 'short' ? 'badge-red' : 'badge-gray';
+          const learnStep = d.steps?.find(s => s.step === 'learning');
+          const learnText = learnStep ? (learnStep.data?.reason || '—').substring(0, 30) : '—';
+          return `<tr>
+            <td class="text-xs font-mono" style="color:rgba(196,181,253,.4)">${time}</td>
+            <td class="font-mono font-semibold text-white">${d.asset}</td>
+            <td><span class="badge ${sideBadge}">${(d.side||'?').toUpperCase()}</span></td>
+            <td class="font-mono" style="color:#c4b5fd">${d.final_score}</td>
+            <td><span class="badge ${decBadge}">${d.final_decision}</span></td>
+            <td class="text-xs" style="color:rgba(196,181,253,.5)">${learnText}</td>
+            <td class="text-xs font-mono">${d.steps?.length || 0}</td>
+          </tr>`;
+        }).join('');
+      } catch (e) { console.warn('Brain decisions error:', e); }
+    }
+
+    function connectBrainWs() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      brainWs = new WebSocket(`${proto}//${location.host}/ws/admin/reasoning`);
+      const statusEl = document.getElementById('brain-ws-status');
+      const feed = document.getElementById('brain-live-feed');
+
+      brainWs.onopen = () => { statusEl.textContent = 'Live'; statusEl.style.background = 'rgba(52,211,153,.15)'; };
+      brainWs.onclose = () => { statusEl.textContent = 'Disconnected'; statusEl.style.background = 'rgba(248,113,113,.15)'; statusEl.style.color = '#f87171'; setTimeout(connectBrainWs, 5000); };
+      brainWs.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        if (data.type === 'heartbeat') return;
+        const time = new Date(data.timestamp * 1000).toLocaleTimeString();
+        const color = data.final_decision === 'execute' ? '#34d399' : data.final_decision === 'skip' ? '#fbbf24' : '#f87171';
+        const steps = (data.steps || []).map(s => `<span style="color:rgba(196,181,253,.4)">${s.step}</span>`).join(' → ');
+        const line = `<div style="border-bottom:1px solid rgba(196,181,253,.03);padding:4px 0">
+          <span style="color:rgba(196,181,253,.4)">${time}</span>
+          <span class="font-semibold text-white" style="margin:0 8px">${data.asset}</span>
+          <span style="color:${color};font-weight:600">${(data.final_decision||'?').toUpperCase()}</span>
+          <span style="color:#c4b5fd;margin-left:8px">score=${data.final_score}</span>
+          <span style="color:rgba(196,181,253,.3);margin-left:8px">${data.side?.toUpperCase()||''}</span>
+          <div style="color:rgba(196,181,253,.25);font-size:11px;margin-top:2px">${steps}</div>
+        </div>`;
+        feed.insertAdjacentHTML('afterbegin', line);
+        // Keep max 100 entries
+        while (feed.children.length > 100) feed.removeChild(feed.lastChild);
+        // Refresh stats
+        loadBrainStats();
+      };
+    }
+
+    // Hook into page navigation
+    const origNavigate = window.navigate;
+    window.navigate = function(page) {
+      origNavigate(page);
+      if (page === 'bot-brain') {
+        loadBrainStats();
+        loadBrainDecisions();
+        if (!brainWs || brainWs.readyState > 1) connectBrainWs();
+      }
+    };
   </script>
 </body>
 

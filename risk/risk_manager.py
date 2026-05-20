@@ -1363,12 +1363,13 @@ class RiskManager:
             scfg = SCALPER
             entry_score = getattr(position, 'entry_score', 50)
 
-            # Score-driven max_hold
-            if entry_score >= 66:
+            # Score-driven max_hold (calibrated for opportunity scoring v2)
+            # New scoring: 45-55 = marginal, 55-70 = good setup, 70+ = excellent
+            if entry_score >= 70:
                 max_hold = 25.0
-            elif entry_score >= 61:
+            elif entry_score >= 60:
                 max_hold = 20.0
-            elif entry_score >= 56:
+            elif entry_score >= 50:
                 max_hold = 15.0
             else:
                 max_hold = 10.0

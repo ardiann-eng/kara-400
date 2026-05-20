@@ -159,9 +159,30 @@ class UserDB:
                     )
                 """)
 
-                conn.commit()
+                # 11. Learning Engine — Pattern Memory
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS pattern_memory (
+                        pattern_key TEXT PRIMARY KEY,
+                        wins        INTEGER DEFAULT 0,
+                        losses      INTEGER DEFAULT 0,
+                        total_pnl   REAL DEFAULT 0.0,
+                        ema_wr      REAL DEFAULT 0.5,
+                        updated_at  REAL
+                    )
+                """)
 
-                # Startup diagnostic — confirms persistent storage is working
+                # 12. Learning Engine — ML Training Data
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS training_data (
+                        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                        features   TEXT,
+                        outcome    INTEGER,
+                        pnl_usd    REAL,
+                        created_at REAL
+                    )
+                """)
+
+                conn.commit()
                 cursor.execute("SELECT COUNT(*) FROM trade_history")
                 trade_count = cursor.fetchone()[0]
                 cursor.execute("SELECT COUNT(*) FROM paper_positions")
@@ -695,6 +716,68 @@ class UserDB:
         self.users[str(chat_id)] = user
         self.save()
         return user
+
+    # ── LEARNING ENGINE ───────────────────────────────────────────────
+
+    def load_pattern_memory(self):
+        """Load all pattern memory rows. Returns list of tuples."""
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("SELECT pattern_key, wins, losses, total_pnl, ema_wr FROM pattern_memory")
+                return cursor.fetchall()
+            except Exception as e:
+                log.error(f"Failed to load pattern_memory: {e}")
+                return []
+
+    def save_pattern_memory(self, pattern_key: str, wins: int, losses: int, total_pnl: float, ema_wr: float):
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT OR REPLACE INTO pattern_memory (pattern_key, wins, losses, total_pnl, ema_wr, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (pattern_key, wins, losses, total_pnl, ema_wr, time.time()))
+                conn.commit()
+            except Exception as e:
+                log.error(f"Failed to save pattern_memory: {e}")
+
+    def save_training_data(self, features: dict, outcome: int, pnl_usd: float):
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO training_data (features, outcome, pnl_usd, created_at)
+                    VALUES (?, ?, ?, ?)
+                """, (json.dumps(features), outcome, pnl_usd, time.time()))
+                conn.commit()
+            except Exception as e:
+                log.error(f"Failed to save training_data: {e}")
+
+    def load_training_data(self):
+        """Load all training data. Returns list of (features_json, outcome, pnl_usd)."""
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("SELECT features, outcome, pnl_usd FROM training_data ORDER BY created_at")
+                return cursor.fetchall()
+            except Exception as e:
+                log.error(f"Failed to load training_data: {e}")
+                return []
+
+    def get_training_data_count(self) -> int:
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM training_data")
+                return cursor.fetchone()[0]
+            except Exception:
+                return 0
 
 # Global instance
 user_db = UserDB()

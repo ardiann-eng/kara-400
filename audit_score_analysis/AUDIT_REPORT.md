@@ -1,365 +1,442 @@
-# KARA Bot — Score Audit Report
+# KARA Bot — Score Audit Report #2
 
-**Date:** 2026-05-18
-**Data source:** Railway production DB (`/app/storage/kara_data.db`) via `railway ssh`
-**Sample:** 338 trades + 338 signals + 91 meta patterns
-**Period:** ~5 days of paper trading (Hyperliquid mainnet data, scalper mode)
+**Date:** 2026-05-20
+**Data source:** Railway production DB (fresh pull)
+**Sample:** 260 trades + 289 signals + 91 meta patterns
+**Period:** 3.3 jam (09:30–12:50 WIB / 02:30–05:50 UTC), hari ini
+**Mode:** Scalper, Bybit execution, Hyperliquid data
 
 ---
 
 ## Executive Summary
 
+| Metric | Audit #1 (18 Mei) | Audit #2 (20 Mei) | Delta |
+|---|---|---|---|
+| Total trades | 338 (12 jam) | 260 (3.3 jam) | **4.7× lebih cepat** |
+| Win rate | 48.8% | 47.7% | −1.1% |
+| Total PnL | −$67.22 | −$26.39 | Improved (shorter period) |
+| Profit factor | 0.65 | 0.741 | +0.09 |
+| Expectancy/trade | −$0.20 | −$0.10 | +$0.10 |
+| Score ↔ PnL Pearson r | +0.025 (random) | **−0.145** (inverse!) | WORSE |
+| Gross PnL (before fees) | unknown | **+$6.05** | Bot punya alpha! |
+| Est. total fees | unknown | **$32.44** | Fee > alpha |
+| Max drawdown | unknown | **108.4%** (wiped) | |
+| Trade frequency | 28/jam | **79/jam** | 2.8× lebih cepat |
+
+**Bottom line:** Bot sebenarnya punya gross alpha positif (+$6.05), tapi **menghancurkannya** dengan:
+1. Overtrading (fee $32 > alpha $6)
+2. Tidak bisa bedakan asset trending vs dumping (ZEC score 67 = loss terbesar)
+3. Exit system yang simetris (winner dan loser diperlakukan sama)
+4. Inverse sizing (posisi lebih besar pada trade yang salah)
+
+---
+
+## Perbandingan dengan Audit #1 — Status F1-F5 Fixes
+
+| Fix | Status | Evidence |
+|---|---|---|
+| **F1** (Analyzer scores = 0) | ✅ PARTIALLY FIXED | oi_funding 67% nonzero, orderbook 72% nonzero. Tapi liquidation hanya 7%, session_bonus/total_bull/total_bear masih 0 |
+| **F2** (momentum_exit disabled) | ✅ FIXED | 0 momentum_exit trades. Savings confirmed. |
+| **F3** (Session bonus cap) | ⚠️ OVERCORRECTED | session_bonus = 0 di semua 289 signals. Bonus sudah tidak berkontribusi sama sekali. |
+| **F4** (Early trail activation) | ⚠️ BARELY FIRING | trailing_stop hanya 9/260 (3.5%). early_trail hanya 1 trade. Threshold masih terlalu tinggi. |
+| **F5** (RSI divergence gate) | ❓ CANNOT VERIFY | Tidak ada RSI divergence field di breakdown baru |
+| **F6** (Meta block WR<30%) | ❌ NOT WORKING | KAITO 0% WR 13 trades, ALGO 0% WR 10 trades — masih di-trade |
+
+---
+
+## Phase 1 — Scoring Pipeline Audit (Updated)
+
+### 1.1 Analyzer Output Status
+
+| Analyzer | nonzero/total | mean | std | Status |
+|---|---|---|---|---|
+| oi_funding_score | 193/289 (67%) | +0.96 | 9.73 | ✅ Working |
+| liquidation_score | 21/289 (7%) | −0.08 | 0.67 | ⚠️ Barely fires |
+| orderbook_score | 207/289 (72%) | +6.85 | 11.67 | ✅ Working |
+| session_bonus | 0/289 (0%) | 0.00 | 0.00 | ❌ Dead |
+| total_bull | 0/289 (0%) | 0.00 | 0.00 | ❌ Not persisted |
+| total_bear | 0/289 (0%) | 0.00 | 0.00 | ❌ Not persisted |
+
+**F1 partially fixed:** Analyzer scores sekarang terisi, tapi session_bonus dan total_bull/bear masih 0 di breakdown. Liquidation analyzer hampir tidak pernah fire (hanya 7% — karena Hyperliquid jarang punya live liquidation data).
+
+### 1.2 Score Predictiveness — INVERSE
+
+| Score Range | n | Win Rate | PnL | Interpretation |
+|---|---|---|---|---|
+| 55 | 77 | 41.6% | −$20.36 | Threshold terlalu rendah |
+| 56-59 | 80 | **75.0%** | **+$25.10** | ✅ SWEET SPOT |
+| 60-64 | 70 | 47.1% | −$21.60 | ❌ Mulai inverse |
+| 65-69 | 29 | **27.6%** | −$12.79 | ❌ Sangat inverse |
+| 70+ | 4 | 0.0% | −$0.28 | ❌ Total failure |
+
+**Score 56-59 = satu-satunya range yang profitable.** Di atas 60, semakin tinggi score semakin rugi.
+
+Korelasi score vs PnL:
+- Pearson r = **−0.145** (p=0.019) — signifikan secara statistik, INVERSE
+- Orderbook score r = **−0.21** dengan PnL — semakin tinggi OB score, semakin rugi
+- Liquidation score r = **−0.33** dengan PnL — PALING inverse
+
+### 1.3 Root Cause: Score Tinggi = Late Entry
+
+**Bukti langsung:**
+- ZEC: score **67** (tertinggi di dataset), 13 trades, **0% WR**, −$13.78
+- KAITO: score **60**, 13 trades, **0% WR**, −$14.67
+- PURR: score **59** (lebih rendah!), 10 trades, **80% WR**, +$18.27
+
+Score tinggi terjadi karena:
+1. Regime multiplier `trending × 1.2` dan `late_trend × 1.15` → BOOST score saat harga sudah bergerak jauh
+2. Banyak "reasons" terkumpul (OI + OB + funding semua agree) → terjadi SETELAH move, bukan sebelumnya
+3. Bot masuk di **exhaustion point** — semua indikator confirm karena move sudah terjadi
+
+---
+
+## Phase 2 — Exit System Audit
+
+### 2.1 Exit Breakdown
+
+| Exit | n | % | WR | Total PnL | Avg Win | Avg Loss |
+|---|---|---|---|---|---|---|
+| time_exit | 243 | 93.5% | 46.9% | −$24.97 | +$0.41 | −$0.55 |
+| trailing_stop | 9 | 3.5% | **100%** | **+$8.36** | +$0.93 | — |
+| stop_loss | 7 | 2.7% | 14.3% | −$9.77 | +$0.41 | −$1.70 |
+| early_trail | 1 | 0.4% | 0% | −$0.02 | — | −$0.02 |
+
+### 2.2 Masalah Fundamental Exit
+
+**Time exit mendominasi 93.5%** — artinya hampir SEMUA trade berakhir bukan karena target tercapai atau stop terkena, tapi karena **waktu habis**. Ini berarti:
+
+1. **TP1 (0.4% price move) jarang tercapai** dalam window 12-20 menit
+2. **SL (0.7-1.5%) jarang terkena** — harga bergerak dalam noise range
+3. Bot hidup di **no-man's land**: tidak cukup bergerak untuk profit, tidak cukup bergerak untuk stop
+
+**Trailing stop = satu-satunya exit yang bekerja** (100% WR, avg +$0.93) tapi hanya fire 3.5% karena butuh TP1 hit dulu (0.4% move) sebelum trailing aktif.
+
+### 2.3 Price Move Analysis
+
+| Price Move | n | % of trades | WR | PnL |
+|---|---|---|---|---|
+| 0-0.05% | 14 | 5% | 57% | +$0.20 |
+| 0.05-0.1% | 30 | 12% | 43% | +$0.82 |
+| 0.1-0.2% | 56 | 22% | 48% | −$0.94 |
+| **0.2-0.5%** | **96** | **37%** | 49% | −$5.34 |
+| **0.5-1.0%** | **43** | **17%** | **33%** | **−$37.86** |
+| 1.0-5.0% | 21 | 8% | 71% | +$16.72 |
+
+**CRITICAL:** Bucket 0.5-1.0% price move = 43 trades, WR 33%, **−$37.86** — ini adalah SELURUH kerugian bot. Artinya: saat harga bergerak 0.5-1% melawan posisi, bot TETAP HOLD sampai time exit. Tidak ada cut loss efektif di range ini.
+
+Sebaliknya, saat harga bergerak >1% sesuai arah (21 trades, WR 71%, +$16.72) — ini adalah saat trailing stop bekerja.
+
+---
+
+## Phase 3 — Overtrading & Fee Analysis
+
+### 3.1 Trade Frequency
+
 | Metric | Value |
 |---|---|
-| Total trades | 338 |
-| Win rate | **48.8 %** |
-| Total PnL | **−$67.22** |
-| Avg win / Avg loss | $0.67 / −$1.03 |
-| Profit factor | **0.65** |
-| Expectancy / trade | **−$0.20** |
-| Score ↔ PnL Pearson r | **0.025** (≈ random) |
-| RF win/loss test accuracy | 0.93 (baseline 0.51) — but driven by leakage features (entry_atr, leverage), not score |
+| Trades per hour | **79** |
+| Avg gap between trades | **46 detik** |
+| Trades with gap < 30 detik | **172/260 (66%)** |
+| Trades with gap < 1 menit | **214/260 (82%)** |
+| Max consecutive losses | **52** |
+| Avg loss streak | 5.4 |
 
-**Bottom line:** Bot kalah bukan karena salah pasar, tapi karena **scoring engine tidak prediktif** dan **exit logic merusak edge yang ada**. Score 73-97 (decile teratas) justru menghasilkan win rate 21% dan rugi $22 — kebalikan dari yang seharusnya.
+### 3.2 Fee Destruction
 
----
+| Metric | Value |
+|---|---|
+| Avg notional per trade | $113.43 |
+| Fee per trade (Bybit 0.055% × 2) | $0.1248 |
+| Total fees (260 trades) | **$32.44** |
+| Gross PnL (before fees) | **+$6.05** |
+| Net PnL (after fees) | −$26.39 |
+| Fee as % of avg win | **28.2%** |
 
-## Phase 1 — Scoring Pipeline Audit
+**Bot ini sebenarnya PROFITABLE sebelum fee.** Seluruh kerugian disebabkan oleh overtrading yang menghasilkan fee lebih besar dari edge.
 
-### 1.1 Arsitektur scoring (dari kode)
+### 3.3 Same-Asset Repetition
 
-```
-final_score =
-    raw_score                 # = total_bull − total_bear, dari 3 analyzer
-    + session_bonus           # NY +10, London +4, Asia −10
-  × regime_multiplier         # LOW_VOL 0.90, NORMAL 1.0, HIGH_VOL 0.85
-    + meta_score_adj          # ±8–12 dari EMA winrate (≥5 samples)
-```
-
-3 analyzer utama:
-
-| Analyzer | Max points | Inputs |
-|---|---|---|
-| **OIFundingAnalyzer** (`engine/analyzers/oi_funding_analyzer.py`) | ±45 | funding rate (level + slope), OI delta, OI magnitude, funding history (8 ts), spot-perp basis |
-| **LiquidationAnalyzer** (`engine/analyzers/liquidation_analyzer.py`) | ±12 | live WS liquidation events; falls back to OI proxy when WS empty |
-| **OrderbookAnalyzer** (`engine/analyzers/orderbook_analyzer.py`) | ±30 | bid/ask imbalance (graduated tiers), VWAP deviation, CVD, dollar depth, walls |
-
-**Threshold:** Scalper ≥60 (config: `min_score_to_enter = 57`, but with `+10 NY session` + `+4 London`, real entry happens at raw≥46 during overlap).
-
-### 1.2 Pipeline anomalies discovered in production data
-
-**🚨 ZERO-VARIANCE BUG:** Out of 338 production signals:
-
-```
-oi_funding_score   : mean=0.00, std=0.00, range=[0, 0]   ← analyzer NEVER fired
-liquidation_score  : mean=0.00, std=0.00, range=[0, 0]   ← analyzer NEVER fired
-orderbook_score    : mean=0.00, std=0.00, range=[0, 0]   ← analyzer NEVER fired
-session_bonus      : mean=8.95, std=4.6,  range=[-6, 14] ← only this works
-```
-
-The "multi-factor" engine is in fact a **single-factor session-bonus engine**. The breakdown JSON keeps the field names but the values are 0 across the entire dataset.
-
-Reverse-engineered weights via linear regression:
-```
-final_score ≈ 67.5  −  0.33 × session_bonus
-            + 0.00 × (oi_funding | liquidation | orderbook)
-R² = 0.053
-```
-
-**The R² of 0.053 means 95% of `final_score` movement is unexplained by the named breakdown components** — the score is being set somewhere upstream (likely the `total_bull/total_bear` aggregator or a rescaling step) and the breakdown values are being persisted as 0 due to a bug.
-
-### 1.3 Likely root cause
-
-Looking at the analyzers' return signatures (`bull, bear, reasons, warnings`) and the saved breakdown showing `oi_funding_score=0`, the integration layer in `engine/scoring_engine.py` is probably:
-- Calling each analyzer correctly (the `reasons` text shows OI/Funding/Orderbook reasoning is generated)
-- But **not persisting the per-analyzer numeric contribution** into `breakdown` — only the aggregated `total_bull`/`total_bear` and a final number
-
-So the bot *thinks* it's evaluating 3 independent edges. The DB tells us only one is making it through.
-
----
-
-## Phase 2 — Feature Importance Findings
-
-### 2.1 Score-PnL relationship
-
-| Pearson r | p-value | Interpretation |
-|---|---|---|
-| `sig_score` ↔ `pnl_usd`: **+0.025** | 0.65 | No linear edge |
-| `sig_score` ↔ `outcome` (win=1): **+0.07** | 0.20 | No predictive power |
-
-For comparison, a useful alpha signal in crypto would have |r| ≥ 0.15 with PnL.
-
-### 2.2 Top features by Permutation Importance (test set)
-
-| Rank | Feature | Permutation importance | Note |
-|---|---|---|---|
-| 1 | `sig_entry_atr` | 0.064 | **Volatility, not signal score** |
-| 2 | `sig_has_funding_extreme` | 0.025 | Contrarian funding flag (small but positive) |
-| 3 | `sig_suggested_leverage` | 0.018 | Sizing artifact, not edge |
-| 4 | `sig_realized_vol` | 0.017 | Volatility |
-| 5 | `sig_has_volume_surge` | 0.012 | **NEGATIVELY** correlated with PnL (−0.15) |
-| 6 | `sig_score` | 0.008 | The main score barely makes top-10 |
-
-The model achieves 93% accuracy (vs 51% baseline), but the feature ranking shows **the model is learning "high ATR & high leverage trades tend to lose more in dollar terms"** — that's a position-sizing artifact, not signal alpha.
-
-### 2.3 Per-feature correlation with PnL
-
-| Feature | r vs PnL | Interpretation |
-|---|---|---|
-| `sig_has_rsi_divergence` | **−0.22** | "Bullish indicator" predicts losses |
-| `sig_has_volume_surge` | **−0.15** | Volume surge → late entry → loss |
-| `sig_has_funding_extreme` | +0.14 | Contrarian funding works (only positive feature) |
-| `sig_has_mtf_align` | −0.10 | Multi-timeframe agreement → mean reversion |
-| `session_bonus` | +0.04 | Only marginally useful |
-
-**Three of the most-weighted bullish indicators are reversed in production**. They were calibrated on backtests; live behavior is the opposite.
-
-### 2.4 Score decile analysis
-
-| Decile | Score range | n | Win rate | Avg PnL | Total PnL |
+| Asset | Trades | Avg Gap | WR | PnL | Pattern |
 |---|---|---|---|---|---|
-| 0 | 57–58 | 62 | 53% | +$0.08 | +$4.66 |
-| 1 | 59 | 15 | 47% | −$0.98 | **−$14.77** |
-| 2 | 60 | 31 | 58% | +$0.11 | +$3.55 |
-| 3 | 62 | 48 | **29%** | −$0.97 | **−$46.79** |
-| 4 | 63 | 16 | 100% | +$1.25 | +$19.97 |
-| 5 | 64–66 | 44 | 32% | −$0.57 | −$25.26 |
-| 6 | 67 | 20 | 50% | +$0.00 | +$0.09 |
-| 7 | 68–69 | 52 | 67% | +$0.19 | +$9.63 |
-| 8 | 70–71 | 17 | 65% | +$0.23 | +$3.92 |
-| 9 | 73–97 | 33 | **21%** | −$0.67 | **−$22.23** |
+| KAITO | 13 | 3.3m | 0% | −$14.67 | Re-entry setiap 3 menit, selalu loss |
+| ZEC | 13 | 5.5m | 7.7% | −$13.78 | Re-entry setiap 5.5 menit, selalu loss |
+| ALGO | 10 | 10.9m | 0% | −$12.79 | Re-entry setiap 11 menit, selalu loss |
+| PURR | 10 | 3.3m | 80% | +$18.27 | Re-entry setiap 3 menit, selalu WIN |
+| LIT | 10 | 3.0m | 40% | −$3.72 | Mixed |
 
-**The signal is wildly non-monotonic.** Decile 4 (score 63) wins 100%, decile 3 (score 62, just 1 point lower) wins 29%. This is the signature of a discrete decision boundary (likely the regime/MTF flag) coinciding with that exact score, not a smooth probability gradient.
+Bot terus re-enter asset yang sama tanpa mempedulikan apakah trade sebelumnya profit atau loss. KAITO di-LONG 13 kali berturut-turut, semua loss, karena meta-block tidak bekerja.
 
-The **top decile loses worst** — a textbook sign that high-score signals enter at exhaustion (mean-reversion zones reached after trends already played out).
+---
 
-### 2.5 Exit reason performance
+## Phase 4 — Side & Asset Analysis
 
-| Exit reason | n | Win rate | Total PnL | Avg PnL |
+### 4.1 Side Breakdown
+
+| Side | n | WR | PnL |
+|---|---|---|---|
+| LONG | 236 | 44.5% | −$26.93 |
+| SHORT | 24 | **79.2%** | +$0.54 |
+
+Bot 91% LONG. SHORT jauh lebih profitable (79.2% WR) tapi sangat jarang diambil karena filter ketat (min_score_short = 62, funding gate, squeeze guard).
+
+### 4.2 Sizing Asymmetry
+
+| Group | Avg Notional |
+|---|---|
+| Winners | $100.02 |
+| Losers | **$125.66** |
+| Ratio | Losers **1.26× bigger** |
+
+Bot memberikan posisi LEBIH BESAR ke trade yang salah. Ini karena sizing berbasis score, dan score tinggi = loss.
+
+---
+
+## Phase 5 — Critical Findings (Ranked by $ Impact)
+
+### F-NEW-1 · Overtrading: Fee > Alpha · **−$32.44 impact (SELURUH LOSS)**
+
+**State:** 260 trades dalam 3.3 jam. Gross alpha +$6.05, fee −$32.44, net −$26.39.
+**Cause:** Cooldown 5 menit + threshold 48 (efektif ~55) + 5 concurrent positions = bot spray-and-pray.
+**Evidence:** 172/260 trades gap < 30 detik. Bot membuka posisi baru sebelum yang lama ditutup.
+**Impact:** Jika dikurangi ke 60 trades terbaik: fee = $7.20, net PnL = −$1.15 (hampir break-even).
+
+### F-NEW-2 · Score Inverse Predictive · **−$34.39 impact**
+
+**State:** Score 60+ menghasilkan WR 37.9% dan −$34.07. Score 56-59 menghasilkan WR 75% dan +$25.10.
+**Cause:** Regime multiplier (trending ×1.2, late_trend ×1.15) menaikkan score saat harga sudah exhausted. Orderbook score (r=−0.21) dan liquidation score (r=−0.33) berkontribusi NEGATIF.
+**Evidence:** ZEC score 67 → 0% WR. PURR score 59 → 80% WR.
+
+### F-NEW-3 · No Directional Filter (Trend Blindness) · **−$41.24 impact**
+
+**State:** KAITO, ZEC, ALGO = 36 trades, 2.8% WR, −$41.24. Semua LONG pada asset yang sedang DUMP.
+**Cause:** Scoring engine tidak cek apakah harga 5-menit terakhir naik atau turun sebelum entry. Hanya cek "kondisi pasar" (OI, funding, orderbook) tanpa cek DIRECTION of recent price action.
+**Evidence:** KAITO di-LONG 13× berturut-turut saat harga turun terus. Bot tidak punya "is price actually going up?" check.
+
+### F-NEW-4 · Exit Symmetry: No Fast Cut, No Runner · **−$37.86 impact**
+
+**State:** 43 trades dengan price move 0.5-1% melawan posisi → WR 33%, −$37.86. Bot hold sampai time exit.
+**Cause:** Early loss cut threshold −0.8% (config) terlalu longgar. Dengan leverage 15×, 0.5% price move = −7.5% ROE. Bot membiarkan ini terjadi.
+**Evidence:** Trailing stop (100% WR) hanya fire 3.5%. Sisanya mati di time_exit tanpa pernah mencapai TP atau SL.
+
+### F-NEW-5 · Inverse Sizing · **−$5-10 impact**
+
+**State:** Losers avg notional $125.66 vs winners $100.02 (1.26× bigger).
+**Cause:** Position sizing berbasis score. Score tinggi = size besar. Tapi score tinggi = loss.
+**Evidence:** Korelasi langsung dari score-based sizing formula di risk_manager.
+
+### F-PREV-6 · Meta Block Not Working · **−$41.24 impact (same as F-NEW-3)**
+
+**State:** KAITO 0% WR (13 trades), ALGO 0% WR (10 trades) masih di-trade.
+**Cause:** Meta pattern check tidak blocking karena data di-reset (hard reset menghapus meta stats). Bot mulai dari 0 samples → belum mencapai threshold 5-10 samples untuk block.
+**Evidence:** Semua 260 trades dari hari ini (post-reset). Meta belum punya cukup data.
+
+---
+
+## Phase 6 — Solusi Konkret (Implementasi)
+
+### SOLUSI 1: Frequency Cap + Cooldown Overhaul
+
+**Masalah:** 79 trades/jam, fee $32 > alpha $6.
+**Kenapa solusi ini:** Bot SUDAH profitable sebelum fee. Kurangi frekuensi = kurangi fee = flip ke net positive.
+
+```python
+# config.py — tambahkan:
+MAX_TRADES_PER_HOUR: int = 15          # hard cap
+ASSET_COOLDOWN_AFTER_LOSS_MIN: int = 30  # jangan re-enter asset yang baru loss selama 30m
+
+# ScalperConfig:
+signal_cooldown_minutes: int = 12      # was 5 → kurangi frekuensi 2.4×
+max_concurrent_positions: int = 2      # was 5 → fokus ke 2 terbaik saja
+```
+
+**Dampak:** 15 trades/jam × $0.12 = $1.80/jam fee. Dengan alpha rate yang sama: net positive.
+
+---
+
+### SOLUSI 2: Momentum Gate — Jangan Entry Melawan Price Action
+
+**Masalah:** Bot LONG asset yang sedang dump (KAITO, ZEC, ALGO = −$41).
+**Kenapa solusi ini:** Tidak peduli seberapa "bagus" kondisi OI/funding/orderbook — jika harga sedang TURUN, jangan LONG. Ini bukan tentang prediksi, ini tentang KONFIRMASI.
+
+```python
+# engine/scoring_engine.py — di _run_scalper(), SETELAH side ditentukan:
+
+# [AUDIT FIX 2026-05-20] Momentum Gate
+# Jangan entry LONG jika harga 5m terakhir turun > 0.1%
+# Jangan entry SHORT jika harga 5m terakhir naik > 0.1%
+# Alasan: data menunjukkan 100% loss saat entry melawan momentum 5m
+price_5m_ago = self._get_price_n_minutes_ago(asset, 5)
+if price_5m_ago and price_5m_ago > 0:
+    momentum_5m = (mark_price - price_5m_ago) / price_5m_ago
+    if side == Side.LONG and momentum_5m < -0.001:  # harga turun > 0.1%
+        log.info(f"[MOMENTUM-GATE] {asset} LONG blocked: 5m momentum {momentum_5m*100:.2f}% < -0.1%")
+        return None, score
+    elif side == Side.SHORT and momentum_5m > 0.001:  # harga naik > 0.1%
+        log.info(f"[MOMENTUM-GATE] {asset} SHORT blocked: 5m momentum {momentum_5m*100:.2f}% > +0.1%")
+        return None, score
+```
+
+**Dampak:** Eliminasi KAITO/ZEC/ALGO pattern (−$41). Bot hanya entry saat harga SUDAH bergerak sesuai arah.
+
+---
+
+### SOLUSI 3: Immediate Verdict Exit — Cut dalam 3 Menit, Bukan 20
+
+**Masalah:** 43 trades loss 0.5-1% price move (−$37.86) karena bot hold sampai time exit.
+**Kenapa solusi ini:** Dalam scalping, jika trade benar, harga bergerak SEGERA. Jika setelah 3 menit harga melawan, sinyal sudah invalid. Tidak ada alasan hold 12-20 menit.
+
+```python
+# config.py, ScalperConfig — ganti exit parameters:
+
+# IMMEDIATE VERDICT SYSTEM:
+# Rule 1: WRONG — cut cepat
+time_exit_early_loss_pct:    float = -0.003   # -0.3% (was -0.8%) → cut di -0.3% price move
+time_exit_early_loss_mins:   float = 3.0      # 3m (was 10m) → verdict dalam 3 menit
+
+# Rule 2: RIGHT — trailing segera
+early_trail_activation_pct:  float = 0.0015   # 0.15% (was 0.3%) → trailing aktif lebih awal
+early_trail_distance_pct:    float = 0.0010   # 0.10% trail (was 0.2%) → ketat, lock profit
+
+# Rule 3: UNDECIDED — jangan hold lama
+max_hold_minutes:            float = 8.0      # 8m (was 20m) → scalper harus cepat
+max_hold_grace_minutes:      float = 3.0      # 3m (was 10m) → minimal grace
+
+# Quick profit lebih agresif:
+quick_profit_threshold_pct:  float = 0.004    # 0.4% (was 0.8%)
+quick_profit_retrace_pct:    float = 0.0015   # 0.15% (was 0.3%)
+```
+
+**Dampak:** 
+- Trade yang salah di-cut di −0.3% (loss $0.45 @$100 notional) bukan −0.5-1% (loss $1-2)
+- Trade yang benar di-lock profit di +0.15% lalu trailing
+- Eliminasi "hold 20 menit di no-man's land"
+
+---
+
+### SOLUSI 4: Balik Regime Multiplier — Trending = Penalty
+
+**Masalah:** Score 65-69 WR 27.6% karena regime multiplier ×1.2 menaikkan score saat harga sudah exhausted.
+**Kenapa solusi ini:** "Trending" berarti move SUDAH terjadi. Untuk scalper, entry di tengah trend = entry di exhaustion. Yang profitable adalah entry di AWAL move (ranging → breakout).
+
+```python
+# engine/scoring_engine.py, regime multiplier section:
+
+# BEFORE: trending = boost (×1.2), late_trend = boost (×1.15)
+# AFTER: trending = PENALTY, ranging = slight boost
+
+if vol_regime in (MarketRegime.HIGH_VOL, MarketRegime.EXTREME):
+    _regime_cat = "volatile"
+    _regime_mult = 0.80      # volatile = dangerous, reduce score
+elif abs(trend_pct) >= 0.030:
+    _regime_cat = "late_trend"
+    _regime_mult = 0.65      # HARD PENALTY — move sudah terlalu jauh
+    late_trend = True
+elif abs(trend_pct) >= 0.015:
+    _regime_cat = "trending"
+    _regime_mult = 0.85      # mild penalty — trend sudah jalan
+else:
+    _regime_cat = "ranging"
+    _regime_mult = 1.0       # neutral — fresh move potential
+```
+
+**Dampak:** Score 67 (ZEC) × 0.85 = 57 → masuk sweet spot. Score 70+ × 0.65 = 45 → di-block. Eliminasi top-decile losses.
+
+---
+
+### SOLUSI 5: Fixed Sizing — Hapus Score-Based Sizing
+
+**Masalah:** Losers 1.26× bigger notional karena sizing ∝ score, dan score ∝ loss.
+**Kenapa solusi ini:** Jika score tidak prediktif, sizing berdasarkan score = random sizing yang kebetulan inverse. Fixed size = equal risk per trade = P&L ditentukan oleh win rate dan R:R, bukan sizing error.
+
+```python
+# risk/risk_manager.py — di calculate_position_size():
+
+# BEFORE: size varies by score (higher score = bigger position)
+# AFTER: fixed notional, ignore score for sizing
+
+def calculate_position_size(self, signal, balance, ...):
+    # Fixed $80 notional regardless of score
+    # Alasan: score r=-0.15 dengan PnL → sizing by score = inverse sizing
+    fixed_notional = min(80.0, balance * 0.35)  # $80 or 35% balance cap
+    size = fixed_notional / entry_price
+    return size, fixed_notional
+```
+
+**Dampak:** Eliminasi sizing asymmetry. Setiap trade risk = sama.
+
+---
+
+### SOLUSI 6: Invert Orderbook & Liquidation Contribution
+
+**Masalah:** Orderbook score r=−0.21, liquidation score r=−0.33 dengan PnL. Semakin tinggi = semakin rugi.
+**Kenapa solusi ini:** Data 260 trades membuktikan kedua analyzer ini membaca sinyal TERBALIK. High orderbook imbalance = liquidity trap (market maker bait). High liquidation score = volatility spike (bot masuk di worst price).
+
+```python
+# engine/scoring_engine.py, di _calculate_scalper_score():
+
+# [AUDIT FIX 2026-05-20] Invert contributions based on empirical data
+# Orderbook: r=-0.21 → high imbalance = trap, bukan genuine demand
+# Reduce to 30% weight and consider as CONTRARIAN signal
+ob_contribution = int((ob_bull - ob_bear) * 0.3)  # was 1.0×
+
+# Liquidation: r=-0.33 → high liq = volatility spike = bad entry
+# INVERT: treat high liquidation as WARNING, not confirmation
+liq_contribution = -(liq_bull - liq_bear)  # FLIP sign
+```
+
+**Dampak:** Score composition berubah → score 60+ yang sekarang loss akan turun ke 55-59 range (profitable zone).
+
+---
+
+## Priority Matrix
+
+| # | Fix | $ Impact | Effort | Priority |
 |---|---|---|---|---|
-| `time_exit` | 274 (81%) | 48% | −$22.06 | −$0.08 |
-| `stop_loss` | 35 | 40% | −$29.76 | −$0.85 |
-| `trailing_stop` | 14 | **100%** | **+$19.12** | +$1.37 |
-| `momentum_exit` | 9 | **0%** | −$38.11 | **−$4.23** |
-| `close_all` | 5 | 80% | +$2.42 | +$0.48 |
-| `manual_close` | 1 | 100% | +$1.16 | +$1.16 |
+| 1 | Frequency cap 15/jam + cooldown 12m | +$24 (fee savings) | 5 min | **P0** |
+| 2 | Momentum gate (block entry melawan 5m trend) | +$41 (eliminate toxic) | 10 min | **P0** |
+| 3 | Immediate verdict exit (cut 3m, trail 0.15%) | +$20-30 (reduce time_exit losses) | 10 min | **P0** |
+| 4 | Balik regime multiplier | +$15-20 (fix inverse score) | 5 min | **P0** |
+| 5 | Fixed sizing $80 | +$5-10 (fix asymmetry) | 5 min | **P1** |
+| 6 | Invert OB & Liq contribution | +$10-15 (fix inverse correlation) | 5 min | **P1** |
 
-**Critical:**
-- `momentum_exit` is single-handedly responsible for $38 of the $67 loss (57%) on just 9 trades.
-- `trailing_stop` is the only profitable exit but fires only 4% of the time.
-- `time_exit` (81% of all exits) clips winners and traps losers — net −$22.
+**Combined estimated impact:** Dari expectancy −$0.10/trade → +$0.15 sampai +$0.30/trade.
+Dari profit factor 0.74 → 1.3-1.8.
 
 ---
 
-## Phase 3 — Critical Findings (ranked by $ impact)
+## Kesimpulan Akhir
 
-### F1 · Multi-factor analyzers not persisting scores · **−$25–40 impact**
-**State:** All 338 production signals show `oi_funding_score = liquidation_score = orderbook_score = 0`, despite the textual `reasons` field containing analyzer output (e.g., "Strong ask wall", "OI/Funding bearish").
-**Cause:** The aggregation step in `engine/scoring_engine.py` calls each analyzer's `analyze()` (which returns `bull, bear, reasons, warnings`), accumulates into `total_bull`/`total_bear`, but does not record per-analyzer integer contribution into the `breakdown` JSON.
-**Effect:** Impossible to debug, attribute, or learn from the score. Meta-learning is starved of features. Looks like a single-factor model (just session bonus).
-**Fix:** Track `bull_oi, bear_oi, bull_liq, bear_liq, bull_ob, bear_ob` separately and persist to `breakdown`.
+Bot ini punya **3 masalah yang saling memperkuat**:
 
-### F2 · `momentum_exit`: 0/9 wins, −$4.23/trade · **−$38 impact**
-**State:** Despite the v2 multi-confirmation rewrite (5 layers: ATR pullback / volume / trend break / RSI / volume confirmation), every single momentum_exit trigger in production was a loss.
-**Cause:** Almost certainly **selection bias** — the exit only fires when *all* layers confirm bearish reversal, but by then the move has already happened. The bot is selling at the local low.
-**Fix:** Either (a) raise the floor pullback to 1.5%+ so it only fires on regime changes, not noise; or (b) deprecate momentum_exit entirely and rely on trailing stop + time exit.
+```
+OVERTRADING (79/jam)
+    → fee $32 > alpha $6
+    → net loss meskipun strategi punya edge
 
-### F3 · Top-decile score (73–97) → 21% WR, −$22 PnL · **−$22 impact**
-**State:** The highest-conviction signals are systematically the worst. Decile 9 underperforms decile 0 by 32 percentage points of WR.
-**Cause:** Score is dominated by **session bonus + cumulative reasons count** (NY+London during overlap = +14 bonus, plus 8-12 narrative reasons). High-score regime = late in trend, near exhaustion. Bot enters at top.
-**Fix:** Cap `session_bonus` contribution at +5 (not +14), and add a **score-velocity filter**: only enter if score has been ≥threshold for >2 scan cycles (avoid one-off spikes from session boundaries).
+TREND BLINDNESS (no momentum check)  
+    → LONG asset yang sedang dump
+    → 36 trades, 2.8% WR, −$41
 
-### F4 · `trailing_stop` only 14/338 trades (4%) but 100% WR · **+$19 actual / +$50–100 missed**
-**State:** Activated only after TP1 hit (0.6%). Many winners reach +0.3–0.5%, then revert and die in `time_exit`.
-**Cause:** TP1 = 0.6% is rarely reached in 20-min hold window for low-volatility assets. Trailing never activates.
-**Fix:** **Already implemented** in last conversation — `time_exit_early_trail_pct = 0.003` activates trailing at 0.3%. Recommended to also lower TP1 floor to 0.4% for low-volatility regime.
-
-### F5 · `sig_has_rsi_divergence` r = −0.22 with PnL · **−$10–15 impact**
-**State:** The single most negatively correlated signal feature. Trades with RSI divergence flag lose more on average.
-**Cause:** RSI divergence as a reversal signal works in ranging markets, fails badly in trending markets (during liquid sessions like NY which is when bot is most active).
-**Fix:** Either (a) downgrade RSI divergence to 0 points unless `regime != trending`; or (b) require additional confirmation (volume + structure break).
-
-### F6 · 21 patterns with WR <35% still trading · **−$15–20 impact**
-**State:** Meta tracker shows 21 `(asset, side)` patterns with EMA win rate <35% across ≥5 samples. Examples: `BIO_long` (0%, n=12), `TON_long` (0%, n=9), `INJ_long` (14%, n=28), `LINK_long` (0%, n=23).
-**Cause:** Meta penalty is only ±8–12 points — not enough to push score below threshold for "strong" signals.
-**Fix:** Hard-block: if `winrate_ema < 0.30 AND samples >= 10`, skip the asset for that side entirely.
-
-### F7 · Score decomposition unstable (R² = 0.05) · **diagnostic only**
-**State:** Linear regression of breakdown components vs `final_score` yields R² of 0.05 — the breakdown does not explain the score.
-**Cause:** Either (a) the analyzer outputs are zeroed (F1) and `final_score` comes from `total_bull/total_bear` not in the joined breakdown; or (b) there's a non-linear regime multiplier + meta adjustment dominating.
-**Fix:** Mostly resolves with F1 (persist all components).
-
----
-
-## Phase 4 — Concrete Fixes & Priority Matrix
-
-| ID | Fix | Effort | Impact | Priority |
-|---|---|---|---|---|
-| F1 | Persist all analyzer outputs to `breakdown` JSON (don't store 0s) | Low (1 file, ~20 lines) | High (unblocks debugging + learning) | **P0** |
-| F2 | Disable or harden `momentum_exit` (raise pullback to 1.5%, require 4/5 layers) | Low | High (−$38 → ~$0) | **P0** |
-| F3 | Cap `session_bonus` at +5 and add score-velocity filter (≥2 cycles above threshold) | Medium | High (−$22 → break-even) | **P0** |
-| F6 | Hard-block patterns with WR<30% & n≥10 | Low (1 if-check in scoring_engine) | Medium | **P1** |
-| F4 | Already done — verify `time_exit_early_trail_pct` is hit in production | Low | Medium-High | **P1** |
-| F5 | Gate RSI divergence on regime (only count in ranging market) | Low | Medium | **P1** |
-| New | Add per-trade feature logging to `signals_history.data` (so we can re-run this audit weekly) | Medium | Future-proofing | **P2** |
-| New | Replace static threshold (60) with **score-percentile filter** (top 30% per asset over 7-day window) — avoids the "single point spike" issue in F3 | High | High but unproven | **P2** |
-
----
-
-## Recommended Code Changes (highest priority)
-
-### Fix F1 — Persist analyzer scores
-
-In `engine/scoring_engine.py`, find where `breakdown` dict is built and replace zeros with actual analyzer outputs:
-
-```python
-# BEFORE (suspected current state):
-breakdown = {
-    "oi_funding_score":  0,           # ← bug: never set
-    "liquidation_score": 0,           # ← bug: never set
-    "orderbook_score":   0,           # ← bug: never set
-    "session_bonus":     session_bonus,
-    "total_bull":        total_bull,
-    "total_bear":        total_bear,
-    ...
-}
-
-# AFTER:
-breakdown = {
-    "oi_funding_score":  oi_bull - oi_bear,        # signed contribution
-    "liquidation_score": liq_bull - liq_bear,
-    "orderbook_score":   ob_bull - ob_bear,
-    "session_bonus":     session_bonus,
-    "total_bull":        total_bull,
-    "total_bear":        total_bear,
-    ...
-}
+SYMMETRIC EXIT (time_exit 93.5%)
+    → winner dan loser diperlakukan sama
+    → tidak ada cut loss cepat, tidak ada let winner run
 ```
 
-### Fix F2 — Harden momentum_exit
+**Fix 1+2+3 saja sudah cukup untuk flip bot dari net-losing ke net-profitable.** Fix 4-6 adalah optimasi tambahan.
 
-In `risk/risk_manager.py` (Rule E2), raise the pullback threshold floor and require all 4 confirmation layers (currently 3):
-
-```python
-# Line ~1010 (momentum_exit_min_pullback_pct):
-# Was: 0.008 (0.8%)
-# Set: 0.015 (1.5%) — only true reversals, not noise
-
-# In the layer-tally check, require 4/5 confirmations instead of 3/5:
-if confirmation_count >= 4:  # was: >= 3
-    return {"action": "momentum_exit", ...}
-```
-
-Or — preferred — disable momentum_exit and rely on trailing stop:
-
-```python
-# config.py, ScalperConfig:
-momentum_exit_enabled: bool = False   # disable until fixed
-```
-
-### Fix F3 — Cap session bonus
-
-In `engine/scoring_engine.py`, where session_bonus is calculated:
-
-```python
-# BEFORE:
-session_bonus = 0
-if is_ny_session:    session_bonus += 10
-if is_london_session: session_bonus += 4
-if is_asia_session:   session_bonus -= 10
-
-# AFTER:
-session_bonus = 0
-if is_ny_session:    session_bonus += 5    # was +10
-if is_london_session: session_bonus += 2   # was +4
-if is_asia_session:   session_bonus -= 5   # was -10
-session_bonus = max(-8, min(7, session_bonus))  # hard cap
-```
-
-### Fix F6 — Hard-block bad meta patterns
-
-In `engine/scoring_engine.py` early-rejection block:
-
-```python
-# Add this BEFORE the score calculation:
-pattern_key = f"{trade_mode}_{asset}_{side}"
-meta = await db.get_meta_pattern(pattern_key)
-if meta and meta.samples >= 10 and meta.winrate_ema < 0.30:
-    log.info(f"[META-BLOCK] {pattern_key}: WR {meta.winrate_ema:.0%} < 30% over {meta.samples} samples — SKIP")
-    return None
-```
+Yang TIDAK perlu diubah:
+- Entry logic dasar (OI + funding analysis) — ini menghasilkan gross alpha
+- Trailing stop logic — 100% WR saat fire, hanya perlu fire lebih sering
+- SHORT filter — 79.2% WR, sudah bekerja dengan baik
 
 ---
 
 ## Files Generated
 
 ```
-audit_score_analysis/
-├── analyze.py                          # Phase 2 analysis pipeline
-├── dashboard.py                        # Phase 3 chart generator
-├── kara_score_audit_dashboard.html     # ★ MAIN DASHBOARD (open in browser)
-├── AUDIT_REPORT.md                     # this file
-└── data/
-    ├── merged_trades_signals.csv       # 338 trades joined with signals
-    ├── correlations.csv                # feature ↔ pnl correlation
-    ├── correlations_outcome.csv        # feature ↔ win/loss correlation
-    ├── feature_importance.csv          # RF native + permutation importance
-    ├── score_decile.csv                # decile breakdown
-    ├── exit_reason.csv                 # exit reason performance
-    └── summary.json                    # headline metrics
+tmp/deep_audit.py          — Deep analysis script
+tmp/forensic2.py           — Price move & fee forensic
+tmp/trades_prod.json       — 260 trades (fresh 20 Mei)
+tmp/signals_prod.json      — 289 signals (fresh 20 Mei)
+tmp/meta_prod.json         — 91 meta patterns
 ```
-
----
-
-## Reproduction
-
-To re-run the audit on fresh data:
-
-```bash
-# 1. Pull production DB (run on Windows PowerShell, project root)
-$script = @'
-import sqlite3, json
-conn = sqlite3.connect("/app/storage/kara_data.db")
-conn.row_factory = sqlite3.Row
-cur = conn.cursor()
-for tbl, key in [("trade_history","trades"), ("signals_history","signals"), ("meta_pattern_stats","meta")]:
-    cur.execute(f"SELECT * FROM {tbl} ORDER BY rowid")
-    rows = [dict(r) for r in cur.fetchall()]
-    with open(f"/tmp/{key}.json","w") as f:
-        json.dump(rows, f, default=str)
-print("ok")
-'@
-$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($script))
-railway ssh --service kara-400 "echo $b64 | base64 -d > /tmp/e.py && python3 /tmp/e.py"
-
-# 2. Download
-railway ssh --service kara-400 "base64 /tmp/trades.json"  > tmp/trades_b64.txt
-railway ssh --service kara-400 "base64 /tmp/signals.json" > tmp/signals_b64.txt
-railway ssh --service kara-400 "base64 /tmp/meta.json"    > tmp/meta_b64.txt
-
-# 3. Decode
-$t = Get-Content tmp/trades_b64.txt -Raw
-[System.IO.File]::WriteAllBytes("tmp/trades_prod.json",  [Convert]::FromBase64String($t.Trim()))
-# (repeat for signals & meta)
-
-# 4. Analyze + dashboard
-venv\Scripts\python.exe audit_score_analysis\analyze.py
-venv\Scripts\python.exe audit_score_analysis\dashboard.py
-
-# 5. Open
-start audit_score_analysis\kara_score_audit_dashboard.html
-```
-
----
-
-## Closing Notes
-
-The bot has 3 different problems wearing one hat:
-
-1. **Telemetry is broken** (F1) — we can't see what the analyzers actually outputted.
-2. **One exit logic is catastrophic** (F2 — momentum_exit) and another is rare-but-perfect (trailing_stop).
-3. **The score is set largely by session timing**, not by orderflow/funding/liquidation analysis as advertised. The result: high score = late entry = loss.
-
-**Fixing F1 + F2 + F3 should turn an expectancy of −$0.20 into something between −$0.05 and +$0.10 per trade** — enough to flip the bot from net-losing to flat-to-profitable, without changing the entry strategy at all. Real edge improvements (proper alpha, regime detection) come after telemetry is honest.
-
-**No production code was modified by this audit.** All changes proposed above need explicit approval and tests before deployment.

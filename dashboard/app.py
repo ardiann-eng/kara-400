@@ -1038,6 +1038,100 @@ def init_dashboard(sessions, telegram_bot=None, mode_manager=None):
 
 async def run_dashboard():
     """Start uvicorn in async context."""
+# ── ADMIN: Reasoning & Learning Dashboard ─────────────────────────────────────
+
+@app.get("/admin/reasoning")
+async def admin_reasoning_page():
+    """Serve the admin reasoning dashboard HTML."""
+    import os
+    html_path = os.path.join(os.path.dirname(__file__), "admin_reasoning.html")
+    if os.path.exists(html_path):
+        return HTMLResponse(open(html_path, encoding="utf-8").read())
+    return HTMLResponse("<h1>Admin Reasoning Dashboard</h1><p>admin_reasoning.html not found</p>")
+
+
+@app.get("/api/admin/reasoning/decisions")
+async def api_reasoning_decisions(limit: int = 50):
+    """Get recent decision traces (full reasoning flow per asset)."""
+    from dashboard.reasoning_logger import reasoning_logger
+    return JSONResponse(reasoning_logger.get_recent_decisions(limit))
+
+
+@app.get("/api/admin/reasoning/live")
+async def api_reasoning_live(limit: int = 100):
+    """Get live reasoning steps (real-time feed)."""
+    from dashboard.reasoning_logger import reasoning_logger
+    return JSONResponse(reasoning_logger.get_live_steps(limit))
+
+
+@app.get("/api/admin/reasoning/active")
+async def api_reasoning_active():
+    """Get currently in-progress decision traces."""
+    from dashboard.reasoning_logger import reasoning_logger
+    return JSONResponse(reasoning_logger.get_active_traces())
+
+
+@app.get("/api/admin/learning/stats")
+async def api_learning_stats():
+    """Get ML model + pattern memory performance stats."""
+    from dashboard.reasoning_logger import reasoning_logger
+    return JSONResponse({
+        "ml": reasoning_logger.get_ml_stats(),
+        "patterns": reasoning_logger.get_pattern_stats(),
+    })
+
+
+@app.get("/api/admin/learning/patterns")
+async def api_learning_patterns():
+    """Get all pattern memory entries."""
+    from engine.learning_engine import learning_engine
+    learning_engine.load()
+    patterns = []
+    for key, stats in sorted(learning_engine._patterns.items(), key=lambda x: x[1].total_pnl):
+        patterns.append({
+            "key": key,
+            "wins": stats.wins,
+            "losses": stats.losses,
+            "n": stats.n,
+            "wr": round(stats.ema_wr, 3),
+            "pnl": round(stats.total_pnl, 3),
+        })
+    return JSONResponse(patterns)
+
+
+@app.websocket("/ws/admin/reasoning")
+async def ws_admin_reasoning(websocket: WebSocket):
+    """WebSocket for real-time reasoning updates."""
+    await websocket.accept()
+    from dashboard.reasoning_logger import reasoning_logger
+    import asyncio
+
+    queue = asyncio.Queue()
+
+    def on_decision(data):
+        try:
+            queue.put_nowait(data)
+        except asyncio.QueueFull:
+            pass
+
+    reasoning_logger.register_ws(on_decision)
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(queue.get(), timeout=30.0)
+                await websocket.send_json(data)
+            except asyncio.TimeoutError:
+                # Send heartbeat
+                await websocket.send_json({"type": "heartbeat"})
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        reasoning_logger.unregister_ws(on_decision)
+
+
+# ── Dashboard Server ──────────────────────────────────────────────────────────
+
+async def run_dashboard():
     log.info("=" * 40)
     log.info(f"DASHBOARD LIVE ON: http://{config.DASHBOARD_HOST}:{config.DASHBOARD_PORT}")
     log.info("=" * 40)

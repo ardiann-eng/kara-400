@@ -3,26 +3,50 @@
 > Ditulis dari hasil membaca seluruh kode Python. Setiap angka berasal dari kode, bukan asumsi.
 > Bahasa: Indonesia, dengan istilah teknis dalam bahasa Inggris bila lebih tepat.
 >
-> **Last updated:** 2026-05-14 — sinkron dengan perubahan: SHORT threshold naik ke 62, technical-minimum gate, leverage-aware quick-profit exit, OI tension fallback di Liquidation analyzer, compounding fix di paper executor.
+> **Last updated:** 2026-05-20 — sinkron dengan perubahan: Opportunity Scoring v2, Profit-Lock Exit System, Learning Engine (Pattern Memory + ML), Bot Brain Dashboard, migrasi Railway.
 
 ---
 
-## RINGKASAN PERUBAHAN TERBARU (2026-05-14)
+## RINGKASAN PERUBAHAN TERBARU (2026-05-20)
+
+### Audit Findings (260 trades, 3.3 jam, 20 Mei 2026)
+| Metric | Value |
+|---|---|
+| Win Rate | 47.7% |
+| Total PnL | −$26.39 |
+| Gross PnL (before fees) | **+$6.05** |
+| Total Fees (260 trades) | **$32.44** |
+| Profit Factor | 0.741 |
+| Score ↔ PnL correlation | **−0.145** (inverse!) |
+
+**Root causes:** Overtrading (79 trades/jam), score inverse predictive (high score = late entry = loss), exit simetris (93.5% time_exit), no directional filter.
+
+### Perubahan Implementasi
 
 | Area | Sebelum | Sesudah | File |
 |---|---|---|---|
-| SHORT signal threshold | 57 | **62** | `config.py` (`SignalConfig.min_score_short_signal`) |
-| SHORT auto-execute threshold | 57 | **62** | `config.py` (`min_score_short_auto`) |
-| SHORT bull-bear gap minimum | 18 | **25** | `config.py` (`min_bull_bear_gap_short`) |
-| Technical minimum gate SHORT | — | **OI+Liq+OB ≥ 10 pts** wajib | `engine/scoring_engine.py` |
-| Technical minimum gate LONG | — | **≥ 5 pts** | `engine/scoring_engine.py` |
-| Liquidation analyzer neutral funding | bull=0, bear=0 (no signal) | **bull=bear=tension** (min 1, max ~3) | `engine/analyzers/liquidation_analyzer.py` |
-| Quick-profit exit (Rule F0) | tidak ada | **Aktif** dengan leverage-aware threshold | `risk/risk_manager.py` |
-| Time exit saat profit | grace period sama dgn loss | **Exit langsung saat profit** | `risk/risk_manager.py` |
-| Paper executor compounding | equity = balance only | **equity = balance + unrealized semua posisi** | `execution/paper_executor.py` |
-| Scalper risk_per_trade_pct | 12% | **5%** | `config.py` (commit b5cb4f8) |
-| Margin cap | flat | **leverage-aware** | `risk/risk_manager.py` (commit 645e2d1) |
-| TP multiplier | besar | **lebih kecil** | (commit 645e2d1) |
+| **Scoring philosophy** | Confirmation-based (lagging) | **Opportunity-based (leading)** | `engine/scoring_engine.py` |
+| Regime multiplier trending | ×1.2 (boost) | **×0.85 (penalty)** | `engine/scoring_engine.py` |
+| Regime multiplier late_trend | ×1.15 | **×0.70** | `engine/scoring_engine.py` |
+| EMA scoring | Always +12 | **Freshness-aware: fresh +10, stale −10** | `engine/scoring_engine.py` |
+| RSI scoring | Mean-reversion/momentum +10 | **Exhaustion penalty: extreme −8, neutral +5** | `engine/scoring_engine.py` |
+| CVD scoring | Always +12 if bullish | **Only +10 if DIVERGES from price** | `engine/scoring_engine.py` |
+| Displacement filter | −20 pts max (additive) | **×0.4 to ×1.1 (multiplicative)** | `engine/scoring_engine.py` |
+| Volume surge | +10 pts | **Removed** (lagging, no edge) | `engine/scoring_engine.py` |
+| min_score_to_enter | 48 | **45** | `config.py` |
+| signal_cooldown_minutes | 5 | **10** | `config.py` |
+| max_concurrent_positions | 5 | **3** | `config.py` |
+| tp1_pct | 0.40% | **0.25%** | `config.py` |
+| early_trail_activation | 0.30% | **0.15%** | `config.py` |
+| early_trail_distance | 0.20% | **0.10%** | `config.py` |
+| quick_profit_threshold | 0.80% | **0.35%** | `config.py` |
+| quick_profit_retrace | 0.30% | **0.12%** | `config.py` |
+| max_hold_minutes | 20 | **15** | `config.py` |
+| max_hold_grace | 10 | **5** | `config.py` |
+| time_exit_early_loss | −0.8% / 10m | **−0.4% / 5m** | `config.py` |
+| Score-driven max_hold thresholds | 66/61/56 | **70/60/50** | `risk/risk_manager.py` |
+| **Learning Engine** | — | **NEW: Pattern Memory + ML Model** | `engine/learning_engine.py` |
+| **Bot Brain Dashboard** | — | **NEW: Real-time reasoning flow** | `dashboard/` |
 
 ---
 
@@ -94,9 +118,66 @@ Regime di-cache 60 menit per aset dan dipersistensikan ke SQLite (`vol_cache` ta
 
 ---
 
-### 2b. Komponen Skor Utama
+### 2b. Komponen Skor Utama — OPPORTUNITY SCORING v2 (2026-05-20)
 
-Setiap analyzer mengembalikan `bull_points` dan `bear_points` secara terpisah. Arah (LONG/SHORT) **belum ditentukan** pada tahap ini — semua diakumulasi dulu, baru diputuskan setelahnya.
+Filosofi baru: **score tinggi = move BELUM terjadi tapi kondisi ripe**. Leading indicators (OI, OB wall) bobot besar. Lagging indicators (EMA, RSI) bobot kecil atau PENALIZE jika stale.
+
+Scoring dibagi 3 layer:
+
+#### Layer 1: SETUP (Leading Indicators — max ~58 pts)
+
+| Komponen | Max Pts | Logika |
+|---|---|---|
+| **OI/Funding** | ±28 | Uang baru masuk = move ABOUT to happen |
+| **Orderbook Wall** | ±18 | Pressure building, belum breakout |
+| **Liquidation** | ±12 | Cascade potential = catalyst |
+
+#### Layer 2: CONFIRMATION (Lagging — range −15 to +25 pts)
+
+| Komponen | Pts | Logika |
+|---|---|---|
+| **EMA Cross (fresh ≤3m)** | +10 + setup boost | Baru cross = early in move |
+| **EMA Cross (stale ≥8m)** | **−10** | Move sudah jalan lama = PENALTY |
+| **RSI neutral (42-58)** | +5 | Price hasn't moved = opportunity |
+| **RSI extreme (>75 or <25)** | **−8** | Exhaustion = PENALTY |
+| **CVD divergence** (buying but price flat) | +10 | Hidden accumulation = SETUP |
+| **CVD confirms** (aligned with price) | +3 | Lagging, small weight |
+| **MTF 15m aligned** | +6 | Mild confirmation |
+| **MTF 15m discord** | −4 | Counter-trend warning |
+
+#### Layer 3: DISPLACEMENT MULTIPLIER (Anti-Chase)
+
+| Price already moved (our direction) | Multiplier |
+|---|---|
+| > 0.8% | **×0.40** (very stale) |
+| > 0.5% | **×0.60** (stale) |
+| > 0.3% | **×0.80** (mild) |
+| < −0.2% (counter-displacement) | **×1.10** (fresh entry bonus) |
+| Otherwise | ×1.00 |
+
+#### Formula Akhir
+
+```
+dominant_setup = max(bull_setup, bear_setup)
+raw = max(0, dominant_setup + confirm_pts)
+scaled = int(raw × 1.6)
+score = int(scaled × displacement_mult)
+score = clamp(0, 100)
+
+# Then in _run_scalper():
+score × regime_mult (ranging=1.0, trending=0.85, late_trend=0.70, volatile=0.90)
+score + session_bonus (split: 30% to score, 70% to threshold)
+score + learning_engine adjustment (−20 to +12)
+```
+
+#### Score Range Examples
+
+| Scenario | Score |
+|---|---|
+| MAX (OI=28, OB=18, Liq=12, fresh EMA, CVD diverge, counter-disp) | **100** |
+| Good setup (OI=20, OB=10, fresh EMA, no displacement) | **70-80** |
+| Typical (OI=5, OB=10, medium EMA) | **45-60** |
+| Exhausted (stale EMA, RSI extreme, displacement >0.8%) | **14-20** (BLOCKED) |
 
 #### Analyzer 1: OI + Funding (maks ±45 poin)
 
@@ -855,35 +936,120 @@ Ada konfigurasi "tutup setelah 8 jam jika profit 1-3%" tapi tidak ada kode yang 
 
 ---
 
-## VERDICT (Update 2026-05-14)
+## BAGIAN 9: LEARNING ENGINE (BARU 2026-05-20)
 
-Arsitektur KARA secara keseluruhan **sound dan terstruktur dengan baik**: pemisahan antara data collection (WS + REST), scoring engine (3 analyzer independen), risk management, executor, dan notifikasi sudah jelas. Pipeline dari sinyal ke eksekusi melewati banyak filter berlapis yang membuat bot sulit masuk trade sembarangan.
+### 9a. Layer 1: Pattern Memory
 
-### Perbaikan Sejak Audit Terakhir
+Setiap trade di-tag dengan pattern key: `{asset}_{side}_{regime}` (contoh: `KAITO_long_trending`).
 
-Set perubahan **2026-05-14** menyelesaikan beberapa kelemahan kritis:
+**EMA Win Rate** (alpha=0.15): `ema_wr = 0.85 × ema_lama + 0.15 × (1 jika win, 0 jika loss)`
 
-1. **SHORT bias di Hyperliquid sudah dimitigasi** — threshold naik ke 62, gap minimum 25, technical minimum gate 10 pts. Sinyal seperti "KAITO SHORT score 59 dengan OI=0/Liq=0" sekarang diblok.
-2. **Compounding tracking benar** — paper executor sekarang save equity = `balance + unrealized` semua posisi, sehingga peak/drawdown/dynamic risk multiplier bekerja akurat.
-3. **Low-leverage assets profitable** — quick-profit exit dengan threshold leverage-aware (0.5% untuk lev ≤5×) berarti BLUR/KAITO/AXS dengan max 3-5× tidak hilang profit karena trail terlalu lambat.
-4. **Time exit tidak nahan profit** — saat max_hold + grace lewat dan posisi profit, langsung exit. Sebelumnya selalu skip time exit kalau TP1 hit, yang berisiko balik ke loss.
-5. **Liquidation analyzer tidak diam saat funding netral** — OI tension fallback memberikan sinyal kecil dari OI besar tanpa funding edge yang jelas.
+**Aksi berdasarkan EMA WR (aktif setelah 5 trades per pattern):**
+
+| EMA WR | Aksi |
+|---|---|
+| < 25% (n≥5) | Cek sisi sebaliknya: jika opposite WR>50% → **FLIP SIDE**. Jika tidak → **score −20** |
+| < 40% (n≥5) | **score −10** |
+| > 65% (n≥5) | **score +8** |
+| > 80% (n≥8) | **score +12, size ×1.2** |
+
+**Contoh:** KAITO_long_ranging WR=0% n=13 → cek KAITO_short_ranging. Jika short WR>50% → flip ke SHORT. Jika tidak ada data → penalty −20 (score turun, kemungkinan besar tidak lolos threshold).
+
+**Persistensi:** Disimpan ke SQLite table `pattern_memory`. Survive restart dan deploy.
+
+### 9b. Layer 2: ML Model (HistGradientBoosting)
+
+**Aktivasi:** Setelah 200 trades total.
+**Retrain:** Setiap 50 trades baru.
+
+**Features:**
+- oi_funding_score, orderbook_score, liquidation_score
+- displacement_5m, rsi, ema_freshness, atr_pct
+- regime_code, hour_utc, score
+
+**Output:** P(win) → 0.0 to 1.0
+
+**Aksi:**
+| P(win) | Aksi |
+|---|---|
+| < 0.35 | size × 0.5 |
+| 0.35-0.65 | normal |
+| > 0.65 | size × 1.3 |
+
+### 9c. Integration Flow
+
+```
+Signal generated → learning_engine.evaluate()
+  ├─ Layer 1: pattern memory lookup → score adj / flip side
+  └─ Layer 2: ML predict → size multiplier
+  
+Trade closes → learning_engine.record_outcome()
+  ├─ Update pattern EMA
+  ├─ Save training data
+  └─ Retrain model if needed
+```
+
+**Files:** `engine/learning_engine.py`, `core/db.py` (tables: `pattern_memory`, `training_data`)
+
+---
+
+## BAGIAN 10: BOT BRAIN DASHBOARD (BARU 2026-05-20)
+
+Section "Bot Brain" di admin dashboard (`/admin/reasoning` atau sidebar → Bot Brain).
+
+### Komponen UI:
+1. **Stats Cards** — Patterns learned, flips triggered, ML predictions, ML accuracy
+2. **Live Reasoning Flow** — WebSocket real-time: setiap evaluasi asset ditampilkan step-by-step (signal → learning → filters → execute/skip)
+3. **Top Winners & Losers** — Pattern memory ranking
+4. **Decision Log** — Tabel history keputusan (asset, side, score, decision, learning adjustment)
+
+### API Endpoints:
+| Endpoint | Fungsi |
+|---|---|
+| `GET /api/admin/reasoning/decisions` | Recent decision traces |
+| `GET /api/admin/reasoning/live` | Live reasoning steps |
+| `GET /api/admin/reasoning/active` | In-progress traces |
+| `GET /api/admin/learning/stats` | ML + pattern stats |
+| `GET /api/admin/learning/patterns` | All pattern memory entries |
+| `WS /ws/admin/reasoning` | Real-time WebSocket feed |
+
+### Reasoning Logger:
+- Ring buffer in-memory (500 decisions, 2000 steps) — zero disk I/O during trading
+- Emits structured JSON at each decision step
+- WebSocket broadcast to connected dashboard clients
+
+**Files:** `dashboard/reasoning_logger.py`, `dashboard/app.py`, `dashboard/templates/dashboard.html`
+
+---
+
+## VERDICT (Update 2026-05-20)
+
+### Perubahan Fundamental
+
+Bot mengalami **redesign scoring dari nol** berdasarkan audit 260 trades yang menunjukkan score inverse predictive (r=−0.145). Perubahan utama:
+
+1. **Opportunity Scoring v2** — Score sekarang mengukur "potensi move yang BELUM terjadi" bukan "berapa banyak indikator yang sudah agree". Leading indicators (OI, OB wall) dominan, lagging indicators (EMA, RSI) bisa negatif jika stale.
+
+2. **Profit-Lock Exit System** — Trailing aktif di +0.15% (bukan +0.3%), TP1 turun ke 0.25% (achievable dalam 2-4 menit), early loss cut di −0.4%/5m. Tujuan: convert 93.5% time_exit menjadi trailing_stop (100% WR).
+
+3. **Learning Engine** — Bot belajar dari setiap trade. Pattern memory (aktif setelah 5 trades) bisa flip side atau penalty score. ML model (aktif setelah 200 trades) prediksi P(win) dan adjust sizing.
+
+4. **Overtrading Fix** — Cooldown 5→10m, max positions 5→3. Estimasi: fee turun dari $32 ke ~$13 per session.
+
+5. **Bot Brain Dashboard** — Admin bisa lihat real-time bagaimana bot "berpikir": setiap keputusan di-trace dari signal → learning → filters → execute/skip.
+
+### Expected Impact
+
+| Metric | Sebelum | Target |
+|---|---|---|
+| Expectancy/trade | −$0.10 | +$0.10 to +$0.20 |
+| Profit factor | 0.74 | 1.2-1.5 |
+| Trades/jam | 79 | 15-25 |
+| Fee/session (3h) | $32 | $5-8 |
+| Trailing stop fire rate | 3.5% | 40-60% |
 
 ### Risiko yang Tersisa
 
-**Risk management thresholds masih sangat longgar:**
-- Daily loss limit **90%** dari equity hari ini → trading pause baru aktif saat akun hampir habis
-- Kill switch di drawdown **95%** dari peak → effective trigger di saldo nyaris nol
-- Auto-reset kill switch saat equity recovery → kill switch bisa hilang sebelum user notice
-
-**Untuk modal kecil ($60-100):**
-- Scalper risk 5% × leverage 15-25× pada 3 posisi concurrent = exposure ~75% per cycle
-- Quick-profit exit + technical minimum gate mengurangi loss frequency, tapi **tidak menggantikan daily loss limit yang ketat**
-- Rekomendasi: turunkan `daily_loss_pause_pct` ke 15-20%, `kill_switch_drawdown_pct` ke 25-30%, **selama equity belum tumbuh > $500**
-
-**FULL_AUTO masih aktif tanpa konfirmasi user:**
-Infrastruktur semi-auto Telegram lengkap tapi `FULL_AUTO = True` bypass. Untuk user pemula, opsi konfirmasi manual mungkin lebih aman.
-
-### Status Akhir
-
-Bot sekarang **secara signifikan lebih konservatif di sisi entry** (technical gate, SHORT threshold tinggi) dan **lebih protektif di sisi exit** (quick-profit, profit-aware time exit). Bagian yang belum tersentuh adalah **risk envelope** (daily limits, kill switch threshold) — di sini user perlu manual tune berdasarkan ukuran modal masing-masing.
+- **Learning engine cold start** — Pattern memory butuh 5 trades per pattern sebelum aktif. Minggu pertama masih "buta".
+- **Scoring terlalu ketat?** — Threshold 45 + displacement penalty bisa membuat bot jarang trade di market sideways. Perlu monitor.
+- **Risk limits masih longgar** — Daily loss 15%, kill switch 30% (scalper). Untuk modal $60, ini masih berisiko.

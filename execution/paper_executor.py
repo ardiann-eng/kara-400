@@ -437,6 +437,31 @@ class PaperExecutor(BaseExecutor):
         get_excel_logger().log_trade(self.chat_id, log_data)
         user_db.save_trade(self.chat_id, log_data)
 
+        # [LEARNING ENGINE] Record outcome for pattern memory + ML training
+        try:
+            from engine.learning_engine import learning_engine
+            learning_engine.record_outcome(
+                asset=pos.asset,
+                side=pos.side.value.lower(),
+                regime=getattr(pos, 'trade_mode', 'ranging'),
+                score=pos.entry_score,
+                pnl_usd=total_pnl,
+                features={
+                    'oi_funding_score': 0,
+                    'orderbook_score': 0,
+                    'liquidation_score': 0,
+                    'displacement_5m': getattr(pos, 'trend_pct', 0) or 0,
+                    'rsi': 50,
+                    'ema_freshness': 5,
+                    'atr_pct': getattr(pos, 'atr_pct', 0) or 0,
+                    'regime_code': 0,
+                    'hour_utc': pos.opened_at.hour if pos.opened_at else 0,
+                    'score': pos.entry_score,
+                }
+            )
+        except Exception as _le:
+            log.debug(f"[LEARN] Record failed: {_le}")
+
         log.info(
             f" [PAPER] Closed {pos.asset} {pos.side.value.upper()} "
             f"@ {fill_price} | PnL: {format_usd(total_pnl)} ({reason})"

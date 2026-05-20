@@ -276,35 +276,37 @@ class ScalperConfig:
     # RR enforcement: TP1 minimum = sl_pct × tp1_min_rr ; TP2 minimum = sl_pct × tp2_min_rr
     tp1_min_rr_to_sl:        float = 0.6      # TP1 ≥ 0.6× SL distance
     tp2_min_rr_to_sl:        float = 1.5      # TP2 ≥ 1.5× SL distance (positive RR enforcement)
-    tp1_pct:                 float = 0.0040   # [F4 FIX 2026-05-18] 0.60%→0.40%: trailing activates sooner, more winners locked
+    tp1_pct:                 float = 0.0025   # [PROFIT-LOCK] 0.25% — achievable dalam 2-4m (was 0.40%)
     tp2_pct:                 float = 0.0100   # [AUDIT] 1.25%→1.00%: more achievable in 20m
     trailing_pct:            float = 0.0040   # [AUDIT] 0.50%→0.40%: tighter trail
 
     # ── [C4 FIX] Timing — potong grace period drastis ──
     # Sebelum: 20m + 35m grace = 55m max hold → 23 big losses dari posisi yang terseret
     # Sesudah: 20m + 10m grace = 30m max hold → cut loss lebih cepat
-    max_hold_minutes:        float = 20.0     # force close after 20min if no TP hit
-    max_hold_grace_minutes:  float = 10.0     # [AUDIT] 35→10m: grace HANYA untuk posisi yang pernah profit
-    max_hold_soft_floor_pct: float = -0.010   # [AUDIT] -2%→-1%: cut loss lebih cepat (1%×15x = -15% ROE)
+    max_hold_minutes:        float = 15.0     # [PROFIT-LOCK] 15m max (was 20m) — cukup untuk TP1 + trailing
+    max_hold_grace_minutes:  float = 5.0      # [PROFIT-LOCK] 5m grace hanya untuk runner (was 10m)
+    max_hold_soft_floor_pct: float = -0.010   # cut loss jika -1% (1%×15x = -15% ROE)
 
     # ── [TIME EXIT REDESIGN 2026-05-18] ──────────────────────────────────────
-    # Early profit-lock: aktifkan trailing sebelum TP1 jika sudah profit cukup
-    time_exit_early_trail_pct:   float = 0.003   # 0.3% floating → aktifkan trailing
-    time_exit_early_trail_width: float = 0.0015  # trail width 0.15% dari peak
-    # Early loss cut: jangan tunggu max_hold jika posisi langsung turun
-    time_exit_early_loss_pct:    float = -0.008  # -0.8% floating → cut segera (was -0.5%, terlalu sensitif)
-    time_exit_early_loss_mins:   float = 10.0    # setelah 10m hold (was 8m, kasih ruang lebih)
+    # [PROFIT-LOCK REDESIGN 2026-05-20] Trailing aktif JAUH lebih awal.
+    # Data: trailing_stop 100% WR tapi hanya 3.5% trades. Masalah = threshold terlalu tinggi.
+    # Fix: aktifkan trailing di +0.15% (1 menit move), lock profit segera.
+    time_exit_early_trail_pct:   float = 0.0015   # 0.15% floating → trailing aktif (was 0.3%)
+    time_exit_early_trail_width: float = 0.0010   # 0.10% trail width dari peak (was 0.15%)
+    # Early loss cut: jangan tunggu lama jika sinyal salah
+    time_exit_early_loss_pct:    float = -0.004   # -0.4% floating → cut (was -0.8%)
+    time_exit_early_loss_mins:   float = 5.0      # 5m verdict window (was 10m)
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold — HARD THRESHOLD SCALPER (TIDAK BISA DIUBAH USER)
-    min_score_to_enter:      int   = 48       # [FIX 2026-05-18] Was 57. Lowered because session bonus no longer inflates score (+14→+4 max). Raw score 48 + session threshold adj = effective ~55 during NY.
-    signal_cooldown_minutes: int   = 5        # 5 min cooldown scalper
+    min_score_to_enter:      int   = 45       # [OPPORTUNITY SCORING 2026-05-20] New scoring produces lower raw scores (setup-based). Threshold 45 = requires at least OI(15)+OB(10)+EMA(5) or equivalent. Effective threshold higher with regime/session adjustments.
+    signal_cooldown_minutes: int   = 10       # [PROFIT-LOCK] 10m cooldown (was 5m) — kurangi overtrading 50%
     mtf_confirm_enabled:     bool  = True     # require 15m trend confirmation
     mtf_confirm_interval:    str   = "15m"
     mtf_confirm_lookback:    int   = 32       # ~8h on 15m candles
 
     # Concurrent positions
-    max_concurrent_positions: int  = 5        # max 5 scalper positions
+    max_concurrent_positions: int  = 3        # [PROFIT-LOCK] fokus 3 terbaik (was 5)
 
     # Partial TP ratios (scalper: heavier close at TP1/TP2 given tight hold window)
     tp1_close_ratio:         float = 0.50     # 50% on TP1
@@ -357,8 +359,8 @@ class ScalperConfig:
 
     # ── Early trailing: lock profit sebelum TP1 ──
     early_trail_enabled:         bool  = True
-    early_trail_activation_pct:  float = 0.003  # [AUDIT] 0.4%→0.3%: lock profit lebih awal
-    early_trail_distance_pct:    float = 0.002  # [AUDIT] 0.3%→0.2%: tighter trail
+    early_trail_activation_pct:  float = 0.0015  # [PROFIT-LOCK] 0.15% → lock (was 0.3%)
+    early_trail_distance_pct:    float = 0.0010  # [PROFIT-LOCK] 0.10% trail (was 0.2%)
 
     # ── Quick-profit exit: langsung close saat profit signifikan + harga berbalik ──
     # Di Hyperliquid banyak asset max leverage 3-5x → ROE per % move kecil.
@@ -366,12 +368,11 @@ class ScalperConfig:
     # Logic: jika floating >= quick_profit_threshold DAN retrace dari peak >= quick_profit_retrace,
     # close FULL posisi langsung (tidak tunggu TP1/TP2/trail).
     quick_profit_enabled:         bool  = True
-    quick_profit_threshold_pct:   float = 0.008  # aktivasi saat floating >= 0.8% price move
-    quick_profit_retrace_pct:     float = 0.003  # exit jika harga retrace 0.3% dari peak
-    # Leverage-aware scaling: semakin rendah leverage, threshold lebih kecil
-    # (karena ROE per % kecil, harus ambil profit lebih cepat)
-    quick_profit_low_lev_threshold: float = 0.005  # threshold untuk leverage <= 5x
-    quick_profit_low_lev_retrace:   float = 0.002  # retrace lebih ketat saat leverage rendah
+    quick_profit_threshold_pct:   float = 0.0035  # [PROFIT-LOCK] 0.35% (was 0.8%) — ambil profit lebih awal
+    quick_profit_retrace_pct:     float = 0.0012  # [PROFIT-LOCK] 0.12% retrace dari peak → close (was 0.3%)
+    # Leverage-aware: low leverage = ambil profit lebih cepat
+    quick_profit_low_lev_threshold: float = 0.0025  # 0.25% untuk lev <= 5x (was 0.5%)
+    quick_profit_low_lev_retrace:   float = 0.0010  # 0.10% retrace (was 0.2%)
 
     # ── [C5 FIX] Partial profit & breakeven — turunkan threshold ──
     # Sebelum: TP1=1.0×SL, TP2=1.5×SL, Trail=2.0×SL → hampir tidak tercapai (2/108 trade)
