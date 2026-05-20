@@ -1002,7 +1002,7 @@
       <div id="page-bot-brain" class="page">
         <!-- Stats Cards -->
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-          <div class="glass stat-card p-4">
+          <div class="glass stat-card p-4 cursor-pointer" onclick="showAllPatterns()" title="Klik untuk lihat semua pattern">
             <div class="stat-label">Patterns Learned</div>
             <div class="stat-value" id="brain-patterns">0</div>
           </div>
@@ -1641,6 +1641,49 @@
       if (S.page === 'overview') loadOverview();
     }, 10000);
     loadOverview();
+
+    // ── PATTERNS MODAL ──────────────────────────────────────────────────
+    async function showAllPatterns() {
+      let modal = document.getElementById('patterns-modal');
+      if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'patterns-modal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+        modal.innerHTML = `<div class="glass" style="width:100%;max-width:640px;max-height:80vh;overflow:hidden;display:flex;flex-direction:column">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid rgba(196,181,253,.08)">
+            <span class="font-display font-semibold text-white">All Learned Patterns</span>
+            <button onclick="document.getElementById('patterns-modal').remove()" style="color:rgba(196,181,253,.5);font-size:20px;background:none;border:none;cursor:pointer">x</button>
+          </div>
+          <div id="patterns-modal-body" style="overflow-y:auto;padding:16px 20px;font-size:12px;font-family:monospace">
+            <div style="color:rgba(196,181,253,.3)">Loading...</div>
+          </div>
+        </div>`;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+      }
+      document.body.appendChild(modal);
+      try {
+        const patterns = await api('/api/admin/learning/patterns');
+        const body = document.getElementById('patterns-modal-body');
+        if (!patterns.length) { body.innerHTML = '<div style="color:rgba(196,181,253,.3)">No patterns yet.</div>'; return; }
+        const rows = patterns.map(p => {
+          const wr = parseFloat(p.wr);
+          const wrColor = wr >= 0.65 ? '#34d399' : wr <= 0.35 ? '#f87171' : 'rgba(196,181,253,.7)';
+          const pnlColor = p.pnl >= 0 ? '#34d399' : '#f87171';
+          const sign = p.pnl >= 0 ? '+' : '';
+          return `<div style="color:rgba(196,181,253,.8);padding:4px 0">${p.key}</div>
+            <div style="color:${wrColor};text-align:right">${(wr*100).toFixed(0)}%</div>
+            <div style="color:rgba(196,181,253,.5);text-align:right">${p.n}</div>
+            <div style="color:${pnlColor};text-align:right">${sign}$${p.pnl.toFixed(2)}</div>`;
+        }).join('');
+        body.innerHTML = `<div style="display:grid;grid-template-columns:1fr auto auto auto;gap:4px 16px;align-items:center">
+          <div style="color:rgba(196,181,253,.4);font-size:11px;padding-bottom:8px;border-bottom:1px solid rgba(196,181,253,.08)">Pattern</div>
+          <div style="color:rgba(196,181,253,.4);font-size:11px;text-align:right;padding-bottom:8px;border-bottom:1px solid rgba(196,181,253,.08)">WR</div>
+          <div style="color:rgba(196,181,253,.4);font-size:11px;text-align:right;padding-bottom:8px;border-bottom:1px solid rgba(196,181,253,.08)">n</div>
+          <div style="color:rgba(196,181,253,.4);font-size:11px;text-align:right;padding-bottom:8px;border-bottom:1px solid rgba(196,181,253,.08)">PnL</div>
+          ${rows}</div>`;
+      } catch(e) { document.getElementById('patterns-modal-body').innerHTML = `<div style="color:#f87171">Error: ${e.message}</div>`; }
+    }
 
     // ── BOT BRAIN PAGE ──────────────────────────────────────────────────
     let brainWs = null;
