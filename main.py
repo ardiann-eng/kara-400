@@ -1001,6 +1001,7 @@ class KaraBot:
             scored_count = 0
             blocked_count = 0  # assets blocked by schedule (BLOCKED_HOURS_UTC)
             top_scorers = []  # List of (asset, score)
+            all_signals_batch = []  # [RANKED EXECUTION] Collect all signals, execute top-N per user
 
             async def _scan_one(asset, scalper_only=False):
                 nonlocal max_score, sig_count, scored_count, blocked_count
@@ -1013,7 +1014,9 @@ class KaraBot:
 
                         if signals_dict:
                             sig_count += len(signals_dict)
-                            await self._handle_signals(signals_dict)
+                            # [RANKED EXECUTION] Collect signals, don't execute yet
+                            for mode, sig in signals_dict.items():
+                                all_signals_batch.append((sig.score, sig))
 
                         # Sentinel -1 = blocked by BLOCKED_HOURS_UTC schedule
                         if asset_max_score == -1:
@@ -1043,6 +1046,17 @@ class KaraBot:
 
             tasks = [_scan_one(asset, scalper_only=(asset in scalper_only_assets)) for asset in assets_to_scan]
             await asyncio.gather(*tasks)
+
+            # ── [RANKED EXECUTION] Sort signals by score, execute top-N per user ──
+            if all_signals_batch:
+                all_signals_batch.sort(key=lambda x: x[0], reverse=True)  # highest score first
+                ranked_signals = [sig for _, sig in all_signals_batch]
+                log.info(
+                    f"[RANKED] {len(ranked_signals)} signals ranked. "
+                    f"Top: {', '.join(f'{s.asset}={s.score}' for s in ranked_signals[:5])}"
+                )
+                for sig in ranked_signals:
+                    await self._handle_signals({"scalper": sig})
 
             scan_elapsed = time.monotonic() - scan_start
 
