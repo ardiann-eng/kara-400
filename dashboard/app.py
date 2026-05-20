@@ -1099,6 +1099,66 @@ async def api_learning_patterns():
     return JSONResponse(patterns)
 
 
+@app.get("/api/admin/learning/ml_insights")
+async def api_ml_insights():
+    """Get ML model feature importance and prediction distribution."""
+    from engine.learning_engine import learning_engine
+    learning_engine.load()
+
+    if not learning_engine._model_ready or learning_engine._model is None:
+        return JSONResponse({
+            "ready": False,
+            "training_count": learning_engine._training_count,
+            "needed": 200,
+        })
+
+    feature_names = [
+        'oi_funding_score', 'orderbook_score', 'liquidation_score',
+        'displacement_5m', 'rsi', 'ema_freshness', 'atr_pct',
+        'regime_code', 'hour_utc', 'score'
+    ]
+    importances = learning_engine._model.feature_importances_.tolist()
+    feature_imp = sorted(
+        [{"feature": f, "importance": round(i, 4)} for f, i in zip(feature_names, importances)],
+        key=lambda x: -x["importance"]
+    )
+
+    # Load recent predictions from training data
+    try:
+        from core.db import user_db
+        rows = user_db.load_training_data()
+        import json as _json
+        import numpy as np
+        X = []
+        outcomes = []
+        for features_json, outcome, _ in rows[-500:]:
+            f = _json.loads(features_json) if isinstance(features_json, str) else features_json
+            X.append([f.get(k, 0.0) for k in feature_names])
+            outcomes.append(outcome)
+        if X:
+            probs = learning_engine._model.predict_proba(np.array(X, dtype=np.float32))[:, 1].tolist()
+            dist = {"high": sum(1 for p in probs if p > 0.65),
+                    "medium": sum(1 for p in probs if 0.35 <= p <= 0.65),
+                    "low": sum(1 for p in probs if p < 0.35),
+                    "total": len(probs)}
+            correct = sum(1 for p, o in zip(probs, outcomes) if (p > 0.5) == bool(o))
+            accuracy = round(correct / len(probs), 3) if probs else 0
+        else:
+            dist = {"high": 0, "medium": 0, "low": 0, "total": 0}
+            accuracy = 0
+    except Exception:
+        dist = {"high": 0, "medium": 0, "low": 0, "total": 0}
+        accuracy = 0
+
+    return JSONResponse({
+        "ready": True,
+        "training_count": learning_engine._training_count,
+        "accuracy": accuracy,
+        "feature_importance": feature_imp,
+        "prediction_distribution": dist,
+    })
+
+
 @app.websocket("/ws/admin/reasoning")
 async def ws_admin_reasoning(websocket: WebSocket):
     """WebSocket for real-time reasoning updates."""

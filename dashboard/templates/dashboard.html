@@ -1047,6 +1047,29 @@
           </div>
         </div>
 
+        <!-- ML Insights -->
+        <div class="glass p-4 md:p-6 mb-4" id="ml-insights-section">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="font-display text-base font-semibold text-white">ML Model Insights</h2>
+            <span id="ml-status-badge" class="text-xs px-2 py-1 rounded" style="background:rgba(196,181,253,.1);color:rgba(196,181,253,.5)">Not ready</span>
+          </div>
+          <div id="ml-not-ready" style="color:rgba(196,181,253,.3);font-size:13px">
+            Model belum aktif. Butuh <span id="ml-trades-needed">200</span> trades. Saat ini: <span id="ml-trades-current">0</span> trades.
+          </div>
+          <div id="ml-ready-content" style="display:none">
+            <!-- Feature Importance -->
+            <div class="mb-4">
+              <div class="text-xs uppercase tracking-widest mb-3" style="color:rgba(196,181,253,.4)">Feature Importance</div>
+              <div id="ml-feature-bars" style="display:flex;flex-direction:column;gap:6px"></div>
+            </div>
+            <!-- Prediction Distribution -->
+            <div>
+              <div class="text-xs uppercase tracking-widest mb-3" style="color:rgba(196,181,253,.4)">Prediction Distribution (last 500 trades)</div>
+              <div id="ml-pred-dist" style="display:flex;gap:12px;font-size:12px"></div>
+            </div>
+          </div>
+        </div>
+
         <!-- Decision Log Table -->
         <div class="glass overflow-hidden">
           <div class="flex items-center justify-between px-4 py-3" style="border-bottom:1px solid rgba(196,181,253,.05)">
@@ -1707,6 +1730,54 @@
           ? losers.map(p => `<div class="flex justify-between"><span style="color:#f87171">${p.key}</span><span class="font-mono text-white">WR ${p.wr} (n=${p.n}) $${p.pnl > 0 ? '+' : ''}${p.pnl}</span></div>`).join('')
           : '<span style="color:rgba(196,181,253,.3)">No data yet</span>';
       } catch (e) { console.warn('Brain stats error:', e); }
+
+      // ML Insights
+      try {
+        const ml = await api('/api/admin/learning/ml_insights');
+        const badge = document.getElementById('ml-status-badge');
+        const notReady = document.getElementById('ml-not-ready');
+        const readyContent = document.getElementById('ml-ready-content');
+        if (!ml.ready) {
+          document.getElementById('ml-trades-current').textContent = ml.training_count || 0;
+          document.getElementById('ml-trades-needed').textContent = ml.needed || 200;
+          badge.textContent = `${ml.training_count || 0}/200 trades`;
+          notReady.style.display = 'block';
+          readyContent.style.display = 'none';
+        } else {
+          badge.textContent = `Active — ${(ml.accuracy * 100).toFixed(1)}% accuracy`;
+          badge.style.background = 'rgba(52,211,153,.15)';
+          badge.style.color = '#34d399';
+          notReady.style.display = 'none';
+          readyContent.style.display = 'block';
+          // Feature importance bars
+          const maxImp = Math.max(...ml.feature_importance.map(f => f.importance));
+          document.getElementById('ml-feature-bars').innerHTML = ml.feature_importance.map(f => {
+            const pct = maxImp > 0 ? (f.importance / maxImp * 100).toFixed(0) : 0;
+            return `<div style="display:flex;align-items:center;gap:8px">
+              <div style="width:120px;font-size:11px;color:rgba(196,181,253,.6);text-align:right;flex-shrink:0">${f.feature}</div>
+              <div style="flex:1;background:rgba(196,181,253,.08);border-radius:4px;height:8px">
+                <div style="width:${pct}%;background:#c4b5fd;border-radius:4px;height:8px"></div>
+              </div>
+              <div style="width:40px;font-size:11px;color:rgba(196,181,253,.5)">${(f.importance * 100).toFixed(1)}%</div>
+            </div>`;
+          }).join('');
+          // Prediction distribution
+          const dist = ml.prediction_distribution;
+          document.getElementById('ml-pred-dist').innerHTML = `
+            <div class="glass-sm p-3 flex-1 text-center">
+              <div style="color:#34d399;font-size:18px;font-weight:600">${dist.high}</div>
+              <div style="color:rgba(196,181,253,.4);font-size:11px">High confidence<br>(P>65%)</div>
+            </div>
+            <div class="glass-sm p-3 flex-1 text-center">
+              <div style="color:#fbbf24;font-size:18px;font-weight:600">${dist.medium}</div>
+              <div style="color:rgba(196,181,253,.4);font-size:11px">Medium<br>(35-65%)</div>
+            </div>
+            <div class="glass-sm p-3 flex-1 text-center">
+              <div style="color:#f87171;font-size:18px;font-weight:600">${dist.low}</div>
+              <div style="color:rgba(196,181,253,.4);font-size:11px">Low confidence<br>(P<35%)</div>
+            </div>`;
+        }
+      } catch(e) { console.warn('ML insights error:', e); }
     }
 
     async function loadBrainDecisions() {
