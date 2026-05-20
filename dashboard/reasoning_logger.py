@@ -196,9 +196,9 @@ class ReasoningLogger:
         # Top winners and losers
         sorted_patterns = sorted(patterns.items(), key=lambda x: x[1].total_pnl)
         top_losers = [{"key": k, "wr": f"{v.ema_wr:.0%}", "n": v.n, "pnl": round(v.total_pnl, 2)}
-                      for k, v in sorted_patterns[:10] if v.n >= 3]
+                      for k, v in sorted_patterns[:10] if v.n >= 3 and v.total_pnl < 0]
         top_winners = [{"key": k, "wr": f"{v.ema_wr:.0%}", "n": v.n, "pnl": round(v.total_pnl, 2)}
-                       for k, v in sorted_patterns[-10:] if v.n >= 3]
+                       for k, v in reversed(sorted_patterns) if v.n >= 3 and v.total_pnl > 0][:10]
 
         return {
             **self._pattern_stats,
