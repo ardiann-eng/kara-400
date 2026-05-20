@@ -306,7 +306,7 @@ class ScalperConfig:
     mtf_confirm_lookback:    int   = 32       # ~8h on 15m candles
 
     # Concurrent positions
-    max_concurrent_positions: int  = 3        # [PROFIT-LOCK] fokus 3 terbaik (was 5)
+    max_concurrent_positions: int  = 5        # [RANKED] 5 posisi terbaik per cycle (ranked by score)
 
     # Partial TP ratios (scalper: heavier close at TP1/TP2 given tight hold window)
     tp1_close_ratio:         float = 0.50     # 50% on TP1
