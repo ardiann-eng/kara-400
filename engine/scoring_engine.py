@@ -562,10 +562,11 @@ class ScoringEngine:
             return None, score
 
         # ── [P0-3 FIX 2026-05-18] LIQUIDATION CASCADE ENTRY TRIGGER ───
-        # Untuk score marginal, butuh konfirmasi tambahan.
-        # Jika liquidation data tersedia → gunakan sebagai catalyst.
-        # Jika TIDAK tersedia (common di HL) → fallback ke minimum technical score.
-        if score < 55:
+        # ── [P0-3] LIQUIDATION CASCADE ENTRY TRIGGER ───
+        # Only block very low scores without liquidation catalyst.
+        # With opportunity scoring v2, typical good scores are 45-70.
+        # Gate at 35 = only block truly weak signals without any catalyst.
+        if score < 35:
             # Score sangat rendah — butuh liquidation catalyst ATAU strong technical
             _target_liq_side = "short" if side == Side.LONG else "long"
             _now_ts_liq = time.time()
@@ -613,7 +614,7 @@ class ScoringEngine:
                 'displacement_5m': trend_pct,
                 'rsi': 50,  # placeholder — actual RSI computed inside _calculate_scalper_score
                 'ema_freshness': 5,
-                'atr_pct': atr_pct_now,
+                'atr_pct': realized_vol or 0.01,
                 'regime_code': {'ranging': 0, 'trending': 1, 'late_trend': 2, 'volatile': 3}.get(_regime_cat, 0),
                 'hour_utc': datetime.now(timezone.utc).hour,
                 'score': score,
