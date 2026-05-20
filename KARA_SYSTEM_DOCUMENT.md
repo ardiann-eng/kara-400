@@ -9,51 +9,46 @@
 
 ## RINGKASAN PERUBAHAN TERBARU (2026-05-20)
 
-### Audit Findings (260 trades, 3.3 jam, 20 Mei 2026)
+### Audit Findings (220 trades, 8 jam, 20 Mei 2026)
 | Metric | Value |
 |---|---|
-| Win Rate | 47.7% |
-| Total PnL | −$26.39 |
-| Gross PnL (before fees) | **+$6.05** |
-| Total Fees (260 trades) | **$32.44** |
-| Profit Factor | 0.741 |
-| Score ↔ PnL correlation | **−0.145** (inverse!) |
+| Win Rate | 42.3% (93W / 127L) |
+| Total PnL | −$34.62 |
+| Profit Factor | 0.69 |
+| Avg Win | $0.84 |
+| Avg Loss | −$0.89 |
+| Score ↔ PnL correlation | **−0.2079** (inverse!) |
+| Worst exit | time_exit: 178 trades, 32% WR, −$65.51 |
+| Best exit | trailing_stop: 23 trades, 100% WR, +$30.65 |
 
-**Root causes:** Overtrading (79 trades/jam), score inverse predictive (high score = late entry = loss), exit simetris (93.5% time_exit), no directional filter.
+**Root causes:**
+1. **OI/Funding analyzer mati** — HL funding flat (97% asset < threshold), OI 51% zero, Liq 92% zero
+2. **Score inverse predictive** — Score 65+ = −$29.09 (22% WR), Score 55-59 = +$12.46 (51% WR)
+3. **Time-exit membunuh profit** — 81% trades keluar via time_exit (32% WR)
+4. **SHORT tidak bisa fire** — Liq gate + displacement penalty + threshold 62 = semua SHORT di-block
+5. **ML model tidak aktif** — `import time` missing di db.py → training_data selalu kosong
+6. **`db.py` missing `import time`** — `save_training_data()` dan `save_pattern_memory()` selalu throw NameError
 
-### Perubahan Implementasi
+### Perubahan Implementasi (Audit Fix 2026-05-20 Session 2)
 
 | Area | Sebelum | Sesudah | File |
 |---|---|---|---|
-| **Scoring philosophy** | Confirmation-based (lagging) | **Opportunity-based (leading)** | `engine/scoring_engine.py` |
-| Regime multiplier trending | ×1.2 (boost) | **×0.85 (penalty)** | `engine/scoring_engine.py` |
-| Regime multiplier late_trend | ×1.15 | **×0.70** | `engine/scoring_engine.py` |
-| EMA scoring | Always +12 | **Freshness-aware: fresh +10, stale −10** | `engine/scoring_engine.py` |
-| RSI scoring | Mean-reversion/momentum +10 | **Exhaustion penalty: extreme −8, neutral +5** | `engine/scoring_engine.py` |
-| CVD scoring | Always +12 if bullish | **Only +10 if DIVERGES from price** | `engine/scoring_engine.py` |
-| Displacement filter | −20 pts max (additive) | **×0.4 to ×1.1 (multiplicative)** | `engine/scoring_engine.py` |
-| Volume surge | +10 pts | **Removed** (lagging, no edge) | `engine/scoring_engine.py` |
-| min_score_to_enter | 48 | **45** | `config.py` |
-| signal_cooldown_minutes | 5 | **10** | `config.py` |
-| max_concurrent_positions | 5 | **3** | `config.py` |
-| tp1_pct | 0.40% | **0.25%** | `config.py` |
-| early_trail_activation | 0.30% | **0.15%** | `config.py` |
-| early_trail_distance | 0.20% | **0.10%** | `config.py` |
-| quick_profit_threshold | 0.80% | **0.35%** | `config.py` |
-| quick_profit_retrace | 0.30% | **0.12%** | `config.py` |
-| max_hold_minutes | 20 | **15** | `config.py` |
-| max_hold_grace | 10 | **5** | `config.py` |
-| time_exit_early_loss | −0.8% / 10m | **−0.4% / 5m** | `config.py` |
-| Score-driven max_hold thresholds | 66/61/56 | **70/60/50** | `risk/risk_manager.py` |
-| **Learning Engine** | — | **NEW: Pattern Memory + ML Model** | `engine/learning_engine.py` |
-| **Bot Brain Dashboard** | — | **NEW: Real-time reasoning flow** | `dashboard/` |
-| **Ranked Execution** | Execute sinyal pertama yang lolos | **Sort by score, execute top-N per user** | `main.py` |
-| **Minimum margin floor** | 0 (disabled) | **$8 minimum per trade** | `config.py`, `risk_manager.py` |
-| **Force scalper mode** | User bisa di standard mode | **Semua user di-force scalper saat startup** | `main.py` |
-| **P0-3 gate threshold** | score < 55 | **score < 35** (was blocking all signals) | `engine/scoring_engine.py` |
-| **quick_profit_threshold** | 0.80% | **0.35%** | `config.py` |
-| **quick_profit_retrace** | 0.30% | **0.12%** | `config.py` |
-| **Telegram close notification** | Plain text | **KARA theme dengan mood message** | `notify/telegram.py` |
+| **Funding data source** | Hyperliquid (97% flat/zero) | **Bybit API primary, HL fallback** | `data/hyperliquid_client.py`, `data/bybit_client.py` |
+| **OI data source** | HL only (51% zero) | **Bybit OI delta (dari /v5/market/tickers, 0 extra API calls)** | `data/hyperliquid_client.py`, `data/bybit_client.py` |
+| **Long/Short Ratio** | Tidak ada | **NEW: Bybit L/S ratio — contrarian crowd signal (±7-12 pts)** | `data/bybit_client.py`, `engine/scoring_engine.py` |
+| **RSI Divergence** | Tidak ada | **NEW: 1m vs 5m aggregated RSI divergence (±8 pts, 0 API calls)** | `engine/scoring_engine.py` |
+| **early_trail_activation** | 0.15% | **0.25%** (sweet spot, less noise trigger) | `config.py` |
+| **early_trail_distance** | 0.10% | **0.15%** (wider = less false trigger) | `config.py` |
+| **quick_profit_threshold** | 0.35% | **0.20%** (tangkap profit kecil sebelum time-exit) | `config.py` |
+| **quick_profit_retrace** | 0.12% | **0.10%** | `config.py` |
+| **time_exit_early_loss_pct** | −0.4% | **−0.2%** (cut loser lebih cepat) | `config.py` |
+| **time_exit_early_loss_mins** | 5m | **3m** (verdict lebih cepat) | `config.py` |
+| **P0-3 Liquidation Gate** | Block score<35 tanpa liq data | **DISABLED** (liq data selalu 0) | `engine/scoring_engine.py` |
+| **Displacement penalty SHORT** | Drop 0.3% = penalty ×0.80 | **Drop 0.3-1.0% = bonus ×1.05 (trend confirm). Penalty hanya >1.5%** | `engine/scoring_engine.py` |
+| **min_score_short_signal** | 62 | **52** (realistis untuk bear market) | `config.py` |
+| **`import time` in db.py** | Missing | **Added** — fixes ML training data persistence | `core/db.py` |
+| **Bybit executor learning** | Tidak ada record_outcome() | **Added** — ML data collection untuk live mode | `execution/bybit_executor.py` |
+| **Pattern memory UI** | Plain text (WR + PnL) | **Interactive cards + action badges (+12pts, −10pts, FLIP)** | `dashboard/templates/dashboard.html`, `dashboard/reasoning_logger.py` |
 
 ---
 
@@ -96,7 +91,28 @@ Data WS disimpan di `MarketDataCache` dalam RAM:
 Beberapa data yang disebutkan dalam kode tapi **tidak diimplementasikan** atau tidak connected:
 - Spot price dari exchange lain (hanya pakai `allMids` Hyperliquid sebagai proxy spot)
 - Order book depth dari level di luar top 20
-- Long/Short ratio dari sumber eksternal
+- ~~Long/Short ratio dari sumber eksternal~~ → **SEKARANG ADA dari Bybit** (2026-05-20)
+- Whale wallet tracking (butuh on-chain indexer)
+
+### 1.4 Sumber Data Bybit (BARU 2026-05-20)
+
+KARA sekarang menggunakan Bybit sebagai **data enrichment** untuk fundamental signals:
+
+| Data | Endpoint Bybit | Cache | Dipakai Untuk |
+|---|---|---|---|
+| **Funding Rate** | `/v5/market/tickers` (field `fundingRate`) | 30 detik | OI/Funding Analyzer — menggantikan HL funding yang flat (97% = 0) |
+| **Open Interest** | `/v5/market/tickers` (field `openInterest`) | 30 detik | OI delta calculation (curr vs prev snapshot) |
+| **Long/Short Ratio** | `/v5/market/account-ratio` | 60 detik | Contrarian crowd signal — fade the crowd (±7-12 pts) |
+
+**Efisiensi:** Funding + OI dari **1 API call** (same response). L/S ratio = 1 call per asset (top 20, concurrent semaphore 5).
+
+**Fallback:** Jika asset tidak ada di Bybit (HL-only coins seperti PURR, NIL, FOGO) → fallback ke HL data.
+
+**Kenapa Bybit lebih informatif:**
+- HL funding: standard rate 0.00125%/8h untuk 97% asset (flat, no signal)
+- Bybit funding: varies 0.001%-0.05%/8h — 8× lebih banyak variasi
+- HL OI: banyak asset tidak berubah dalam 5 menit (volume kecil)
+- Bybit OI: volume 10-50× lebih besar → delta lebih signifikan
 
 ---
 
@@ -131,13 +147,15 @@ Filosofi baru: **score tinggi = move BELUM terjadi tapi kondisi ripe**. Leading 
 
 Scoring dibagi 3 layer:
 
-#### Layer 1: SETUP (Leading Indicators — max ~58 pts)
+#### Layer 1: SETUP (Leading Indicators — max ~70 pts)
 
 | Komponen | Max Pts | Logika |
 |---|---|---|
 | **OI/Funding** | ±28 | Uang baru masuk = move ABOUT to happen |
 | **Orderbook Wall** | ±18 | Pressure building, belum breakout |
 | **Liquidation** | ±12 | Cascade potential = catalyst |
+| **Bybit L/S Ratio** | ±12 | Crowd heavily positioned = contrarian fade (NEW 2026-05-20) |
+| **RSI Divergence (1m vs 5m)** | ±8 | Price↓ + RSI recovering = reversal (NEW 2026-05-20) |
 
 #### Layer 2: CONFIRMATION (Lagging — range −15 to +25 pts)
 
@@ -154,13 +172,21 @@ Scoring dibagi 3 layer:
 
 #### Layer 3: DISPLACEMENT MULTIPLIER (Anti-Chase)
 
-| Price already moved (our direction) | Multiplier |
+**LONG direction:**
+| Price already moved UP | Multiplier |
 |---|---|
 | > 0.8% | **×0.40** (very stale) |
 | > 0.5% | **×0.60** (stale) |
 | > 0.3% | **×0.80** (mild) |
-| < −0.2% (counter-displacement) | **×1.10** (fresh entry bonus) |
-| Otherwise | ×1.00 |
+| < −0.2% (price dropping = fresh LONG) | **×1.10** |
+
+**SHORT direction (FIXED 2026-05-20 — was penalizing trend confirmation):**
+| Price already moved DOWN | Multiplier |
+|---|---|
+| > 1.5% drop | **×0.50** (exhaustion, bounce risk) |
+| > 1.0% drop | **×0.70** (extended) |
+| 0.3-1.0% drop | **×1.05** (trend confirmed = BONUS) |
+| Price rising (counter-trend) | **×0.70** (wrong direction for SHORT) |
 
 #### Formula Akhir
 
@@ -440,8 +466,8 @@ Jika tidak ada 3-of-4 consensus → signal tidak dibuat (`return None, score`).
 |---|---|---|---|
 | Standard | LONG | Score ≥ 55 (config), tapi kode engine pakai 62 | Score ≥ 60 (user config, locked) |
 | Standard | SHORT | **Score ≥ 62** (naik dari 57, fix 2026-05-14) | **Score ≥ 62** |
-| Scalper | LONG | Score ≥ 60 (HARD, tidak bisa diubah user) | Score ≥ 60 |
-| Scalper | SHORT | **Score ≥ 62** (naik dari 57) | **Score ≥ 62** |
+| Scalper | LONG | Score ≥ 45 (HARD, tidak bisa diubah user) | Score ≥ 45 |
+| Scalper | SHORT | **Score ≥ 52** (turun dari 62, fix 2026-05-20 — SHORT harus bisa fire di bear market) | **Score ≥ 52** |
 
 **Catatan penting:** Ada inkonsistensi antara `config.SIGNAL.min_score_to_signal = 55` dan kode di `_run_standard()` yang hardcode threshold 62. Yang berlaku efektif adalah **62** untuk standard mode LONG.
 
@@ -1120,34 +1146,36 @@ Semua posisi akan ditutup di harga market saat ini.
 
 ---
 
-## VERDICT (Update 2026-05-20)
+## VERDICT (Update 2026-05-20 Session 2)
 
 ### Perubahan Fundamental
 
-Bot mengalami **redesign scoring dari nol** berdasarkan audit 260 trades yang menunjukkan score inverse predictive (r=−0.145). Perubahan utama:
+Audit kedua (220 trades, 8 jam) mengungkap masalah yang lebih dalam dari audit pertama:
 
-1. **Opportunity Scoring v2** — Score sekarang mengukur "potensi move yang BELUM terjadi" bukan "berapa banyak indikator yang sudah agree". Leading indicators (OI, OB wall) dominan, lagging indicators (EMA, RSI) bisa negatif jika stale.
+1. **Data Source Revolution** — Hyperliquid funding/OI data ternyata flat (97% = 0). Sekarang pakai **Bybit sebagai primary data source** untuk funding rate, OI delta, dan Long/Short ratio. Satu API call Bybit = 3 data points yang sebelumnya mati.
 
-2. **Profit-Lock Exit System** — Trailing aktif di +0.15% (bukan +0.3%), TP1 turun ke 0.25% (achievable dalam 2-4 menit), early loss cut di −0.4%/5m. Tujuan: convert 93.5% time_exit menjadi trailing_stop (100% WR).
+2. **SHORT Unblocked** — Tiga filter yang secara kolektif memblok SEMUA SHORT signal diperbaiki: P0-3 liq gate disabled, displacement penalty dibalik untuk SHORT (drop = confirm bukan stale), threshold turun 62→52.
 
-3. **Learning Engine** — Bot belajar dari setiap trade. Pattern memory (aktif setelah 5 trades) bisa flip side atau penalty score. ML model (aktif setelah 200 trades) prediksi P(win) dan adjust sizing.
+3. **RSI Divergence** — Multi-timeframe momentum detection dari data yang sudah ada (1m candles di-aggregate jadi 5m, zero API calls). Deteksi reversal lebih awal.
 
-4. **Overtrading Fix** — Cooldown 5→10m, max positions 5→3. Estimasi: fee turun dari $32 ke ~$13 per session.
+4. **ML Model Fixed** — Bug `import time` missing di db.py menyebabkan training data tidak pernah tersimpan selama berhari-hari. Sekarang fixed + bybit_executor juga record outcomes.
 
-5. **Bot Brain Dashboard** — Admin bisa lihat real-time bagaimana bot "berpikir": setiap keputusan di-trace dari signal → learning → filters → execute/skip.
+5. **Exit System Retuned** — Quick profit 0.20% (dari 0.35%), early trail 0.25%/0.15% (dari 0.15%/0.10%), early loss cut -0.2%/3m (dari -0.4%/5m).
 
 ### Expected Impact
 
-| Metric | Sebelum | Target |
+| Metric | Sebelum (audit 2) | Target |
 |---|---|---|
-| Expectancy/trade | −$0.10 | +$0.10 to +$0.20 |
-| Profit factor | 0.74 | 1.2-1.5 |
-| Trades/jam | 79 | 15-25 |
-| Fee/session (3h) | $32 | $5-8 |
-| Trailing stop fire rate | 3.5% | 40-60% |
+| OI/Funding active signals | 3% (HL) | ~40% (Bybit) |
+| SHORT capability | 0 trades (all blocked) | 10-20% of trades |
+| Score↔PnL correlation | −0.21 (inverse) | >0 (positive) |
+| time_exit dominance | 81% of trades | <50% |
+| trailing_stop fire rate | 10% | 30-50% |
+| Profit factor | 0.69 | 1.2-1.5 |
 
 ### Risiko yang Tersisa
 
-- **Learning engine cold start** — Pattern memory butuh 5 trades per pattern sebelum aktif. Minggu pertama masih "buta".
-- **Scoring terlalu ketat?** — Threshold 45 + displacement penalty bisa membuat bot jarang trade di market sideways. Perlu monitor.
-- **Risk limits masih longgar** — Daily loss 15%, kill switch 30% (scalper). Untuk modal $60, ini masih berisiko.
+- **Bybit API dependency** — Jika Bybit down, fallback ke HL (flat). Perlu monitor.
+- **SHORT overtrade risk** — Threshold 52 mungkin terlalu rendah di bull market. Monitor WR per minggu.
+- **L/S ratio rate limit** — 20 assets × 1 call = 20 calls/60s. Bybit limit = 120/min. Safe tapi perlu monitor.
+- **ML cold start** — Training data baru mulai collect sekarang. Model aktif setelah ~200 trades (~1 hari).

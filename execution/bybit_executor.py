@@ -219,6 +219,32 @@ class BybitExecutor(BaseExecutor):
             pos.closed_at = utcnow()
             self._positions.pop(pos.id, None)
 
+            # [AUDIT FIX 2026-05-20] Learning engine was never called from bybit_executor
+            # → training_data always empty → ML model never activates
+            try:
+                from engine.learning_engine import learning_engine
+                learning_engine.record_outcome(
+                    asset=pos.asset,
+                    side=pos.side.value.lower(),
+                    regime=getattr(pos, 'trade_mode', 'ranging'),
+                    score=getattr(pos, 'entry_score', 50),
+                    pnl_usd=pnl,
+                    features={
+                        'oi_funding_score': 0,
+                        'orderbook_score': 0,
+                        'liquidation_score': 0,
+                        'displacement_5m': 0,
+                        'rsi': 50,
+                        'ema_freshness': 5,
+                        'atr_pct': getattr(pos, 'entry_atr', 0) or 0,
+                        'regime_code': 0,
+                        'hour_utc': pos.opened_at.hour if pos.opened_at else 0,
+                        'score': getattr(pos, 'entry_score', 50),
+                    }
+                )
+            except Exception as e:
+                log.debug(f"[LEARN] record_outcome failed: {e}")
+
         result = {
             "position_id": pos.id,
             "symbol": symbol,

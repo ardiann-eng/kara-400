@@ -187,17 +187,32 @@ class ReasoningLogger:
         }
 
     def get_pattern_stats(self) -> Dict:
-        """Get pattern memory stats."""
+        """Get pattern memory stats with action indicators."""
         from engine.learning_engine import learning_engine
         learning_engine.load()
         patterns = learning_engine._patterns
         self._pattern_stats["total_patterns"] = len(patterns)
 
-        # Top winners and losers
+        def _action_label(wr, n):
+            """Show what the learning engine DOES with this pattern."""
+            if n < 5:
+                return "📊 collecting"
+            if wr >= 0.80 and n >= 8:
+                return "🚀 +12 pts"
+            if wr >= 0.65:
+                return "✅ +8 pts"
+            if wr < 0.25:
+                return "🔄 FLIP or -20 pts"
+            if wr < 0.40:
+                return "⚠️ -10 pts"
+            return "— neutral"
+
         sorted_patterns = sorted(patterns.items(), key=lambda x: x[1].total_pnl)
-        top_losers = [{"key": k, "wr": f"{v.ema_wr:.0%}", "n": v.n, "pnl": round(v.total_pnl, 2)}
+        top_losers = [{"key": k, "wr": f"{v.ema_wr:.0%}", "n": v.n, "pnl": round(v.total_pnl, 2),
+                       "action": _action_label(v.ema_wr, v.n)}
                       for k, v in sorted_patterns[:10] if v.n >= 3 and v.total_pnl < 0]
-        top_winners = [{"key": k, "wr": f"{v.ema_wr:.0%}", "n": v.n, "pnl": round(v.total_pnl, 2)}
+        top_winners = [{"key": k, "wr": f"{v.ema_wr:.0%}", "n": v.n, "pnl": round(v.total_pnl, 2),
+                        "action": _action_label(v.ema_wr, v.n)}
                        for k, v in reversed(sorted_patterns) if v.n >= 3 and v.total_pnl > 0][:10]
 
         return {

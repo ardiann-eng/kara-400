@@ -66,6 +66,10 @@ class ScoringEngine:
         # Semaphores for rate limiting (Task 4)
         self.candle_sem = asyncio.Semaphore(3)
 
+        # Bybit Long/Short Ratio cache: {symbol: ratio}, refreshed every 60s
+        self._ls_ratio_cache: Dict[str, float] = {}
+        self._ls_ratio_cache_time: float = 0
+
         # Cooldown tracking: asset_mode -> last signal timestamp
         self._last_signal_ts: Dict[str, float] = {}
 
@@ -393,6 +397,27 @@ class ScoringEngine:
         if not self._spot_prices or (now_mono - self._spot_cache_time) > 10:
             self._spot_prices = await self.client.get_all_mids()
             self._spot_cache_time = now_mono
+
+        # [AUDIT FIX 2026-05-20] Bybit Long/Short Ratio — contrarian crowd signal
+        _ls_ratio = None
+        if (now_mono - self._ls_ratio_cache_time) > 60:
+            try:
+                if not hasattr(self, '_bybit_ls_client'):
+                    from data.bybit_client import BybitClient
+                    import config as _cfg
+                    self._bybit_ls_client = BybitClient(
+                        api_key=_cfg.BYBIT_API_KEY, api_secret=_cfg.BYBIT_SECRET_KEY,
+                        testnet=_cfg.BYBIT_TESTNET,
+                    )
+                # Fetch top 20 assets only (rate limit friendly)
+                top_syms = [f"{a}USDT" for a in list(self._price_history.keys())[:20]]
+                if top_syms:
+                    self._ls_ratio_cache = await self._bybit_ls_client.get_long_short_ratios_batch(top_syms)
+                    self._ls_ratio_cache_time = now_mono
+            except Exception as _ls_err:
+                log.debug(f"[LS-RATIO] Fetch failed: {_ls_err}")
+        _ls_ratio = self._ls_ratio_cache.get(f"{asset}USDT")
+
         spot_price = self._spot_prices.get(f"@{asset}") or getattr(oi, 'oracle_price', 0) or mark_price
 
         # Price history + OI snapshot tracking (same as standard mode)
@@ -475,6 +500,7 @@ class ScoringEngine:
             fund_reasons=oi_reasons[:2], liq_reasons=liq_reasons[:2],
             out_components=_scalper_components,
             trend_pct=trend_pct,
+            ls_ratio=_ls_ratio,
         )
 
         # 4b2. Apply 4h regime adjustment to score and leverage
@@ -563,10 +589,10 @@ class ScoringEngine:
 
         # ── [P0-3 FIX 2026-05-18] LIQUIDATION CASCADE ENTRY TRIGGER ───
         # ── [P0-3] LIQUIDATION CASCADE ENTRY TRIGGER ───
-        # Only block very low scores without liquidation catalyst.
-        # With opportunity scoring v2, typical good scores are 45-70.
-        # Gate at 35 = only block truly weak signals without any catalyst.
-        if score < 35:
+        # [AUDIT FIX 2026-05-20] Liq gate disabled — liquidation data is always 0
+        # (WS liq events are extremely rare). This gate was blocking ALL SHORT signals.
+        # Re-enable only when liq data source is fixed.
+        if False:  # DISABLED
             # Score sangat rendah — butuh liquidation catalyst ATAU strong technical
             _target_liq_side = "short" if side == Side.LONG else "long"
             _now_ts_liq = time.time()
@@ -942,6 +968,7 @@ class ScoringEngine:
         fund_reasons: list = None, liq_reasons: list = None,
         out_components: dict = None,
         trend_pct: float = 0.0,
+        ls_ratio: float = None,
     ) -> Tuple[int, Side, List[str]]:
         """
         OPPORTUNITY SCORING v2 — measures UNTAPPED potential, not confirmation.
@@ -1183,6 +1210,37 @@ class ScoringEngine:
                 # Neutral RSI = price hasn't moved much = good for fresh entry
                 confirm_pts += 5; _c_rsi = 5
                 reasons.append(f"✅ RSI {rsi:.0f} neutral — fresh opportunity (+5)")
+
+        # ── SETUP LAYER 5: RSI Divergence (1m vs 5m aggregated — zero API calls) ──
+        # Bullish div: price lower low + RSI higher low = reversal UP
+        # Bearish div: price higher high + RSI lower high = reversal DOWN
+        _c_div = 0
+        if len(closes) >= 15:
+            # Aggregate 1m → 5m candles (groups of 5)
+            n5 = (len(closes) // 5) * 5
+            closes_5m = [closes[i+4] for i in range(0, n5, 5)]
+
+            if len(closes_5m) >= 4:
+                # 5m RSI (simple)
+                gains_5m = [max(closes_5m[i] - closes_5m[i-1], 0) for i in range(1, len(closes_5m))]
+                losses_5m = [max(closes_5m[i-1] - closes_5m[i], 0) for i in range(1, len(closes_5m))]
+                ag5 = sum(gains_5m) / len(gains_5m) if gains_5m else 0
+                al5 = sum(losses_5m) / len(losses_5m) if losses_5m else 0
+                rsi_5m = 100 - (100 / (1 + ag5/al5)) if al5 > 0 else (100 if ag5 > 0 else 50)
+
+                # Divergence: 1m price makes new low but 1m RSI > 5m RSI = bullish
+                price_falling = closes[-1] < closes_5m[-2] if len(closes_5m) >= 2 else False
+                price_rising = closes[-1] > closes_5m[-2] if len(closes_5m) >= 2 else False
+
+                if price_falling and rsi > rsi_5m + 10:
+                    # Bullish divergence: price down but 1m RSI recovering faster than 5m
+                    bull_setup += 8; _c_div = 8
+                    reasons.append(f"📈 RSI divergence: price↓ but RSI 1m({rsi:.0f})>5m({rsi_5m:.0f}) — reversal UP +8")
+                elif price_rising and rsi < rsi_5m - 10:
+                    # Bearish divergence: price up but 1m RSI weakening vs 5m
+                    bear_setup += 8; _c_div = 8
+                    reasons.append(f"📉 RSI divergence: price↑ but RSI 1m({rsi:.0f})<5m({rsi_5m:.0f}) — reversal DOWN +8")
+
         # ── CONFIRMATION LAYER: CVD divergence (leading when price hasn't moved) ──
         recent_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
         if len(recent_trades) >= 20:
@@ -1214,6 +1272,24 @@ class ScoringEngine:
                     confirm_pts += 3; _c_cvd = 3
                     reasons.append(f"❤️ CVD confirms ({cvd_ratio*100:.0f}%)")
 
+        # ── SETUP LAYER 4: Bybit Long/Short Ratio (CONTRARIAN — fade the crowd) ──
+        # Ratio > 1.5 = crowd heavily long → contrarian SHORT setup
+        # Ratio < 0.67 = crowd heavily short → contrarian LONG setup
+        # This is institutional-grade data not available on Hyperliquid.
+        if ls_ratio is not None and ls_ratio > 0:
+            if ls_ratio > 2.0:
+                bear_setup += 12
+                reasons.append(f"🐻 L/S ratio {ls_ratio:.2f} — crowd VERY long, fade SHORT +12")
+            elif ls_ratio > 1.5:
+                bear_setup += 7
+                reasons.append(f"🐻 L/S ratio {ls_ratio:.2f} — crowd long, SHORT tilt +7")
+            elif ls_ratio < 0.5:
+                bull_setup += 12
+                reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd VERY short, fade LONG +12")
+            elif ls_ratio < 0.67:
+                bull_setup += 7
+                reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd short, LONG tilt +7")
+
         # ── CONFIRMATION LAYER: MTF 15m Trend (small weight — 15m is slow for scalper) ──
         import config
         scfg = config.SCALPER
@@ -1229,26 +1305,43 @@ class ScoringEngine:
         # ── DISPLACEMENT PENALTY (multiplicative — the key anti-chase mechanism) ──
         # If price already moved significantly in our direction, the opportunity is STALE.
         # This is the #1 fix for "score inverse predictive" problem.
+        # [AUDIT FIX 2026-05-20] SHORT fix: mild drop (0.3-0.8%) = trend confirmation, not stale.
+        # Only penalize SHORT if drop > 1.5% (exhaustion/bounce risk).
         disp_mult = 1.0
         if len(closes) >= 6:
             price_5ago = closes[-6]
             if price_5ago > 0:
                 displacement = (closes[-1] - price_5ago) / price_5ago
-                # Check displacement in the DIRECTION we want to trade
                 dir_disp = displacement if bull_setup >= bear_setup else -displacement
 
-                if dir_disp > 0.008:       # >0.8% already moved our way = very stale
-                    disp_mult = 0.40
-                    reasons.append(f"🚫 Displacement {dir_disp*100:.2f}% — very stale (×0.40)")
-                elif dir_disp > 0.005:     # >0.5% = stale
-                    disp_mult = 0.60
-                    reasons.append(f"⚠️ Displacement {dir_disp*100:.2f}% — stale (×0.60)")
-                elif dir_disp > 0.003:     # >0.3% = mild
-                    disp_mult = 0.80
-                    reasons.append(f"📊 Displacement {dir_disp*100:.2f}% — mild (×0.80)")
-                elif dir_disp < -0.002:    # price moving AGAINST us = contrarian setup bonus
-                    disp_mult = 1.10
-                    reasons.append(f"✅ Counter-displacement {dir_disp*100:.2f}% — fresh entry (×1.10)")
+                if bull_setup >= bear_setup:
+                    # LONG: original logic — penalize chasing up
+                    if dir_disp > 0.008:
+                        disp_mult = 0.40
+                        reasons.append(f"🚫 Displacement {dir_disp*100:.2f}% — very stale (×0.40)")
+                    elif dir_disp > 0.005:
+                        disp_mult = 0.60
+                        reasons.append(f"⚠️ Displacement {dir_disp*100:.2f}% — stale (×0.60)")
+                    elif dir_disp > 0.003:
+                        disp_mult = 0.80
+                        reasons.append(f"📊 Displacement {dir_disp*100:.2f}% — mild (×0.80)")
+                    elif dir_disp < -0.002:
+                        disp_mult = 1.10
+                        reasons.append(f"✅ Counter-displacement {dir_disp*100:.2f}% — fresh entry (×1.10)")
+                else:
+                    # SHORT: only penalize extreme exhaustion (>1.5% drop = bounce risk)
+                    if dir_disp > 0.015:
+                        disp_mult = 0.50
+                        reasons.append(f"🚫 SHORT exhaustion {dir_disp*100:.2f}% — bounce risk (×0.50)")
+                    elif dir_disp > 0.010:
+                        disp_mult = 0.70
+                        reasons.append(f"⚠️ SHORT extended {dir_disp*100:.2f}% — caution (×0.70)")
+                    elif 0.003 < dir_disp <= 0.010:
+                        disp_mult = 1.05
+                        reasons.append(f"📉 SHORT trend confirmed {dir_disp*100:.2f}% (×1.05)")
+                    elif dir_disp < -0.002:
+                        disp_mult = 0.70
+                        reasons.append(f"⚠️ SHORT counter-trend {dir_disp*100:.2f}% — price rising (×0.70)")
 
         # ── FINAL SCORE ASSEMBLY ──────────────────────────────────────
         # Direction: determined by SETUP indicators (leading), not confirmation

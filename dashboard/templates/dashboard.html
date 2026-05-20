@@ -1724,10 +1724,38 @@
         const winners = d.patterns?.top_winners || [];
         const losers = d.patterns?.top_losers || [];
         document.getElementById('brain-winners').innerHTML = winners.length
-          ? winners.map(p => `<div class="flex justify-between"><span style="color:#34d399">${p.key}</span><span class="font-mono text-white">WR ${p.wr} (n=${p.n}) $${p.pnl > 0 ? '+' : ''}${p.pnl}</span></div>`).join('')
+          ? winners.map(p => {
+              const actionColor = p.action?.includes('+12') ? '#34d399' : p.action?.includes('+8') ? '#6ee7b7' : 'rgba(196,181,253,.4)';
+              const badge = p.action ? `<span style="background:${actionColor}20;color:${actionColor};padding:1px 6px;border-radius:4px;font-size:10px">${p.action}</span>` : '';
+              return `<div class="pattern-row" style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;margin-bottom:2px;transition:background .15s;cursor:default" onmouseenter="this.style.background='rgba(52,211,153,.06)'" onmouseleave="this.style.background='transparent'">
+                <div style="display:flex;flex-direction:column;gap:1px">
+                  <span style="color:#34d399;font-weight:500">${p.key}</span>
+                  <div style="display:flex;gap:6px;align-items:center">${badge}</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px">
+                  <div style="background:rgba(52,211,153,.12);border-radius:4px;padding:2px 8px"><span style="color:#34d399;font-size:11px;font-weight:600">${p.wr}</span></div>
+                  <span style="color:rgba(255,255,255,.4);font-size:10px">n=${p.n}</span>
+                  <span class="font-mono" style="color:#34d399;font-weight:600">$${p.pnl > 0 ? '+' : ''}${p.pnl.toFixed(2)}</span>
+                </div>
+              </div>`;
+            }).join('')
           : '<span style="color:rgba(196,181,253,.3)">No data yet (need 3+ trades per pattern)</span>';
         document.getElementById('brain-losers').innerHTML = losers.length
-          ? losers.map(p => `<div class="flex justify-between"><span style="color:#f87171">${p.key}</span><span class="font-mono text-white">WR ${p.wr} (n=${p.n}) $${p.pnl > 0 ? '+' : ''}${p.pnl}</span></div>`).join('')
+          ? losers.map(p => {
+              const actionColor = p.action?.includes('FLIP') ? '#f87171' : p.action?.includes('-10') ? '#fbbf24' : 'rgba(196,181,253,.4)';
+              const badge = p.action ? `<span style="background:${actionColor}20;color:${actionColor};padding:1px 6px;border-radius:4px;font-size:10px">${p.action}</span>` : '';
+              return `<div class="pattern-row" style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;margin-bottom:2px;transition:background .15s;cursor:default" onmouseenter="this.style.background='rgba(248,113,113,.06)'" onmouseleave="this.style.background='transparent'">
+                <div style="display:flex;flex-direction:column;gap:1px">
+                  <span style="color:#f87171;font-weight:500">${p.key}</span>
+                  <div style="display:flex;gap:6px;align-items:center">${badge}</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px">
+                  <div style="background:rgba(248,113,113,.12);border-radius:4px;padding:2px 8px"><span style="color:#f87171;font-size:11px;font-weight:600">${p.wr}</span></div>
+                  <span style="color:rgba(255,255,255,.4);font-size:10px">n=${p.n}</span>
+                  <span class="font-mono" style="color:#f87171;font-weight:600">$${p.pnl > 0 ? '+' : ''}${p.pnl.toFixed(2)}</span>
+                </div>
+              </div>`;
+            }).join('')
           : '<span style="color:rgba(196,181,253,.3)">No data yet</span>';
       } catch (e) { console.warn('Brain stats error:', e); }
 

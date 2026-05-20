@@ -294,8 +294,8 @@ class ScalperConfig:
     time_exit_early_trail_pct:   float = 0.0015   # 0.15% floating → trailing aktif (was 0.3%)
     time_exit_early_trail_width: float = 0.0010   # 0.10% trail width dari peak (was 0.15%)
     # Early loss cut: jangan tunggu lama jika sinyal salah
-    time_exit_early_loss_pct:    float = -0.004   # -0.4% floating → cut (was -0.8%)
-    time_exit_early_loss_mins:   float = 5.0      # 5m verdict window (was 10m)
+    time_exit_early_loss_pct:    float = -0.002   # [AUDIT FIX 2026-05-20] -0.4%→-0.2%: cut loser lebih cepat
+    time_exit_early_loss_mins:   float = 3.0      # [AUDIT FIX 2026-05-20] 5m→3m: verdict lebih cepat
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold — HARD THRESHOLD SCALPER (TIDAK BISA DIUBAH USER)
@@ -359,8 +359,8 @@ class ScalperConfig:
 
     # ── Early trailing: lock profit sebelum TP1 ──
     early_trail_enabled:         bool  = True
-    early_trail_activation_pct:  float = 0.0015  # [PROFIT-LOCK] 0.15% → lock (was 0.3%)
-    early_trail_distance_pct:    float = 0.0010  # [PROFIT-LOCK] 0.10% trail (was 0.2%)
+    early_trail_activation_pct:  float = 0.0025  # [AUDIT FIX 2026-05-20] 0.15%→0.25% — sweet spot antara noise dan profit lock
+    early_trail_distance_pct:    float = 0.0015  # [AUDIT FIX 2026-05-20] 0.10%→0.15% — lebih lebar agar tidak trigger noise
 
     # ── Quick-profit exit: langsung close saat profit signifikan + harga berbalik ──
     # Di Hyperliquid banyak asset max leverage 3-5x → ROE per % move kecil.
@@ -368,8 +368,8 @@ class ScalperConfig:
     # Logic: jika floating >= quick_profit_threshold DAN retrace dari peak >= quick_profit_retrace,
     # close FULL posisi langsung (tidak tunggu TP1/TP2/trail).
     quick_profit_enabled:         bool  = True
-    quick_profit_threshold_pct:   float = 0.0035  # [PROFIT-LOCK] 0.35% (was 0.8%) — ambil profit lebih awal
-    quick_profit_retrace_pct:     float = 0.0012  # [PROFIT-LOCK] 0.12% retrace dari peak → close (was 0.3%)
+    quick_profit_threshold_pct:   float = 0.0020  # [AUDIT FIX 2026-05-20] 0.35%→0.20% — tangkap profit kecil sebelum time-exit
+    quick_profit_retrace_pct:     float = 0.0010  # [AUDIT FIX 2026-05-20] 0.12%→0.10% — retrace lebih ketat
     # Leverage-aware: low leverage = ambil profit lebih cepat
     quick_profit_low_lev_threshold: float = 0.0025  # 0.25% untuk lev <= 5x (was 0.5%)
     quick_profit_low_lev_retrace:   float = 0.0010  # 0.10% retrace (was 0.2%)
@@ -420,8 +420,8 @@ class SignalConfig:
     # FIX #4: SHORT trades had 57.6% WR and net -$12.55 in audit data.
     # Structural bias: positive funding/basis almost always favors LONG on Hyperliquid.
     # Raise SHORT threshold significantly to only execute highest-conviction SHORT signals.
-    min_score_short_signal:  int   = 62       # [FIX 2026-05-14] naik dari 57 — SHORT struktural lebih lemah di HL
-    min_score_short_auto:    int   = 62       # [FIX 2026-05-14] sama dengan signal threshold
+    min_score_short_signal:  int   = 52       # [AUDIT FIX 2026-05-20] 62→52: SHORT perlu bisa fire di bear market
+    min_score_short_auto:    int   = 52       # [AUDIT FIX 2026-05-20] sama dengan signal threshold
 
     # Bull-Bear gap (LONG vs SHORT berbeda threshold)
     min_bull_bear_gap:       int   = 18       # LONG: minimum gap bull vs bear pts

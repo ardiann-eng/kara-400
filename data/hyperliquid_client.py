@@ -652,22 +652,65 @@ class HyperliquidClient:
             log.debug(f"Error extracting ctx for {asset}: {e}")
             return None
 
+    # ── Bybit Funding Cache (replaces HL funding which is always flat) ──
+    _bybit_funding_cache: Dict[str, float] = {}
+    _bybit_oi_cache: Dict[str, float] = {}
+    _bybit_oi_prev: Dict[str, float] = {}  # previous snapshot for delta calc
+    _bybit_funding_cache_time: float = 0
+    _bybit_client = None
+
+    async def _refresh_bybit_funding(self):
+        """Fetch funding rates + OI from Bybit (30s cache). HL funding is flat (97% = 0)."""
+        import time as _t
+        now = _t.monotonic()
+        if now - self._bybit_funding_cache_time < 30 and self._bybit_funding_cache:
+            return
+        try:
+            if not self._bybit_client:
+                from data.bybit_client import BybitClient
+                import config
+                self._bybit_client = BybitClient(
+                    api_key=config.BYBIT_API_KEY,
+                    api_secret=config.BYBIT_SECRET_KEY,
+                    testnet=config.BYBIT_TESTNET,
+                )
+            rates = await self._bybit_client.get_funding_rates_batch()
+            self._bybit_funding_cache = rates
+            # OI delta: save previous before overwriting
+            if self._bybit_oi_cache:
+                self._bybit_oi_prev = self._bybit_oi_cache.copy()
+            self._bybit_oi_cache = self._bybit_client.get_open_interest_from_cache()
+            self._bybit_funding_cache_time = now
+            log.debug(f"[FUNDING-BYBIT] Refreshed {len(rates)} funding + {len(self._bybit_oi_cache)} OI")
+        except Exception as e:
+            log.warning(f"[FUNDING-BYBIT] Fetch failed: {e}")
+
     async def get_funding_data(self, asset: str, meta: Optional[Any] = None) -> FundingData:
-        """Fetch funding data with robust parsing (cached)."""
+        """Fetch funding data from Bybit (primary) with HL fallback."""
+        # Primary: Bybit funding (8× more informative than HL)
+        await self._refresh_bybit_funding()
+        bybit_sym = f"{asset}USDT"
+        bybit_fr = self._bybit_funding_cache.get(bybit_sym)
+
+        if bybit_fr is not None and bybit_fr != 0:
+            return FundingData(
+                asset=asset,
+                funding_rate=bybit_fr,
+                premium=0,
+                predicted_rate=0,
+                hourly_trend=[]
+            )
+
+        # Fallback: HL meta (mostly flat but better than nothing)
         ctx = None
-        # 1. Try provided meta
         if meta:
             ctx = self._extract_ctx(meta, asset)
-        
-        # 2. Try internal cache
         if not ctx:
             await self.refresh_market_cache()
             if self._market_cache:
                 ctx = self._extract_ctx(self._market_cache, asset)
 
         if not ctx or not isinstance(ctx, dict):
-            # NO SEQUENTIAL FALLBACK to avoid rate limits
-            log.warning(f"Could not find context for {asset} in batch/cache")
             return FundingData(asset=asset, funding_rate=0, premium=0, predicted_rate=0, hourly_trend=[])
 
         return FundingData(
@@ -713,11 +756,20 @@ class HyperliquidClient:
         return OIData(
             asset=asset,
             open_interest=float(ctx.get("openInterest") or 0),
-            oi_change_pct=0.0,  # Calculated elsewhere
+            oi_change_pct=self._get_bybit_oi_delta(asset),  # [AUDIT FIX] Use Bybit OI delta
             oi_change_24h=0.0,
             volume_24h_usd=float(ctx.get("dayNtlVlm") or 0),
             oracle_price=float(ctx.get("oraclePx") or 0)
         )
+
+    def _get_bybit_oi_delta(self, asset: str) -> float:
+        """Calculate OI change % from Bybit snapshots (30s interval)."""
+        sym = f"{asset}USDT"
+        curr = self._bybit_oi_cache.get(sym, 0)
+        prev = self._bybit_oi_prev.get(sym, 0)
+        if prev > 0 and curr > 0:
+            return (curr - prev) / prev
+        return 0.0
 
     async def get_orderbook(self, asset: str, depth: int = 20) -> OrderbookSnapshot:
         """Fetch L2 orderbook using l2Book endpoint."""

@@ -175,6 +175,66 @@ class BybitClient:
         items = result.get("list", [])
         return items[0] if items else {}
 
+    async def get_funding_rates_batch(self) -> Dict[str, float]:
+        """Fetch funding rates for all linear USDT perps. Returns {symbol: rate}."""
+        result = await self._request("GET", "/v5/market/tickers", {
+            "category": self.CATEGORY
+        })
+        rates = {}
+        self._last_tickers = result.get("list", [])  # cache for OI reuse
+        for item in self._last_tickers:
+            sym = item.get("symbol", "")
+            fr = float(item.get("fundingRate", 0) or 0)
+            rates[sym] = fr
+        return rates
+
+    def get_open_interest_from_cache(self) -> Dict[str, float]:
+        """Extract OI from last tickers fetch (no extra API call). Returns {symbol: oi_value}."""
+        oi = {}
+        for item in getattr(self, '_last_tickers', []):
+            sym = item.get("symbol", "")
+            val = float(item.get("openInterest", 0) or 0)
+            if val > 0:
+                oi[sym] = val
+        return oi
+
+    async def get_long_short_ratio(self, symbol: str, period: str = "5min", limit: int = 1) -> Optional[float]:
+        """
+        Fetch long/short account ratio for a symbol.
+        Returns ratio > 1 = more longs (crowd bullish), < 1 = more shorts (crowd bearish).
+        Contrarian signal: fade the crowd.
+        """
+        try:
+            result = await self._request("GET", "/v5/market/account-ratio", {
+                "category": self.CATEGORY,
+                "symbol": symbol,
+                "period": period,
+                "limit": limit,
+            })
+            items = result.get("list", [])
+            if items:
+                buy_ratio = float(items[0].get("buyRatio", 0.5))
+                sell_ratio = float(items[0].get("sellRatio", 0.5))
+                if sell_ratio > 0:
+                    return buy_ratio / sell_ratio
+            return None
+        except Exception:
+            return None
+
+    async def get_long_short_ratios_batch(self, symbols: List[str], period: str = "5min") -> Dict[str, float]:
+        """Fetch L/S ratio for multiple symbols. Returns {symbol: ratio}."""
+        import asyncio
+        results = {}
+        # Batch with concurrency limit to avoid rate limits
+        sem = asyncio.Semaphore(5)
+        async def _fetch_one(sym):
+            async with sem:
+                r = await self.get_long_short_ratio(sym, period)
+                if r is not None:
+                    results[sym] = r
+        await asyncio.gather(*[_fetch_one(s) for s in symbols], return_exceptions=True)
+        return results
+
     async def ping(self) -> bool:
         """Test connectivity."""
         try:
