@@ -148,6 +148,10 @@ class KaraBot:
             if cfg.scl_min_score_to_auto_trade != 52:
                 cfg.scl_min_score_to_auto_trade = 52
                 dirty = True
+            # Force scalper mode for all users
+            if getattr(cfg, 'trading_mode', 'standard') != 'scalper':
+                cfg.trading_mode = 'scalper'
+                dirty = True
             if dirty:
                 user_db.update_user(u)
                 changed += 1
