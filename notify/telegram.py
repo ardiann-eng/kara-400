@@ -2958,11 +2958,17 @@ class KaraTelegram:
             res = await session.executor.close_position(pos.position_id, current, reason="manual_close")
             if res:
                 pnl = res.get("pnl", 0)
+                reason = res.get("reason", "manual")
                 sign = "+" if pnl >= 0 else ""
+                emoji = "🌸" if pnl >= 0 else "🥀"
+                mood = "Profit diamankan~" if pnl >= 0 else "Kita cut loss untuk hari yang lebih baik."
                 await query.message.reply_html(
-                    f"✅ <b>Posisi {asset} BERHASIL DITUTUP!</b>\n"
-                    f"• Realized PnL: <b>{sign}{format_idr(pnl)}</b>\n"
-                    f"• Harga Exit: <code>${format_price(current)}</code>"
+                    f"{emoji} <b>KARA SYSTEM: Position Closed</b>\n\n"
+                    f"<b>{asset}</b> berhasil ditutup.\n\n"
+                    f"  • Realized PnL: <b>{sign}{format_idr(pnl)}</b>\n"
+                    f"  • Exit Price  : <code>${format_price(current)}</code>\n"
+                    f"  • Reason      : {reason}\n\n"
+                    f"<i>{mood}</i>"
                 )
             else:
                 await query.message.reply_html(f"❌ <b>Gagal menutup posisi {asset}.</b>")
@@ -2983,13 +2989,13 @@ class KaraTelegram:
                 return
                 
             text = (
-                f"🚨 <b>KONFIRMASI CLOSE SEMUA POSISI</b> 🚨\n\n"
-                f"Tindakan ini akan mencoba menutup ke-<b>{count}</b> posisi yang sedang terbuka secara paksa.\n\n"
-                "Yakin ingin melanjutkan?"
+                f"🌸 <b>KARA SYSTEM: Close All Positions</b>\n\n"
+                f"Akan menutup <b>{count}</b> posisi yang sedang terbuka.\n\n"
+                f"<i>Semua posisi akan ditutup di harga market saat ini.</i>"
             )
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⚠️ YA, CLOSE SEMUA! ⚠️", callback_data="close_all_confirm")],
-                [InlineKeyboardButton("❌ Batal", callback_data="close_cancel")]
+                [InlineKeyboardButton("Ya, tutup semua", callback_data="close_all_confirm")],
+                [InlineKeyboardButton("Batal", callback_data="close_cancel")]
             ])
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
             return
