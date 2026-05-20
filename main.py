@@ -1166,6 +1166,16 @@ class KaraBot:
             user_signal = base_signal.model_copy(deep=True)
             user_signal.signal_id = f"{base_signal.signal_id[:4]}{uuid.uuid4().hex[:4].upper()}"
 
+            # [FIX 2026-05-20] Early concurrent position check — don't even process
+            # if user already at max positions. Prevents race condition where multiple
+            # signals from same scan cycle all pass pre_trade_check simultaneously.
+            _executor = session.executor
+            _open_count = len([p for p in _executor.open_positions if p.status.value == "open"])
+            _max_pos = config.SCALPER.max_concurrent_positions
+            if _open_count >= _max_pos:
+                log.info(f"[SKIP] {chat_id} | {base_signal.asset} | reason=max_positions | open={_open_count}/{_max_pos}")
+                continue
+
 
             # ATR hanya dihitung untuk standard mode — scalper pakai fixed SL ketat,
             # ATR adaptive akan override 0.70% SL dan merusak R:R yang sudah dikalibrasi.
