@@ -816,6 +816,21 @@ class ScoringEngine:
         if len(_closes) >= 6:
             _net_move = (_closes[-1] - _closes[-6]) / _closes[-6] if _closes[-6] > 0 else 0
 
+            # [AUDIT FIX 2026-05-21 P1] MINIMUM MOMENTUM REQUIREMENT
+            # Data: trades with pre-move >0.3% = WR 52.6%, PnL +$8.39
+            #       trades with pre-move <0.15% = WR ~28%, PnL negative
+            # Root cause: low-momentum entries = noise, no trend to ride, time_exit loss.
+            # Fix: require minimum 0.15% move in our direction before entry.
+            _dir_move = _net_move if side == Side.LONG else -_net_move
+            if _dir_move < 0.0015:  # <0.15% move in our direction = no momentum
+                log.info(
+                    f"[SKIP] {asset} | score={score} | side={side.value} | "
+                    f"reason=low_momentum | context=dir_move={_dir_move*100:.3f}% < 0.15% (need trend)"
+                )
+                self.skip_counters["low_momentum"] = self.skip_counters.get("low_momentum", 0) + 1
+                self._skip_count_since_summary += 1
+                return None, score
+
             # Leading signal detection — these expect price HASN'T moved yet
             _has_leading_signal = (
                 _scalper_components.get("cvd_pts", 0) >= 10 or
@@ -1359,8 +1374,8 @@ class ScoringEngine:
 
         # ── CONFIRMATION LAYER: CVD (confirms trend direction) ──
         # [FIX 2026-05-21] Pure trend following: CVD only scores when ALIGNED with price.
-        # CVD divergence (buying but price flat/down) was a reversal signal — removed.
-        # Data: 46 trades, 0% WR on reversal entries. Trend confirmation only.
+        # [AUDIT FIX 2026-05-21 P0] CVD was constant bias (+8.48 mean, 100% firing).
+        # Raised thresholds: strong=0.35+price, mild removed. Only meaningful divergence scores.
         recent_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
         if len(recent_trades) >= 20:
             sample = recent_trades[-80:]
@@ -1373,19 +1388,13 @@ class ScoringEngine:
                 if len(closes) >= 4:
                     price_chg_3m = (closes[-1] - closes[-4]) / closes[-4]
 
-                # CVD confirms: buying pressure + price already moving up = trend confirmation
-                if cvd_ratio > 0.20 and price_chg_3m > 0.001:
+                # Only score when CVD is strong AND price confirms direction
+                if cvd_ratio > 0.35 and price_chg_3m > 0.001:
                     confirm_pts += 10; _c_cvd = 10
                     reasons.append(f"💚 CVD confirms ({cvd_ratio*100:.0f}%) + price moving → trend")
-                elif cvd_ratio < -0.20 and price_chg_3m < -0.001:
+                elif cvd_ratio < -0.35 and price_chg_3m < -0.001:
                     confirm_pts += 10; _c_cvd = 10
                     reasons.append(f"❤️ CVD confirms ({cvd_ratio*100:.0f}%) + price moving → trend")
-                elif cvd_ratio > 0.15:
-                    confirm_pts += 3; _c_cvd = 3
-                    reasons.append(f"💚 CVD mild ({cvd_ratio*100:.0f}%)")
-                elif cvd_ratio < -0.15:
-                    confirm_pts += 3; _c_cvd = 3
-                    reasons.append(f"❤️ CVD mild ({cvd_ratio*100:.0f}%)")
 
         # ── SETUP LAYER 4: Bybit Long/Short Ratio (CONTRARIAN — fade the crowd) ──
         # Ratio > 1.5 = crowd heavily long → contrarian SHORT setup
@@ -1419,6 +1428,9 @@ class ScoringEngine:
         # Only penalize SHORT if drop > 1.5% (exhaustion/bounce risk).
 
         # ── EDGE: Cross-Asset Momentum (leader-follower lag) ──
+        # [AUDIT FIX 2026-05-21] Re-enabled with relaxed lag threshold.
+        # Old: alt must move < 0.05% (too strict, never fires).
+        # New: alt must move < 50% of leader move (relative lag detection).
         _xam_pts, _xam_reason = self._calc_cross_asset_momentum(asset)
         if _xam_pts != 0:
             if _xam_pts > 0:
@@ -1427,14 +1439,8 @@ class ScoringEngine:
                 bear_setup += abs(_xam_pts)
             reasons.append(_xam_reason)
 
-        # ── EDGE: Delta Volume Imbalance (aggressor urgency) ──
-        _dvi_pts, _dvi_reason = self._calc_delta_volume_imbalance(asset)
-        if _dvi_pts != 0:
-            if _dvi_pts > 0:
-                bull_setup += _dvi_pts
-            else:
-                bear_setup += abs(_dvi_pts)
-            reasons.append(_dvi_reason)
+        # ── EDGE: Delta Volume Imbalance — DISABLED (0% firing rate, 3 audits) ──
+        _dvi_pts = 0
 
         # OB Absorption removed — reversal signal, not compatible with trend following strategy.
         _abs_pts = 0
@@ -1530,7 +1536,7 @@ class ScoringEngine:
             out_components["ema_pts"] = int(_c_ema)
             out_components["rsi_pts"] = int(_c_rsi)
             out_components["mtf_pts"] = int(_c_mtf)
-            out_components["dvi_pts"] = int(_c_vol)
+            out_components["dvi_pts"] = int(_dvi_pts)
 
         return score, side, reasons
 
@@ -1568,13 +1574,12 @@ class ScoringEngine:
             pts_2m = [(t, p) for t, p in my_history if t > now_mono - 120]
             if len(pts_2m) >= 2:
                 my_move = (pts_2m[-1][1] - pts_2m[0][1]) / pts_2m[0][1]
-        # Edge: leader moved significantly but alt hasn't followed yet
-        leader_threshold = 0.002  # 0.2% move in 2min
-        lag_threshold = 0.0005   # alt moved less than 0.05%
-        if avg_leader > leader_threshold and my_move < lag_threshold:
-            pts = min(12, int(avg_leader * 4000))  # scale: 0.2%=8, 0.3%=12
+        # Edge: leader moved significantly but alt hasn't followed proportionally
+        leader_threshold = 0.0015  # 0.15% move in 2min (lowered from 0.2%)
+        if avg_leader > leader_threshold and my_move < avg_leader * 0.5:
+            pts = min(12, int(avg_leader * 4000))  # scale: 0.15%=6, 0.3%=12
             return pts, f"🔗 BTC/ETH leading +{avg_leader*100:.2f}%, {asset} lagging → LONG +{pts}"
-        elif avg_leader < -leader_threshold and my_move > -lag_threshold:
+        elif avg_leader < -leader_threshold and my_move > avg_leader * 0.5:
             pts = min(12, int(abs(avg_leader) * 4000))
             return -pts, f"🔗 BTC/ETH dumping {avg_leader*100:.2f}%, {asset} lagging → SHORT +{pts}"
         return 0, ""
