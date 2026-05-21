@@ -80,9 +80,9 @@ class OIFundingAnalyzer:
                 f"bias=bear | pts=12 | direction=contrarian"
             )
         elif fr > 0.00005:                                 # > 0.005%/8h - mild positive
-            bull += 5    # mild positive = demand building
+            bull += 8    # [AUDIT FIX 2026-05-21] Was +5. Funding r=+0.62 vs PnL — strongest proven edge. Boost weight.
             reasons.append(
-                f"Mild positive funding {fr*100:.4f}%/8h -> LONG tilt (+5)"
+                f"Mild positive funding {fr*100:.4f}%/8h -> LONG tilt (+8)"
             )
         elif fr < -SIGNAL.funding_extreme_threshold * 2:   # < -0.0006
             bull += 18   # [QUANT AGGRESSION] contrarian: crowded shorts → squeeze potential
@@ -103,9 +103,9 @@ class OIFundingAnalyzer:
                 f"bias=bull | pts=12 | direction=contrarian"
             )
         elif fr < -0.00005:                                # < -0.005%/8h - mild negative
-            bear += 5
+            bear += 8    # [AUDIT FIX 2026-05-21] Was +5. Funding r=+0.62 — boost contrarian weight.
             reasons.append(
-                f"Mild negative funding {fr*100:.4f}%/8h -> SHORT tilt (+5)"
+                f"Mild negative funding {fr*100:.4f}%/8h -> SHORT tilt (+8)"
             )
         else:
             reasons.append(f"Flat/noise funding {fr*100:.4f}%/8h -> no signal")

@@ -291,11 +291,11 @@ class ScalperConfig:
     # [PROFIT-LOCK REDESIGN 2026-05-20] Trailing aktif JAUH lebih awal.
     # Data: trailing_stop 100% WR tapi hanya 3.5% trades. Masalah = threshold terlalu tinggi.
     # Fix: aktifkan trailing di +0.15% (1 menit move), lock profit segera.
-    time_exit_early_trail_pct:   float = 0.0015   # 0.15% floating → trailing aktif (was 0.3%)
-    time_exit_early_trail_width: float = 0.0010   # 0.10% trail width dari peak (was 0.15%)
+    time_exit_early_trail_pct:   float = 0.0010   # [AUDIT FIX 2026-05-21] 0.10% floating → trailing aktif. Was 0.15%. trailing=100% WR, fire earlier.
+    time_exit_early_trail_width: float = 0.0008   # [AUDIT FIX 2026-05-21] 0.08% trail width. Lock profit tight.
     # Early loss cut: jangan tunggu lama jika sinyal salah
-    time_exit_early_loss_pct:    float = -0.002   # [AUDIT FIX 2026-05-20] -0.4%→-0.2%: cut loser lebih cepat
-    time_exit_early_loss_mins:   float = 3.0      # [AUDIT FIX 2026-05-20] 5m→3m: verdict lebih cepat
+    time_exit_early_loss_pct:    float = -0.002   # [AUDIT FIX 2026-05-21] -0.2%: cut if floating below this
+    time_exit_early_loss_mins:   float = 5.0      # [AUDIT FIX 2026-05-21] 5m verdict: enough time to develop, not too long to bleed
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold — HARD THRESHOLD SCALPER (TIDAK BISA DIUBAH USER)

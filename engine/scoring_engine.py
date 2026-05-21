@@ -1405,17 +1405,12 @@ class ScoringEngine:
                 bull_setup += 7
                 reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd short, LONG tilt +7")
 
-        # ── CONFIRMATION LAYER: MTF 15m Trend (small weight — 15m is slow for scalper) ──
+        # ── CONFIRMATION LAYER: MTF 15m Trend — DISABLED ──
+        # [AUDIT FIX 2026-05-21] r=-0.68 vs PnL (p=0.0008). Strongest inverse predictor.
+        # 15m timeframe too slow for 8-12min scalper hold. Confirmed over 21 trades.
         import config
         scfg = config.SCALPER
-        if mtf_trend != "neutral":
-            if (bull_setup > bear_setup and mtf_trend == "bull") or \
-               (bear_setup > bull_setup and mtf_trend == "bear"):
-                confirm_pts += 6; _c_mtf = 6
-                reasons.append(f"📡 15m MTF aligned ({mtf_trend}) +6")
-            else:
-                confirm_pts -= 4; _c_mtf = -4
-                reasons.append(f"📡 15m MTF discord ({mtf_trend}) -4")
+        _c_mtf = 0  # disabled — do not contribute to score
 
         # ── DISPLACEMENT PENALTY (multiplicative — the key anti-chase mechanism) ──
         # If price already moved significantly in our direction, the opportunity is STALE.

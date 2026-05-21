@@ -1383,10 +1383,10 @@ class RiskManager:
             soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.010)
 
             # Threshold baru dari config
-            early_trail_pct   = getattr(scfg, 'time_exit_early_trail_pct',   0.003)
-            early_trail_width = getattr(scfg, 'time_exit_early_trail_width',  0.0015)
-            early_loss_pct    = getattr(scfg, 'time_exit_early_loss_pct',    -0.003)  # [FIX 2026-05-21] -0.3%. Was -0.2% which killed potential winners recovering in min 4-6.
-            early_loss_mins   = getattr(scfg, 'time_exit_early_loss_mins',    5.0)    # [FIX 2026-05-21] 5min. Was 4min. Give trade 1 more min to develop before cutting.
+            early_trail_pct   = getattr(scfg, 'time_exit_early_trail_pct',   0.001)   # [AUDIT FIX 2026-05-21] 0.10% activation. trailing=100% WR, needs to fire more.
+            early_trail_width = getattr(scfg, 'time_exit_early_trail_width',  0.0008)  # [AUDIT FIX 2026-05-21] 0.08% trail width. Lock profit tight.
+            early_loss_pct    = getattr(scfg, 'time_exit_early_loss_pct',    -0.002)  # [AUDIT FIX 2026-05-21] Use config value -0.2%. Was defaulting to -0.3% which let losers bleed.
+            early_loss_mins   = getattr(scfg, 'time_exit_early_loss_mins',    5.0)    # [AUDIT FIX 2026-05-21] 5min verdict. Gives trade time but doesn't hold dead weight.
 
             now    = _dt.now(_tz.utc)
             opened = position.opened_at
@@ -1420,23 +1420,21 @@ class RiskManager:
             if (hold_minutes >= early_loss_mins
                     and floating <= early_loss_pct
                     and not position.tp1_hit):
-                # Hanya cut jika posisi TIDAK PERNAH profit (max_unrealized_loss proxy)
-                # max_unrealized_loss disimpan sebagai nilai negatif terkecil yang pernah dicapai
-                max_unreal = getattr(position, 'max_unrealized_loss', 0.0)
-                never_profited = max_unreal <= 0.0  # tidak pernah floating positif
-                if never_profited:
-                    return {
-                        "action":      "time_exit",
-                        "close_ratio": 1.0,
-                        "price":       current_price,
-                        "pnl":         position.pnl_unrealized,
-                        "position_id": position.position_id,
-                        "message":     (
-                            f"⏱️ Early loss cut {hold_minutes:.0f}m: "
-                            f"floating {floating*100:.2f}% < {early_loss_pct*100:.1f}%, "
-                            f"tidak pernah profit. Cut sekarang."
-                        )
-                    }
+                # [AUDIT FIX 2026-05-21] Removed never_profited gate.
+                # Data: 75% of time_exit trades were losers that briefly touched +0.01%
+                # then bled out. If floating -0.2% after 5min, signal is dead regardless.
+                return {
+                    "action":      "time_exit",
+                    "close_ratio": 1.0,
+                    "price":       current_price,
+                    "pnl":         position.pnl_unrealized,
+                    "position_id": position.position_id,
+                    "message":     (
+                        f"⏱️ Early loss cut {hold_minutes:.0f}m: "
+                        f"floating {floating*100:.2f}% < {early_loss_pct*100:.1f}%. "
+                        f"Cut sekarang."
+                    )
+                }
 
             # ── L3: Hard time limit ──────────────────────────────────────────
             if hold_minutes >= effective_max:

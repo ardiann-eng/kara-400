@@ -9,13 +9,14 @@ Butuh: Railway CLI login, Python venv aktif, minimal 200 trades di production DB
 
 ```powershell
 # Di project root (D:\Vibe Coding\KARA - 400)
+# Service: rare-youthfulness | Table meta_pattern_stats TIDAK ADA
 
 $script = @'
 import sqlite3, json
 conn = sqlite3.connect("/app/storage/kara_data.db")
 conn.row_factory = sqlite3.Row
 cur = conn.cursor()
-for tbl, key in [("trade_history","trades"), ("signals_history","signals"), ("meta_pattern_stats","meta")]:
+for tbl, key in [("trade_history","trades"), ("signals_history","signals")]:
     cur.execute(f"SELECT * FROM {tbl} ORDER BY rowid")
     rows = [dict(r) for r in cur.fetchall()]
     with open(f"/tmp/{key}.json","w") as f:
@@ -23,19 +24,43 @@ for tbl, key in [("trade_history","trades"), ("signals_history","signals"), ("me
     print(f"{tbl}: {len(rows)} rows")
 '@
 $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($script))
-railway ssh --service kara-400 "echo $b64 | base64 -d > /tmp/e.py && python3 /tmp/e.py"
+railway ssh --service rare-youthfulness "echo $b64 | base64 -d > /tmp/e.py && python3 /tmp/e.py"
 ```
 
 ```powershell
 # Download ke lokal
-railway ssh --service kara-400 "base64 /tmp/trades.json"  | Out-File tmp\trades_b64.txt  -Encoding ascii
-railway ssh --service kara-400 "base64 /tmp/signals.json" | Out-File tmp\signals_b64.txt -Encoding ascii
-railway ssh --service kara-400 "base64 /tmp/meta.json"    | Out-File tmp\meta_b64.txt    -Encoding ascii
+railway ssh --service rare-youthfulness "base64 /tmp/trades.json"  | Out-File tmp\trades_b64.txt  -Encoding ascii
+railway ssh --service rare-youthfulness "base64 /tmp/signals.json" | Out-File tmp\signals_b64.txt -Encoding ascii
 
 # Decode
 $t = Get-Content tmp\trades_b64.txt  -Raw; [System.IO.File]::WriteAllBytes("tmp\trades_prod.json",  [Convert]::FromBase64String($t.Trim()))
 $s = Get-Content tmp\signals_b64.txt -Raw; [System.IO.File]::WriteAllBytes("tmp\signals_prod.json", [Convert]::FromBase64String($s.Trim()))
-$m = Get-Content tmp\meta_b64.txt    -Raw; [System.IO.File]::WriteAllBytes("tmp\meta_prod.json",    [Convert]::FromBase64String($m.Trim()))
+```
+
+## Step 1b — Deduplicate (WAJIB)
+
+KARA broadcast signal ke semua user (3 users). Trade_history = 1 row per user per trade.
+Untuk audit scoring, ambil **1 user saja** agar tidak double/triple count PnL.
+
+```powershell
+$trades = Get-Content tmp\trades_prod.json | ConvertFrom-Json
+$signals = Get-Content tmp\signals_prod.json | ConvertFrom-Json
+
+# Show per-user breakdown
+$trades | Group-Object chat_id | ForEach-Object { Write-Host "$($_.Name): $($_.Count) trades" }
+
+# Ambil 1 user (paling banyak trades)
+$topUser = ($trades | Group-Object chat_id | Sort-Object Count -Descending | Select-Object -First 1).Name
+$singleUser = $trades | Where-Object { $_.chat_id -eq $topUser }
+Write-Host "Selected user $topUser : $($singleUser.Count) trades"
+
+# Signals sudah unique per sig_id, tapi verify
+$uniqueSignals = $signals | Sort-Object sig_id -Unique
+Write-Host "Unique signals: $($uniqueSignals.Count)"
+
+# Overwrite dengan data bersih
+$singleUser | ConvertTo-Json -Depth 10 | Out-File tmp\trades_prod.json -Encoding utf8
+$uniqueSignals | ConvertTo-Json -Depth 10 | Out-File tmp\signals_prod.json -Encoding utf8
 ```
 
 ---
