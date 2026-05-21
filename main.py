@@ -1274,6 +1274,17 @@ class KaraBot:
             # - only process signals that meet auto threshold
             # - anything below threshold is fully skipped (no Telegram signal)
             effective_auto_threshold = auto_threshold
+            # [FIX 2026-05-21] Raise auto_threshold during Asia session to match
+            # scoring engine's session-aware threshold. Prevents borderline signals
+            # (score 52-56) from entering during low-liquidity Asia hours.
+            from datetime import datetime as _dt_thresh, timezone as _tz_thresh
+            _utc_hour = _dt_thresh.now(_tz_thresh.utc).hour
+            _london_start = getattr(config.SIGNAL, 'london_start_utc', 8)
+            _ny_start     = getattr(config.SIGNAL, 'ny_session_start_utc', 13)
+            _ny_end       = getattr(config.SIGNAL, 'ny_session_end_utc', 21)
+            _in_active_session = (_london_start <= _utc_hour < _ny_end)
+            if not _in_active_session:
+                effective_auto_threshold = auto_threshold + 5  # Asia: mirror scoring engine penalty
             if user_signal.score < effective_auto_threshold:
                 if chat_id == target_ids[0]:  # log sekali saja, jangan spam per-user
                     log.info(

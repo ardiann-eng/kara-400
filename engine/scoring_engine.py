@@ -392,6 +392,19 @@ class ScoringEngine:
             funding = FundingData(asset=asset, funding_rate=0, premium=0, predicted_rate=0, hourly_trend=[])
             oi = OIData(asset=asset, open_interest=0, oi_change_pct=0.0, oi_change_24h=0.0)
 
+        # [FIX 2026-05-21] If funding_rate is 0 (Bybit down + HL API miss),
+        # fall back to WS funding_history cache which is always populated from subscription.
+        if funding.funding_rate == 0 and hasattr(self.cache, 'funding_history'):
+            ws_history = self.cache.funding_history.get(asset, [])
+            if ws_history:
+                funding = FundingData(
+                    asset=asset,
+                    funding_rate=ws_history[-1],
+                    premium=0,
+                    predicted_rate=0,
+                    hourly_trend=ws_history[-8:]
+                )
+
         # Spot price for basis calculation (same as standard mode)
         now_mono = time.monotonic()
         if not self._spot_prices or (now_mono - self._spot_cache_time) > 10:
@@ -789,6 +802,8 @@ class ScoringEngine:
             oi_signed=_scalper_components.get("oi_signed", 0),
             liq_signed=_scalper_components.get("liq_signed", 0),
             ob_signed=_scalper_components.get("ob_signed", 0),
+            bull_setup=_scalper_components.get("bull_setup", 0),
+            bear_setup=_scalper_components.get("bear_setup", 0),
         )
 
         # Apply 4h regime leverage adjustment
@@ -1102,6 +1117,8 @@ class ScoringEngine:
                 out_components["ob_signed"] = int(_ob_signed)
                 out_components["oi_signed"] = int(oi_bull - oi_bear)
                 out_components["liq_signed"] = int(liq_bull - liq_bear)
+                out_components["bull_setup"] = int(bull_setup)
+                out_components["bear_setup"] = int(bear_setup)
             return score, side, reasons
 
         # Extract OHLCV
@@ -1125,6 +1142,8 @@ class ScoringEngine:
                 out_components["ob_signed"] = int(_ob_signed)
                 out_components["oi_signed"] = int(oi_bull - oi_bear)
                 out_components["liq_signed"] = int(liq_bull - liq_bear)
+                out_components["bull_setup"] = int(bull_setup)
+                out_components["bear_setup"] = int(bear_setup)
             return score, side, reasons
         # ── CONFIRMATION LAYER: EMA Cross (lagging — freshness matters) ──
         def ema(data: list, period: int) -> float:
@@ -1375,6 +1394,8 @@ class ScoringEngine:
             out_components["ob_signed"] = int(_ob_signed)
             out_components["oi_signed"] = int(oi_bull - oi_bear)
             out_components["liq_signed"] = int(liq_bull - liq_bear)
+            out_components["bull_setup"] = int(bull_setup)
+            out_components["bear_setup"] = int(bear_setup)
 
         return score, side, reasons
 
@@ -1417,6 +1438,8 @@ class ScoringEngine:
         oi_signed: int = 0,
         liq_signed: int = 0,
         ob_signed: int = 0,
+        bull_setup: int = 0,
+        bear_setup: int = 0,
     ) -> TradeSignal:
         """Build a TradeSignal with scalper-specific dynamic TP/SL levels."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
@@ -1545,14 +1568,14 @@ class ScoringEngine:
 
         strength = SignalStrength.STRONG if score >= 70 else SignalStrength.MODERATE
         breakdown = ScoreBreakdown(
-            # [F1 FIX 2026-05-18] Persist signed analyzer contributions
-            # so per-component edge can be audited via DB.
             oi_funding_score=oi_signed,
             liquidation_score=liq_signed,
             orderbook_score=ob_signed,
             raw_score=score,
             final_score=score,
             session_bonus=session_bonus,
+            total_bull=bull_setup,
+            total_bear=bear_setup,
             reasons=reasons
         )
 

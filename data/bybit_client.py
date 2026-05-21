@@ -240,7 +240,14 @@ class BybitClient:
         try:
             result = await self._request("GET", "/v5/market/time")
             return True
-        except Exception:
+        except asyncio.TimeoutError:
+            log.warning("[BYBIT] Ping failed: timeout (server unreachable or blocked by firewall)")
+            return False
+        except aiohttp.ClientConnectorError as e:
+            log.warning(f"[BYBIT] Ping failed: connection error — {e}")
+            return False
+        except Exception as e:
+            log.warning(f"[BYBIT] Ping failed: {type(e).__name__}: {e}")
             return False
 
     # ── ACCOUNT ENDPOINTS (auth required) ─────────────────────────────────────
