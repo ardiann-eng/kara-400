@@ -564,6 +564,7 @@ class ScoringEngine:
         score = int(score * _regime_mult)
         score = max(0, min(score, 100))
         reasons.append(f"🌐 Regime: {_regime_cat} (×{_regime_mult}, {score_pre}→{score})")
+        from dashboard.reasoning_logger import reasoning_logger
         reasoning_logger.log_regime_adjustment(
             asset,
             regime=_regime_cat,
@@ -847,6 +848,7 @@ class ScoringEngine:
                 )
                 self.skip_counters["no_micro_momentum"] = self.skip_counters.get("no_micro_momentum", 0) + 1
                 self._skip_count_since_summary += 1
+                from dashboard.reasoning_logger import reasoning_logger
                 reasoning_logger.log_momentum_gate(
                     asset, passed=False,
                     move_pct=_net_move if side == Side.LONG else -_net_move,
@@ -855,6 +857,7 @@ class ScoringEngine:
                 )
                 return None, score
             else:
+                from dashboard.reasoning_logger import reasoning_logger
                 reasoning_logger.log_momentum_gate(
                     asset, passed=True,
                     move_pct=_net_move if side == Side.LONG else -_net_move,
