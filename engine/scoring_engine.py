@@ -805,7 +805,11 @@ class ScoringEngine:
             _net_move = (_closes[-1] - _closes[-6]) / _closes[-6] if _closes[-6] > 0 else 0
 
             # Leading signal detection — these expect price HASN'T moved yet
-            _has_leading_signal = (_scalper_components.get("cvd_pts", 0) >= 10 or _xam_pts != 0 or _abs_pts != 0)
+            _has_leading_signal = (
+                _scalper_components.get("cvd_pts", 0) >= 10 or
+                _scalper_components.get("xam_pts", 0) != 0 or
+                _scalper_components.get("abs_pts", 0) != 0
+            )
 
             if _has_leading_signal:
                 # Only require candle direction (3/5), no net move threshold
@@ -1478,6 +1482,8 @@ class ScoringEngine:
             out_components["bull_setup"] = int(bull_setup)
             out_components["bear_setup"] = int(bear_setup)
             out_components["cvd_pts"] = int(_c_cvd)
+            out_components["xam_pts"] = int(_xam_pts)
+            out_components["abs_pts"] = int(_abs_pts)
 
         return score, side, reasons
 
