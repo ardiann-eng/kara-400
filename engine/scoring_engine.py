@@ -1292,18 +1292,20 @@ class ScoringEngine:
                 al5 = sum(losses_5m) / len(losses_5m) if losses_5m else 0
                 rsi_5m = 100 - (100 / (1 + ag5/al5)) if al5 > 0 else (100 if ag5 > 0 else 50)
 
-                # Divergence: 1m price makes new low but 1m RSI > 5m RSI = bullish
-                price_falling = closes[-1] < closes_5m[-2] if len(closes_5m) >= 2 else False
+                # [FIX 2026-05-21] RSI confirms trend — not divergence.
+                # RSI rising + price rising = momentum building = trend confirmation.
+                # RSI divergence (price down but RSI up) was a reversal signal — removed.
                 price_rising = closes[-1] > closes_5m[-2] if len(closes_5m) >= 2 else False
+                price_falling = closes[-1] < closes_5m[-2] if len(closes_5m) >= 2 else False
 
-                if price_falling and rsi > rsi_5m + 10:
-                    # Bullish divergence: price down but 1m RSI recovering faster than 5m
+                if price_rising and rsi > rsi_5m + 5:
+                    # RSI accelerating + price rising = strong momentum
                     bull_setup += 8; _c_div = 8
-                    reasons.append(f"📈 RSI divergence: price↓ but RSI 1m({rsi:.0f})>5m({rsi_5m:.0f}) — reversal UP +8")
-                elif price_rising and rsi < rsi_5m - 10:
-                    # Bearish divergence: price up but 1m RSI weakening vs 5m
+                    reasons.append(f"📈 RSI momentum: RSI 1m({rsi:.0f})>5m({rsi_5m:.0f}) + price rising +8")
+                elif price_falling and rsi < rsi_5m - 5:
+                    # RSI weakening + price falling = strong downtrend
                     bear_setup += 8; _c_div = 8
-                    reasons.append(f"📉 RSI divergence: price↑ but RSI 1m({rsi:.0f})<5m({rsi_5m:.0f}) — reversal DOWN +8")
+                    reasons.append(f"📉 RSI momentum: RSI 1m({rsi:.0f})<5m({rsi_5m:.0f}) + price falling +8")
 
         # ── CONFIRMATION LAYER: CVD (confirms trend direction) ──
         # [FIX 2026-05-21] Pure trend following: CVD only scores when ALIGNED with price.
