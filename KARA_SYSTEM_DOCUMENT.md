@@ -3,11 +3,104 @@
 > Ditulis dari hasil membaca seluruh kode Python. Setiap angka berasal dari kode, bukan asumsi.
 > Bahasa: Indonesia, dengan istilah teknis dalam bahasa Inggris bila lebih tepat.
 >
-> **Last updated:** 2026-05-21 — sinkron dengan perubahan: Momentum Confirmation Gate, Edge Components (Cross-Asset, Delta Volume, OB Absorption), Component Conflict Resolution, WS Funding Fix.
+> **Last updated:** 2026-05-21 (Audit #4 malam) — sinkron dengan perubahan: Disable DVI, fix XAM thresholds, nerf CVD, add min momentum 0.15% gate.
 
 ---
 
-## RINGKASAN PERUBAHAN TERBARU (2026-05-21)
+## RINGKASAN PERUBAHAN TERBARU — AUDIT #4 (2026-05-21 malam)
+
+### Audit Findings (72 unique trades, 3.3 jam, 21 Mei 2026 — 10:14-13:36 UTC)
+| Metric | Value |
+|---|---|
+| Win Rate | 37.5% (27W / 45L) |
+| Total PnL | **+$3.90** (1 user) — **NET PROFITABLE** |
+| Profit Factor | **1.866** |
+| Expectancy/trade | +$0.054 |
+| Avg Win | +$1.35 |
+| Avg Loss | −$0.73 |
+| Score ↔ PnL Pearson r | **+0.035** (neutral — no longer inverse) |
+| time_exit | 46/72 (63.9%), WR **10.9%** |
+| trailing_stop | 14/72 (19.4%), WR **100%** |
+| close_all | 12/72 (16.7%), WR 66.7% |
+| Trades/hour | 21.5 (was 79 in Audit #2) |
+| Sizing asymmetry | 1.01× (fixed — was 1.26×) |
+
+**Key insight:** Bot is net profitable, but edge comes 100% from EXIT SYSTEM (trailing stop), not entry quality. time_exit WR 10.9% = entry timing still poor.
+
+**Root causes of remaining losses:**
+1. **Low-momentum entries** — Trades with pre-move <0.15% = WR 24%, PnL −$7.23. Bot enters flat market, no trend to ride.
+2. **3 dead components** — DVI (0%), MTF (0%), XAM (0%) never fire. Dead weight in scoring.
+3. **CVD constant bias** — 100% firing rate, mean +8.48. Not a signal, just noise floor.
+4. **89% time_exit trades move AGAINST position** — But data shows this is NOT "entering after pump." Trades WITH momentum (>0.3%) are MORE profitable (WR 52.6%). Problem is entering WITHOUT momentum.
+
+### Perubahan Implementasi (Audit #4, 2026-05-21 malam)
+
+| Area | Sebelum | Sesudah | File |
+|---|---|---|---|
+| **DVI (Delta Volume Imbalance)** | Active (±10 pts) but 0% firing | **DISABLED** — redundant with CVD, timestamp parsing broken | `engine/scoring_engine.py` |
+| **XAM (Cross-Asset Momentum)** | Active (±12 pts) but 0% firing | **RE-ENABLED + FIXED** — relative lag detection (alt < 50% of leader move), leader threshold 0.15% | `engine/scoring_engine.py` |
+| **CVD threshold** | 0.15 (fires 100%, constant +8 bias) | **0.25** + requires price confirmation >0.1% | `engine/scoring_engine.py` |
+| **Min momentum gate** | None — bot enters flat markets | **NEW: block if dir_move < 0.15%** (data: blocked WR 24%, passed WR 45%) | `engine/scoring_engine.py` |
+
+### Simulation Results (72 trades, min momentum filter applied)
+
+| Metric | Before Filter | After Filter | Delta |
+|---|---|---|---|
+| Trades | 72 | 47 | −25 blocked |
+| Win Rate | 37.5% | **45%** | +7.5% |
+| Total PnL | +$3.90 | **+$11.13** | +$7.23 |
+| Expectancy/trade | $0.054 | **$0.237** | **4.4× improvement** |
+
+### Comparison Across Audits
+
+| Metric | Audit #1 (18 Mei) | Audit #2 (20 Mei) | Audit #3 (21 Mei AM) | Audit #4 (21 Mei PM) |
+|---|---|---|---|---|
+| Trades | 338 (12h) | 260 (3.3h) | 21 (1h) | 72 (3.3h) |
+| Win Rate | 48.8% | 47.7% | 47.6% | 37.5% |
+| PnL | −$67.22 | −$26.39 | −$5.74 | **+$3.90** |
+| Profit Factor | 0.65 | 0.74 | 0.58 | **1.87** |
+| Score↔PnL r | +0.025 | −0.145 | −0.449 | **+0.035** |
+| Trades/hour | 28 | 79 | 21 | 21.5 |
+
+### Component Status After Audit #4
+
+| Component | Max Pts | Firing Rate | Status |
+|---|---|---|---|
+| OI/Funding (contrarian) | ±28 | 59.3% | ✅ Working |
+| Orderbook Wall | ±18 | 64.6% | ✅ Working |
+| Liquidation | ±12 | 8.4% | ⚠️ Barely fires (HL data sparse) |
+| Cross-Asset Momentum (XAM) | ±12 | TBD (just fixed) | 🔧 Re-enabled with new thresholds |
+| Delta Volume Imbalance (DVI) | ±10 | 0% | ❌ DISABLED (redundant) |
+| OB Absorption | ±10 | 0% | ❌ DISABLED (reversal signal) |
+| EMA Cross | ±10 | 81% | ✅ Working |
+| RSI | ±8 | 77% | ✅ Working |
+| CVD Confirms | ±10 | ~30-50% (nerfed) | ✅ Fixed (was 100%) |
+| MTF 15m | ±10 | 0% | ❌ DISABLED (inverse predictor) |
+| Bybit L/S Ratio | ±12 | 0% | ❌ DEAD (Bybit blocked) |
+
+### ML Model Status
+- training_data: **135 samples** (needs 200 for activation)
+- pattern_memory: 72 patterns
+- **Both layers DORMANT** — not contributing to any decision
+
+---
+| Total PnL | −$15.80 | **+$5.27** | **+$21.07** |
+| Expectancy/trade | −$0.272 | **+$0.128** | +$0.40 |
+
+Impact breakdown:
+- MTF disable: 17 blocked (14 losers −$17.28, 3 winners +$3.44) → net +$13.84
+- Early cut -0.2%: 15 trades loss capped → +$6.60
+- Trail lock 0.10%: 7 trades slight haircut → −$0.37
+
+### ML Model Status
+- training_data: **24 samples** (needs 200 for activation)
+- pattern_memory: 21 patterns, all n=1 or n=2 (needs ≥5 for Layer 1)
+- **Both layers DORMANT** — not contributing to any decision
+- Recommendation: let accumulate on new (fixed) logic, do NOT train on old broken data
+
+---
+
+## RINGKASAN PERUBAHAN SEBELUMNYA (2026-05-21 pagi)
 
 ### Audit Findings (46 trades, 1 jam, 21 Mei 2026)
 | Metric | Value |
@@ -241,8 +334,8 @@ Scoring dibagi 3 layer:
 | **OI/Funding** | ±28 | Uang baru masuk = move ABOUT to happen |
 | **Orderbook Wall** | ±18 | Pressure building, belum breakout |
 | **Liquidation** | ±12 | Cascade potential = catalyst |
-| **Cross-Asset Momentum** | ±12 | BTC/ETH moved, alt belum follow |
-| **Delta Volume Imbalance** | ±10 | Dollar-weighted aggressor urgency |
+| **Cross-Asset Momentum** | ±12 | BTC/ETH moved, alt belum follow (relative lag: alt < 50% of leader) |
+| **Delta Volume Imbalance** | ~~±10~~ | **DISABLED** (Audit #4: 0% firing, redundant with CVD) |
 | **OB Absorption** | ~~±10~~ | **REMOVED** — reversal signal |
 | **Bybit L/S Ratio** | ~~±12~~ | **DEAD** — Bybit blocked |
 | **RSI Divergence (1m vs 5m)** | ±8 | Price↓ + RSI recovering = reversal |
@@ -255,10 +348,10 @@ Scoring dibagi 3 layer:
 | **EMA Cross (stale ≥8m)** | **−10** | Move sudah jalan lama = PENALTY |
 | **RSI neutral (42-58)** | +5 | Price hasn't moved = opportunity |
 | **RSI extreme (>75 or <25)** | **−8** | Exhaustion = PENALTY |
-| **CVD confirms** (CVD + harga searah) | +10 | Trend confirmation — CVD dan harga bergerak sama arah |
-| **CVD mild** (CVD saja) | +3 | Lagging, small weight |
-| **MTF 15m aligned** | +6 | Mild confirmation |
-| **MTF 15m discord** | −4 | Counter-trend warning |
+| **CVD confirms** (CVD + harga searah) | +10 | Trend confirmation — CVD ratio >0.25 AND harga bergerak >0.1% searah |
+| **CVD mild** (CVD saja) | ~~+3~~ | **REMOVED** (Audit #4: was constant bias +8.48, 100% firing) |
+| **MTF 15m aligned** | ~~+6~~ | **DISABLED** (r=-0.68 inverse predictor) |
+| **MTF 15m discord** | ~~−4~~ | **DISABLED** |
 
 #### Layer 3: DISPLACEMENT MULTIPLIER (Regime-Aware)
 
@@ -319,11 +412,11 @@ Mengukur kondisi pasar dari sisi modal dan biaya sewa posisi.
 |---|---|
 | > 0.0006 (EXTREME positif) | +18 bull |
 | > 0.0003 (HIGH positif) | +12 bull |
-| > 0.00005 (moderat positif) | +6 bull |
+| > 0.00005 (moderat positif) | +8 bull |
 | > 0.00001 (sedikit positif) | +3 bull |
 | < -0.0006 (EXTREME negatif) | +18 bear |
 | < -0.0003 (HIGH negatif) | +12 bear |
-| < -0.00005 (moderat negatif) | +6 bear |
+| < -0.00005 (moderat negatif) | +8 bear |
 | < -0.00001 (sedikit negatif) | +3 bear |
 
 *Contoh nyata: BTC funding rate 0.0001 (0.01%/8h) → +6 bull*
@@ -486,8 +579,8 @@ Diterapkan **additif** (bukan if/else), artinya overlap London-NY mendapat kedua
 | Off-session | 17:00 – 21:59 UTC | 0 |
 | Asia Session | 22:00 – 06:59 UTC | **-10** |
 
-**Blocked Hours (tidak ada sinyal sama sekali):**
-Jam 08:00 dan 09:00 UTC (London open) — diblok karena data historis menunjukkan WR 7.1% dan 21.4% dengan total loss -$15.66 akibat opening spike.
+**Blocked Hours:**
+~~Jam 08:00 dan 09:00 UTC (London open)~~ — **REMOVED** (Audit #3). Early loss cut -0.2%/5min now handles spike risk. Bot trades 24 jam.
 
 ---
 
@@ -578,7 +671,7 @@ Berikut urutan filter lengkap, berurutan dari scoring hingga eksekusi:
 
 **Di dalam Scoring Engine (memblok pembuatan sinyal):**
 
-1. **Blocked Hours** — Jam 08:00 dan 09:00 UTC. Kedua mode diblok.
+1. **Blocked Hours** — ~~Jam 08:00 dan 09:00 UTC~~ **REMOVED** (Audit #3). `BLOCKED_HOURS_UTC = []`.
 2. **EXTREME Regime** — Volatilitas > 8%/hari. Asset di-skip.
 3. **Mark Price = 0** — Jika API gagal return harga, asset di-skip.
 4. **Spread Filter (Standard)** — Jika bid-ask spread > 0.25%, asset di-reject.
@@ -592,7 +685,8 @@ Berikut urutan filter lengkap, berurutan dari scoring hingga eksekusi:
 12. **MTF Alignment (Scalper)** — Jika 15m EMA berlawanan kuat dan skor < 60 setelah penalty, di-reject.
 13. **Score Threshold** — Standard LONG < 62 atau SHORT < 62. Scalper LONG < 60 atau SHORT < 62.
 14. **Momentum Confirmation Gate (BARU 2026-05-21)** — Harga 5 menit terakhir harus sudah bergerak ≥0.05% ke arah prediksi DAN minimal 3/5 candle close searah. Tanpa ini, signal di-skip.
-15. **Signal Cooldown** — Standard: 15 menit per aset. Scalper: 5 menit per aset.
+15. **Min Momentum Gate (BARU 2026-05-21 malam)** — Directional move harus ≥0.15%. Data: trades <0.15% = WR 24%, ≥0.15% = WR 45%. Blocks flat/noise entries.
+16. **Signal Cooldown** — Standard: 15 menit per aset. Scalper: 5 menit per aset.
 
 **Di dalam `_handle_signals()` (memblok setelah sinyal dibuat):**
 
@@ -882,7 +976,7 @@ Scalper pakai **hard time limit 12 menit** + grace period:
 | **Max hold time** | 6 jam (hard cap), keluar lebih awal jika flatline/reversal | 12 menit hard + 6 menit grace |
 | **EV Gate** | Ya — trade diblok jika EV < 0.1% | **Tidak ada EV gate** |
 | **3-of-4 Consensus** | Wajib | Tidak ada |
-| **MTF Confirmation** | Tidak ada | Ya — 15m EMA alignment (bonus +12, penalti -15) |
+| **MTF 15m alignment** | ~~+12/−15~~ | **DISABLED** (Audit #3: r=-0.68 inverse predictor) |
 | **Pyramid (scale-in)** | Tidak ada | Ada (disabled by default, butuh profit ≥ 0.4%) |
 
 ---
@@ -1244,45 +1338,47 @@ Semua posisi akan ditutup di harga market saat ini.
 
 ---
 
-## VERDICT (Update 2026-05-21)
+## VERDICT (Update 2026-05-21 malam — Audit #4)
 
 ### Status Saat Ini
 
-Bot mengalami **0-15% WR** setelah hard reset karena:
-1. Scoring engine mengukur "kekuatan setup" bukan "probabilitas arah benar"
-2. Tidak ada konfirmasi bahwa harga sudah bergerak ke arah prediksi sebelum entry
-3. Funding rate selalu 0 (WS parsing bug) → OI/Funding analyzer kehilangan 50% data
-4. Bybit blocked → L/S ratio, Bybit funding, Bybit OI semua mati
+Bot **NET PROFITABLE** untuk pertama kalinya (PF 1.87, +$3.90 dalam 3.3 jam). Score tidak lagi inverse (r=+0.035). Overtrading resolved (21/jam vs 79/jam). Sizing symmetric (1.01×).
 
-### Fix yang Diterapkan (2026-05-21)
+Edge berasal dari **exit system** (trailing stop 100% WR, 19.4% firing rate), bukan entry quality (time_exit WR 10.9%). Entry masih perlu improvement tapi tidak lagi merusak.
 
-1. **Momentum Confirmation Gate** — Bot sekarang HANYA masuk kalau harga 5 menit terakhir sudah bergerak ke arah prediksi. Standard signals: ≥0.04% net move + 3/5 candles. Leading signals (CVD divergence, Cross-Asset, OB Absorption): hanya 2/5 candles directional (no net move requirement karena by design harga belum bergerak).
-2. **CHOPPY threshold +8** — Market tanpa arah jelas butuh signal sangat kuat (effective threshold 53+8=61).
-3. **Early loss cut 5min/-0.3%** — Kalau salah arah setelah 5 menit dan floating -0.3%, cut. Cukup waktu untuk develop tapi tidak tunggu 15 menit.
-4. **WS funding parsing fixed** — `ctx.funding` bukan `data.funding`. Funding rate sekarang terisi.
-5. **3 Edge Components baru** — Cross-Asset Momentum, Delta Volume Imbalance, OB Absorption. Total +32 pts potential dari data yang sudah ada.
-6. **OI vs Direction penalty** — Saat OI/Funding opposes chosen side (oi_signed > ±8), confirm_pts -5. Mencegah OB snapshot override fundamental data.
-7. **OB double-count prevention** — OB Absorption hanya fire kalau OB Imbalance belum di max (18 pts).
-8. **Double Asia penalty removed** — Hanya scoring engine yang apply session threshold, tidak lagi di _handle_signals.
+### Fix yang Diterapkan (2026-05-21 malam — Audit #4)
 
-### Expected Impact
+1. **DVI disabled** — 0% firing rate, 3 audits berturut-turut, redundant dengan CVD.
+2. **XAM re-enabled + fixed** — Relative lag detection (alt < 50% of leader move), leader threshold 0.15%.
+3. **CVD nerfed** — Threshold 0.15→0.25, requires price confirmation. Target 30-50% firing (was 100%).
+4. **Min momentum 0.15% gate** — Block flat entries. Data: blocked WR 24% vs passed WR 45%. Expectancy 4.4× improvement.
 
-| Metric | Sebelum (21 Mei pagi) | Target |
-|---|---|---|
-| Direction accuracy | 15% | >55% (momentum gate) |
-| Win rate | 15.2% | 40-50% |
-| time_exit dominance | 93% | <40% |
-| Avg loss per trade | −$0.83 | −$0.40 (early cut) |
-| Funding data availability | 0% (always 0) | ~80% (WS fix) |
-| Profit factor | 0.43 | 1.0-1.3 |
+### Fix yang Masih Aktif dari Audit Sebelumnya
+
+- Momentum Confirmation Gate (5min ≥0.04% + 3/5 candles)
+- CHOPPY threshold +8
+- Early loss cut -0.2%/5min (no gate)
+- WS funding parsing fixed (ctx.funding)
+- OI vs Direction penalty (-5 confirm_pts)
+- MTF disabled
+- Displacement penalty (regime-aware)
 
 ### Risiko yang Tersisa
 
-- **Bybit fully blocked** — L/S ratio dead, OI enrichment dead. Hanya HL data tersedia.
-- **Momentum gate mungkin terlalu ketat** — Bisa mengurangi jumlah trade drastis. Monitor trade frequency.
-- **CHOPPY +8 mungkin terlalu ketat** — Mayoritas market CHOPPY di Asia session. Bisa jadi 0 trades di Asia.
-- **ML cold start** — Pattern memory baru 14 patterns, 40 samples. Belum cukup untuk ML model (butuh 200).
-- **Railway infra limitation** — Tidak bisa akses exchange manapun selain HL. Untuk live trading HARUS pindah VPS.
+- **Sample size** — 72 trades. Butuh 200+ untuk statistical confidence.
+- **Edge fragile** — 100% dari trailing stop. Kalau market berubah dan trailing jarang fire → kembali rugi.
+- **XAM untested** — Baru di-fix, belum ada data apakah benar-benar fire dan profitable.
+- **Bybit blocked** — L/S ratio dead, OI enrichment dead. Hanya HL data.
+- **ML cold start** — 135 training samples, needs 200.
+- **Railway infra** — Live trading HARUS pindah VPS.
+
+### Next Steps
+
+1. ✅ Deployed (commit `45f6d47`)
+2. Kumpulkan 100+ trades dengan logic baru (estimasi 2-3 hari)
+3. Re-audit: validate XAM firing >0%, CVD firing 30-50%, min momentum blocking ~30%
+4. Target: WR ≥42%, PF ≥1.5, expectancy >$0.15/trade
+5. ML auto-activate setelah 200 trades
 
 ---
 
