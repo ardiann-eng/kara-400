@@ -906,28 +906,33 @@ class ScoringEngine:
             _mcandles = f"{_dir_candles}/5"
 
         # ── [AUDIT FIX 2026-05-21] PRICE vs EMA21 TREND FILTER ─────────────
-        # Trend-following rule: price below EMA21 = downtrend = only SHORT allowed.
-        # Price above EMA21 = uptrend = only LONG allowed.
-        # Case: LIT scored LONG (OB bid wall) while price dumping. Bid wall = trap.
-        # Fix: override side based on actual price trend. Score stays, direction flips.
+        # Trend-following rule with DOUBLE CONFIRMATION:
+        # Flip only when price below EMA21 AND EMA8 < EMA21 (confirmed downtrend).
+        # Single condition (price below EMA21) can be noise/bounce from support.
+        # EMA8 crossing below EMA21 = trend structure broken = safe to flip.
         if len(_closes) >= 21:
             _ema21_val = _closes[0]
+            _ema8_val = _closes[0]
             _k21 = 2 / 22
+            _k8 = 2 / 9
             for _v in _closes[1:]:
                 _ema21_val = _v * _k21 + _ema21_val * (1 - _k21)
+                _ema8_val = _v * _k8 + _ema8_val * (1 - _k8)
             _price_vs_ema = (mark_price - _ema21_val) / _ema21_val
-            if side == Side.LONG and _price_vs_ema < -0.002:  # price >0.2% below EMA21 = downtrend
+            _ema_cross_bear = _ema8_val < _ema21_val * 0.9997  # EMA8 below EMA21
+            _ema_cross_bull = _ema8_val > _ema21_val * 1.0003  # EMA8 above EMA21
+            if side == Side.LONG and _price_vs_ema < -0.002 and _ema_cross_bear:
                 log.info(
-                    f"[TREND-FLIP] {asset} | LONG→SHORT | price={mark_price:.4f} below EMA21={_ema21_val:.4f} ({_price_vs_ema*100:.2f}%)"
+                    f"[TREND-FLIP] {asset} | LONG→SHORT | price={mark_price:.4f} below EMA21={_ema21_val:.4f} ({_price_vs_ema*100:.2f}%) + EMA8<EMA21"
                 )
                 side = Side.SHORT
-                reasons.append(f"🔄 Trend flip: price below EMA21 ({_price_vs_ema*100:.2f}%) → forced SHORT")
-            elif side == Side.SHORT and _price_vs_ema > 0.002:  # price >0.2% above EMA21 = uptrend
+                reasons.append(f"🔄 Trend flip: price below EMA21 + EMA8<EMA21 → forced SHORT")
+            elif side == Side.SHORT and _price_vs_ema > 0.002 and _ema_cross_bull:
                 log.info(
-                    f"[TREND-FLIP] {asset} | SHORT→LONG | price={mark_price:.4f} above EMA21={_ema21_val:.4f} ({_price_vs_ema*100:.2f}%)"
+                    f"[TREND-FLIP] {asset} | SHORT→LONG | price={mark_price:.4f} above EMA21={_ema21_val:.4f} ({_price_vs_ema*100:.2f}%) + EMA8>EMA21"
                 )
                 side = Side.LONG
-                reasons.append(f"🔄 Trend flip: price above EMA21 ({_price_vs_ema*100:.2f}%) → forced LONG")
+                reasons.append(f"🔄 Trend flip: price above EMA21 + EMA8>EMA21 → forced LONG")
 
         signal = self._build_scalper_signal(
             asset, side, score, mark_price, reasons, vol_regime,
