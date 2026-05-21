@@ -652,15 +652,20 @@ class HyperliquidClient:
             log.debug(f"Error extracting ctx for {asset}: {e}")
             return None
 
-    # ── Bybit Funding Cache (replaces HL funding which is always flat) ──
+    # ── Bybit Funding Cache (optional, used when Bybit is reachable) ──
     _bybit_funding_cache: Dict[str, float] = {}
     _bybit_oi_cache: Dict[str, float] = {}
-    _bybit_oi_prev: Dict[str, float] = {}  # previous snapshot for delta calc
+    _bybit_oi_prev: Dict[str, float] = {}
     _bybit_funding_cache_time: float = 0
     _bybit_client = None
+    _bybit_unreachable: bool = False        # set True after consecutive failures
+    _bybit_fail_count: int = 0
+    _BYBIT_FAIL_LIMIT: int = 3              # give up after 3 consecutive failures
 
     async def _refresh_bybit_funding(self):
-        """Fetch funding rates + OI from Bybit (30s cache). HL funding is flat (97% = 0)."""
+        """Fetch funding rates + OI from Bybit (30s cache). Skipped if Bybit is unreachable."""
+        if self._bybit_unreachable:
+            return
         import time as _t
         now = _t.monotonic()
         if now - self._bybit_funding_cache_time < 30 and self._bybit_funding_cache:
@@ -676,32 +681,54 @@ class HyperliquidClient:
                 )
             rates = await self._bybit_client.get_funding_rates_batch()
             self._bybit_funding_cache = rates
-            # OI delta: save previous before overwriting
             if self._bybit_oi_cache:
                 self._bybit_oi_prev = self._bybit_oi_cache.copy()
             self._bybit_oi_cache = self._bybit_client.get_open_interest_from_cache()
             self._bybit_funding_cache_time = now
+            self._bybit_fail_count = 0
             log.debug(f"[FUNDING-BYBIT] Refreshed {len(rates)} funding + {len(self._bybit_oi_cache)} OI")
         except Exception as e:
-            log.warning(f"[FUNDING-BYBIT] Fetch failed: {e}")
+            self._bybit_fail_count += 1
+            if self._bybit_fail_count >= self._BYBIT_FAIL_LIMIT:
+                self._bybit_unreachable = True
+                log.warning(f"[FUNDING-BYBIT] Bybit unreachable after {self._bybit_fail_count} attempts — switching to HL-only mode")
+            else:
+                log.debug(f"[FUNDING-BYBIT] Fetch failed ({self._bybit_fail_count}/{self._BYBIT_FAIL_LIMIT}): {e}")
 
     async def get_funding_data(self, asset: str, meta: Optional[Any] = None) -> FundingData:
-        """Fetch funding data from Bybit (primary) with HL fallback."""
-        # Primary: Bybit funding (8× more informative than HL)
+        """Fetch funding data. Primary: Bybit (when reachable). Fallback: HL fundingHistory."""
+        # Primary: Bybit funding (more informative than HL spot rate)
         await self._refresh_bybit_funding()
         bybit_sym = f"{asset}USDT"
         bybit_fr = self._bybit_funding_cache.get(bybit_sym)
-
         if bybit_fr is not None and bybit_fr != 0:
-            return FundingData(
-                asset=asset,
-                funding_rate=bybit_fr,
-                premium=0,
-                predicted_rate=0,
-                hourly_trend=[]
-            )
+            return FundingData(asset=asset, funding_rate=bybit_fr, premium=0, predicted_rate=0, hourly_trend=[])
 
-        # Fallback: HL meta (mostly flat but better than nothing)
+        # Fallback A: HL fundingHistory (last 8h, gives actual rate not just current)
+        try:
+            import time as _t
+            end_ms = int(_t.time() * 1000)
+            start_ms = end_ms - 8 * 3600 * 1000
+            result, ok = await self._call_info_endpoint(
+                "fundingHistory",
+                {"coin": asset, "startTime": start_ms, "endTime": end_ms}
+            )
+            if ok and isinstance(result, list) and result:
+                # result is list of {coin, fundingRate, premium, time}
+                latest = result[-1]
+                rate = float(latest.get("fundingRate") or 0)
+                trend = [float(r.get("fundingRate") or 0) for r in result[-8:]]
+                return FundingData(
+                    asset=asset,
+                    funding_rate=rate,
+                    premium=float(latest.get("premium") or 0),
+                    predicted_rate=0,
+                    hourly_trend=trend
+                )
+        except Exception as e:
+            log.debug(f"[FUNDING-HL] fundingHistory failed for {asset}: {e}")
+
+        # Fallback B: HL meta ctx (often flat/0 but better than nothing)
         ctx = None
         if meta:
             ctx = self._extract_ctx(meta, asset)
@@ -741,24 +768,28 @@ class HyperliquidClient:
         if not ctx or not isinstance(ctx, dict):
             return OIData(asset=asset, open_interest=0, oi_change_pct=0.0, oi_change_24h=0.0, oracle_price=0)
 
-        mark          = float(ctx.get("markPx", 0))
-        oi_contracts  = float(ctx.get("openInterest", 0))
-        oi_usd        = oi_contracts * mark
+        mark         = float(ctx.get("markPx", 0))
+        oi_contracts = float(ctx.get("openInterest", 0))
+        oi_usd       = oi_contracts * mark
+        day_vol      = float(ctx.get("dayNtlVlm", 0))
 
-        # Approximate 24h OI change ratio: dayNtlVlm / oi_usd
-        # High volume relative to OI = active positioning = OI likely changing
-        # This is a proxy, NOT the real oi_change_24h (HL API doesn't provide it directly)
-        day_vol = float(ctx.get("dayNtlVlm", 0))
-        if oi_usd > 0 and day_vol > 0:
-            # Rough approximation: vol-to-OI ratio indicates activity level
-            # Clamp to ±50% to avoid extreme outliers from thinly-traded assets
-            oi_change_24h_proxy = min(day_vol / oi_usd - 1.0, 0.50)
+        # OI change %: prefer Bybit 30s delta; fall back to dayNtlVlm/oi_usd proxy
+        bybit_delta = self._get_bybit_oi_delta(asset)
+        if bybit_delta != 0.0:
+            oi_change_pct = bybit_delta
+        elif oi_usd > 0 and day_vol > 0:
+            # vol-to-OI ratio: >1 means volume > OI → active positioning → OI likely rising
+            # clamp to ±30% to avoid outliers on thinly-traded assets
+            oi_change_pct = max(min(day_vol / oi_usd - 1.0, 0.30), -0.30)
+        else:
+            oi_change_pct = 0.0
+
         return OIData(
             asset=asset,
-            open_interest=float(ctx.get("openInterest") or 0),
-            oi_change_pct=self._get_bybit_oi_delta(asset),  # [AUDIT FIX] Use Bybit OI delta
+            open_interest=oi_contracts,
+            oi_change_pct=oi_change_pct,
             oi_change_24h=0.0,
-            volume_24h_usd=float(ctx.get("dayNtlVlm") or 0),
+            volume_24h_usd=day_vol,
             oracle_price=float(ctx.get("oraclePx") or 0)
         )
 
