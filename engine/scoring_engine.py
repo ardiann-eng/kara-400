@@ -905,6 +905,32 @@ class ScoringEngine:
             _dir_candles = _bullish_candles if side == Side.LONG else _bearish_candles
             _mcandles = f"{_dir_candles}/5"
 
+        # ── [AUDIT FIX 2026-05-21] PRICE vs EMA21 TREND FILTER ─────────────
+        # Don't LONG if price below EMA21 (downtrend). Don't SHORT if price above EMA21 (uptrend).
+        # Case: LIT LONG at $1.35 while price dumping from $1.44. EMA21 was above price = downtrend.
+        if len(_closes) >= 21:
+            _ema21_val = _closes[0]
+            _k21 = 2 / 22
+            for _v in _closes[1:]:
+                _ema21_val = _v * _k21 + _ema21_val * (1 - _k21)
+            _price_vs_ema = (mark_price - _ema21_val) / _ema21_val
+            if side == Side.LONG and _price_vs_ema < -0.002:  # price >0.2% below EMA21
+                log.info(
+                    f"[SKIP] {asset} | score={score} | side=long | "
+                    f"reason=price_below_ema21 | context=price={mark_price:.4f} ema21={_ema21_val:.4f} gap={_price_vs_ema*100:.2f}%"
+                )
+                self.skip_counters["price_below_ema21"] = self.skip_counters.get("price_below_ema21", 0) + 1
+                self._skip_count_since_summary += 1
+                return None, score
+            elif side == Side.SHORT and _price_vs_ema > 0.002:  # price >0.2% above EMA21
+                log.info(
+                    f"[SKIP] {asset} | score={score} | side=short | "
+                    f"reason=price_above_ema21 | context=price={mark_price:.4f} ema21={_ema21_val:.4f} gap={_price_vs_ema*100:.2f}%"
+                )
+                self.skip_counters["price_above_ema21"] = self.skip_counters.get("price_above_ema21", 0) + 1
+                self._skip_count_since_summary += 1
+                return None, score
+
         signal = self._build_scalper_signal(
             asset, side, score, mark_price, reasons, vol_regime,
             session_bonus, realized_vol, trend_pct, atr_pct=atr_pct_now,
