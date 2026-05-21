@@ -810,6 +810,21 @@ class ScoringEngine:
                     pass
         atr_pct_now = self._compute_atr_pct(_highs, _lows, _closes, period=14)
 
+        # ── [AUDIT FIX 2026-05-21 P0] ATR MINIMUM GATE ─────────────────────
+        # Data (104 trades): ATR < 0.0008 → WR 11%, PnL -$15.07 (dead money)
+        #                    ATR >= 0.0012 → WR 51%, PnL +$18.17
+        # SHORT-specific: winners avg ATR=0.00305, losers avg ATR=0.00157.
+        # SHORT needs higher threshold due to structural upward bias + bounce risk.
+        _min_atr = 0.0015 if side == Side.SHORT else 0.0010
+        if atr_pct_now > 0 and atr_pct_now < _min_atr:
+            log.info(
+                f"[SKIP] {asset} | score={score} | side={side.value} | "
+                f"reason=low_atr | context=atr={atr_pct_now:.5f} < {_min_atr} (need volatility for trailing)"
+            )
+            self.skip_counters["low_atr"] = self.skip_counters.get("low_atr", 0) + 1
+            self._skip_count_since_summary += 1
+            return None, score
+
         # ── [FIX 2026-05-21] MOMENTUM CONFIRMATION GATE ────────────────────
         # Defaults (used if candle data insufficient)
         _direction_ok = True; _net_move = 0.0; _bullish_candles = 0; _bearish_candles = 0
@@ -819,13 +834,14 @@ class ScoringEngine:
             # [AUDIT FIX 2026-05-21 P1] MINIMUM MOMENTUM REQUIREMENT
             # Data: trades with pre-move >0.3% = WR 52.6%, PnL +$8.39
             #       trades with pre-move <0.15% = WR ~28%, PnL negative
-            # Root cause: low-momentum entries = noise, no trend to ride, time_exit loss.
-            # Fix: require minimum 0.15% move in our direction before entry.
+            # SHORT-specific: winners entered AFTER strong downmove (avg vol 0.0958).
+            # SHORT needs 0.25% min (1.67× LONG) due to structural upward bias + bounce risk.
             _dir_move = _net_move if side == Side.LONG else -_net_move
-            if _dir_move < 0.0015:  # <0.15% move in our direction = no momentum
+            _min_momentum = 0.0025 if side == Side.SHORT else 0.0015  # 0.25% SHORT, 0.15% LONG
+            if _dir_move < _min_momentum:
                 log.info(
                     f"[SKIP] {asset} | score={score} | side={side.value} | "
-                    f"reason=low_momentum | context=dir_move={_dir_move*100:.3f}% < 0.15% (need trend)"
+                    f"reason=low_momentum | context=dir_move={_dir_move*100:.3f}% < {_min_momentum*100:.2f}% (need trend)"
                 )
                 self.skip_counters["low_momentum"] = self.skip_counters.get("low_momentum", 0) + 1
                 self._skip_count_since_summary += 1
@@ -839,12 +855,13 @@ class ScoringEngine:
             )
 
             if _has_leading_signal:
-                # Only require candle direction (3/5), no net move threshold
+                # Only require candle direction, no net move threshold
+                # SHORT needs 3/5 (stricter) vs LONG 2/5 — structural upward bias
                 _bullish_candles = sum(1 for i in range(-5, 0) if _closes[i] > _closes[i-1])
                 _bearish_candles = 5 - _bullish_candles
                 _direction_ok = (
                     (side == Side.LONG and _bullish_candles >= 2) or
-                    (side == Side.SHORT and _bearish_candles >= 2)
+                    (side == Side.SHORT and _bearish_candles >= 3)
                 )
             else:
                 # Standard: require net move + candle direction
