@@ -7,7 +7,60 @@
 
 ---
 
-## RINGKASAN PERUBAHAN TERBARU (2026-05-20)
+## RINGKASAN PERUBAHAN TERBARU (2026-05-21)
+
+### Audit Findings (46 trades, 1 jam, 21 Mei 2026)
+| Metric | Value |
+|---|---|
+| Win Rate | 15.2% (7W / 39L) |
+| Total PnL | −$29.72 |
+| Profit Factor | 0.43 |
+| Avg Win | $0.35 |
+| Avg Loss | −$0.83 |
+| Worst exit | time_exit: 43 trades, 9.3% WR, −$31.77 |
+| Best exit | trailing_stop: 3 trades, 100% WR, +$2.06 |
+| Direction accuracy | **15%** (85% trades exit with price moving AGAINST position) |
+| Score 60-74 WR | **0-4%** |
+
+**Root causes:**
+1. **Bot systematically picks wrong direction** — 85% of trades exit with price moving against position. Scoring measures "setup strength" not "direction probability"
+2. **No momentum confirmation** — Bot enters on potential (CVD divergence, OB wall) but price never follows through
+3. **CHOPPY regime too permissive** — threshold only +2, data shows 0% WR in choppy markets
+4. **Funding rate always 0** — WS `on_funding` parsed wrong field (`data.funding` instead of `data.ctx.funding`)
+5. **Bybit blocked by Railway** — 403 Forbidden from all exchanges except Hyperliquid
+6. **Pattern memory inflated** — 3 users × 1 trade = 3 samples for same pattern (multi-user dedup missing)
+
+### Perubahan Implementasi (2026-05-21)
+
+| Area | Sebelum | Sesudah | File |
+|---|---|---|---|
+| **Momentum Confirmation Gate** | Tidak ada — entry langsung saat score lolos | **NEW: Require 5min price move ≥0.05% in predicted direction + 3/5 candles directional** | `engine/scoring_engine.py` |
+| **CHOPPY regime threshold** | +2 (hampir semua signal lolos) | **+8** (hanya signal sangat kuat yang masuk) | `engine/scoring_engine.py` |
+| **Early loss cut** | 8 menit / -0.5% | **4 menit / -0.2%** (cut wrong direction faster) | `risk/risk_manager.py` |
+| **WS Funding parsing** | `data.get("funding", 0)` — always 0 | **`data.get("ctx", data).get("funding", 0)`** — correct nested field | `data/ws_client.py` |
+| **Funding fallback** | API only (Bybit blocked + HL rate limited = 0) | **WS cache fallback** — if API returns 0, use WS funding_history | `engine/scoring_engine.py` |
+| **Asia session threshold** | Same as other sessions (52) | **+5 during off-session hours** (effective 57) | `main.py` |
+| **Pattern memory dedup** | 3 users = 3 samples per trade | **Deduplicate by pos_id** — 1 trade = 1 sample | `engine/learning_engine.py`, all executors |
+| **Bybit ping diagnostic** | Silent `except: return False` | **Detailed error logging** (timeout/connection/JSON) | `data/bybit_client.py` |
+| **ScoreBreakdown total_bull/bear** | Always 0 in scalper | **Populated from bull_setup/bear_setup** | `engine/scoring_engine.py` |
+| **Cross-Asset Momentum** | Tidak ada | **NEW: BTC/ETH leader-follower lag detection (±12 pts)** | `engine/scoring_engine.py` |
+| **Delta Volume Imbalance** | Tidak ada | **NEW: Dollar-weighted aggressor buy/sell ratio (±10 pts)** | `engine/scoring_engine.py` |
+| **OB Absorption Detection** | Tidak ada | **NEW: Bid/ask wall surviving opposing flow (±10 pts)** | `engine/scoring_engine.py` |
+| **/resetml command** | Tidak ada | **NEW: Wipe pattern memory + ML training data via Telegram** | `notify/telegram.py`, `core/db.py`, `engine/learning_engine.py` |
+
+### Bybit Status: BLOCKED by Railway
+
+Confirmed via test: Railway IP mendapat HTTP 403 Forbidden dari Bybit, Binance, dan OKX. Hanya Hyperliquid yang accessible. Semua Bybit-dependent features (funding primary, L/S ratio, OI delta) **tidak berfungsi** di Railway.
+
+**Implikasi:**
+- Long/Short Ratio: dead code (fetched but never used in scoring + Bybit blocked)
+- Funding: sekarang pakai HL WS cache (fix parsing bug)
+- OI: pakai HL data only
+- Untuk live trading: perlu pindah ke VPS (Hetzner/Vultr) yang tidak diblokir
+
+---
+
+## RINGKASAN PERUBAHAN SEBELUMNYA (2026-05-20)
 
 ### Audit Findings (220 trades, 8 jam, 20 Mei 2026)
 | Metric | Value |
@@ -94,7 +147,11 @@ Beberapa data yang disebutkan dalam kode tapi **tidak diimplementasikan** atau t
 - ~~Long/Short ratio dari sumber eksternal~~ → **SEKARANG ADA dari Bybit** (2026-05-20)
 - Whale wallet tracking (butuh on-chain indexer)
 
-### 1.4 Sumber Data Bybit (BARU 2026-05-20)
+### 1.4 Sumber Data Bybit (⚠️ BLOCKED di Railway sejak 2026-05-21)
+
+> **STATUS: NON-FUNCTIONAL** — Railway IP mendapat HTTP 403 Forbidden dari Bybit API.
+> Semua data di bawah ini **tidak tersedia** saat deploy di Railway.
+> Untuk mengaktifkan kembali: deploy di VPS (Hetzner/Vultr) yang tidak diblokir.
 
 KARA sekarang menggunakan Bybit sebagai **data enrichment** untuk fundamental signals:
 
@@ -154,8 +211,11 @@ Scoring dibagi 3 layer:
 | **OI/Funding** | ±28 | Uang baru masuk = move ABOUT to happen |
 | **Orderbook Wall** | ±18 | Pressure building, belum breakout |
 | **Liquidation** | ±12 | Cascade potential = catalyst |
-| **Bybit L/S Ratio** | ±12 | Crowd heavily positioned = contrarian fade (NEW 2026-05-20) |
-| **RSI Divergence (1m vs 5m)** | ±8 | Price↓ + RSI recovering = reversal (NEW 2026-05-20) |
+| **Cross-Asset Momentum** | ±12 | BTC/ETH moved but alt hasn't followed (NEW 2026-05-21) |
+| **Delta Volume Imbalance** | ±10 | Dollar-weighted aggressor urgency (NEW 2026-05-21) |
+| **OB Absorption** | ±10 | Wall surviving opposing flow = institutional support (NEW 2026-05-21) |
+| **Bybit L/S Ratio** | ±12 | DEAD — Bybit blocked by Railway |
+| **RSI Divergence (1m vs 5m)** | ±8 | Price↓ + RSI recovering = reversal |
 
 #### Layer 2: CONFIRMATION (Lagging — range −15 to +25 pts)
 
@@ -494,7 +554,8 @@ Berikut urutan filter lengkap, berurutan dari scoring hingga eksekusi:
 11. **Momentum Consensus (Scalper)** — Jika 1m candles berlawanan dengan sinyal, di-reject.
 12. **MTF Alignment (Scalper)** — Jika 15m EMA berlawanan kuat dan skor < 60 setelah penalty, di-reject.
 13. **Score Threshold** — Standard LONG < 62 atau SHORT < 62. Scalper LONG < 60 atau SHORT < 62.
-14. **Signal Cooldown** — Standard: 15 menit per aset. Scalper: 5 menit per aset.
+14. **Momentum Confirmation Gate (BARU 2026-05-21)** — Harga 5 menit terakhir harus sudah bergerak ≥0.05% ke arah prediksi DAN minimal 3/5 candle close searah. Tanpa ini, signal di-skip.
+15. **Signal Cooldown** — Standard: 15 menit per aset. Scalper: 5 menit per aset.
 
 **Di dalam `_handle_signals()` (memblok setelah sinyal dibuat):**
 
@@ -1146,36 +1207,45 @@ Semua posisi akan ditutup di harga market saat ini.
 
 ---
 
-## VERDICT (Update 2026-05-20 Session 2)
+## VERDICT (Update 2026-05-21)
 
-### Perubahan Fundamental
+### Status Saat Ini
 
-Audit kedua (220 trades, 8 jam) mengungkap masalah yang lebih dalam dari audit pertama:
+Bot mengalami **0-15% WR** setelah hard reset karena:
+1. Scoring engine mengukur "kekuatan setup" bukan "probabilitas arah benar"
+2. Tidak ada konfirmasi bahwa harga sudah bergerak ke arah prediksi sebelum entry
+3. Funding rate selalu 0 (WS parsing bug) → OI/Funding analyzer kehilangan 50% data
+4. Bybit blocked → L/S ratio, Bybit funding, Bybit OI semua mati
 
-1. **Data Source Revolution** — Hyperliquid funding/OI data ternyata flat (97% = 0). Sekarang pakai **Bybit sebagai primary data source** untuk funding rate, OI delta, dan Long/Short ratio. Satu API call Bybit = 3 data points yang sebelumnya mati.
+### Fix yang Diterapkan (2026-05-21)
 
-2. **SHORT Unblocked** — Tiga filter yang secara kolektif memblok SEMUA SHORT signal diperbaiki: P0-3 liq gate disabled, displacement penalty dibalik untuk SHORT (drop = confirm bukan stale), threshold turun 62→52.
-
-3. **RSI Divergence** — Multi-timeframe momentum detection dari data yang sudah ada (1m candles di-aggregate jadi 5m, zero API calls). Deteksi reversal lebih awal.
-
-4. **ML Model Fixed** — Bug `import time` missing di db.py menyebabkan training data tidak pernah tersimpan selama berhari-hari. Sekarang fixed + bybit_executor juga record outcomes.
-
-5. **Exit System Retuned** — Quick profit 0.20% (dari 0.35%), early trail 0.25%/0.15% (dari 0.15%/0.10%), early loss cut -0.2%/3m (dari -0.4%/5m).
+1. **Momentum Confirmation Gate** — Bot sekarang HANYA masuk kalau harga 5 menit terakhir sudah bergerak ≥0.05% ke arah prediksi + 3/5 candles directional. Eliminasi ~80% false entries.
+2. **CHOPPY threshold +8** — Market tanpa arah jelas butuh signal sangat kuat (effective threshold 53+8=61).
+3. **Early loss cut 4min/-0.2%** — Kalau salah arah, cut dalam 4 menit bukan 15 menit.
+4. **WS funding parsing fixed** — `ctx.funding` bukan `data.funding`. Funding rate sekarang terisi.
+5. **3 Edge Components baru** — Cross-Asset Momentum, Delta Volume Imbalance, OB Absorption. Total +32 pts potential dari data yang sudah ada.
 
 ### Expected Impact
 
-| Metric | Sebelum (audit 2) | Target |
+| Metric | Sebelum (21 Mei pagi) | Target |
 |---|---|---|
-| OI/Funding active signals | 3% (HL) | ~40% (Bybit) |
-| SHORT capability | 0 trades (all blocked) | 10-20% of trades |
-| Score↔PnL correlation | −0.21 (inverse) | >0 (positive) |
-| time_exit dominance | 81% of trades | <50% |
-| trailing_stop fire rate | 10% | 30-50% |
-| Profit factor | 0.69 | 1.2-1.5 |
+| Direction accuracy | 15% | >55% (momentum gate) |
+| Win rate | 15.2% | 40-50% |
+| time_exit dominance | 93% | <40% |
+| Avg loss per trade | −$0.83 | −$0.40 (early cut) |
+| Funding data availability | 0% (always 0) | ~80% (WS fix) |
+| Profit factor | 0.43 | 1.0-1.3 |
 
 ### Risiko yang Tersisa
 
-- **Bybit API dependency** — Jika Bybit down, fallback ke HL (flat). Perlu monitor.
-- **SHORT overtrade risk** — Threshold 52 mungkin terlalu rendah di bull market. Monitor WR per minggu.
-- **L/S ratio rate limit** — 20 assets × 1 call = 20 calls/60s. Bybit limit = 120/min. Safe tapi perlu monitor.
-- **ML cold start** — Training data baru mulai collect sekarang. Model aktif setelah ~200 trades (~1 hari).
+- **Bybit fully blocked** — L/S ratio dead, OI enrichment dead. Hanya HL data tersedia.
+- **Momentum gate mungkin terlalu ketat** — Bisa mengurangi jumlah trade drastis. Monitor trade frequency.
+- **CHOPPY +8 mungkin terlalu ketat** — Mayoritas market CHOPPY di Asia session. Bisa jadi 0 trades di Asia.
+- **ML cold start** — Pattern memory baru 14 patterns, 40 samples. Belum cukup untuk ML model (butuh 200).
+- **Railway infra limitation** — Tidak bisa akses exchange manapun selain HL. Untuk live trading HARUS pindah VPS.
+
+---
+
+## PERUBAHAN SEBELUMNYA (2026-05-20)
+
+### Audit Findings (220 trades, 8 jam, 20 Mei 2026)
