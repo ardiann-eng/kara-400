@@ -3,11 +3,98 @@
 > Ditulis dari hasil membaca seluruh kode Python. Setiap angka berasal dari kode, bukan asumsi.
 > Bahasa: Indonesia, dengan istilah teknis dalam bahasa Inggris bila lebih tepat.
 >
-> **Last updated:** 2026-05-21 (Audit #4 malam) — sinkron dengan perubahan: Disable DVI, fix XAM thresholds, nerf CVD, add min momentum 0.15% gate.
+> **Last updated:** 2026-05-21 (Audit #5 malam) — sinkron dengan perubahan: ATR gate, SHORT momentum/candle filters, funding rate relaxed, price vs EMA21 trend-flip.
 
 ---
 
-## RINGKASAN PERUBAHAN TERBARU — AUDIT #4 (2026-05-21 malam)
+## RINGKASAN PERUBAHAN TERBARU — AUDIT #5 (2026-05-21 malam, post-deploy)
+
+### Audit Findings (104 trades, 5.2 jam, 21 Mei 2026 — 10:18-15:28 UTC)
+| Metric | Value |
+|---|---|
+| Win Rate | 35.6% (37W / 67L) |
+| Total PnL | **−$0.63** (near break-even) |
+| Profit Factor | **1.788** |
+| Expectancy/trade | −$0.006 |
+| Avg Win | +$1.31 |
+| Avg Loss | −$0.73 |
+| Score ↔ PnL Pearson r | **−0.023** (neutral) |
+| time_exit | 68/104 (65.4%), WR **8.8%**, PnL −$41.85 |
+| trailing_stop | 23/104 (22.1%), WR **100%**, PnL +$31.54 |
+| close_all | 12/104 (11.5%), WR 66.7%, PnL +$12.02 |
+| stop_loss | 1/104 (1.0%), WR 0%, PnL −$2.34 |
+| Trades/hour | 20.1 |
+| Sizing asymmetry | **1.00×** (fixed) |
+| LONG | 77 trades, WR 40.3%, PnL +$2.79 |
+| SHORT | 27 trades, WR 22.2%, PnL −$3.42 |
+
+### Key Findings
+
+1. **Edge = trailing stop** (100% WR, 22.1% firing rate). Tanpa trailing → bot rugi.
+2. **time_exit = the problem** (65% of trades, 8.8% WR, −$41.85). Root cause: low ATR entries.
+3. **sig_realized_vol = strongest predictor** (r=+0.457, p<0.000001). Score itself NOT predictive (r=−0.023).
+4. **ATR separates winners from losers:** ATR<0.0008 = WR 11%, −$15. ATR≥0.0012 = WR 51%, +$18.
+5. **SHORT structural disadvantage:** Winners avg ATR=0.00305, losers avg ATR=0.00157. Score identical (67 vs 66).
+6. **Hold time: DO NOT INCREASE.** Trailing fires at minute 4-8. 91% time_exit never recover to BEP.
+7. **LIT LONG in downtrend:** OB bid wall (bull_setup=28) = trap. Price below EMA21 = should be SHORT.
+
+### Perubahan Implementasi (Audit #5, 2026-05-21 malam)
+
+| # | Area | Sebelum | Sesudah | File |
+|---|---|---|---|---|
+| 1 | **ATR Minimum Gate** | Tidak ada | **LONG ≥ 0.0010, SHORT ≥ 0.0015** — block low-vol entries | `engine/scoring_engine.py` |
+| 2 | **SHORT Momentum Gate** | 0.15% (sama dengan LONG) | **0.25%** — SHORT butuh confirmed downtrend | `engine/scoring_engine.py` |
+| 3 | **SHORT Candle Confirmation** | 2/5 bearish (leading signals) | **3/5 bearish** — prevent choppy entries | `engine/scoring_engine.py` |
+| 4 | **short_min_funding_rate** | −0.0001 (too tight, blocks ALGO score=68) | **−0.0003** — allow normal negative funding | `config.py`, `engine/scoring_engine.py` |
+| 5 | **Price vs EMA21 Trend-Flip** | Tidak ada — scoring decides side | **Price >0.2% below EMA21 → force SHORT. Price >0.2% above → force LONG.** Overrides scoring direction. | `engine/scoring_engine.py` |
+
+### Comparison Across Audits
+
+| Metric | Audit #2 (20 Mei) | Audit #4 (21 Mei AM) | Audit #5 (21 Mei PM) |
+|---|---|---|---|
+| Trades/hour | 79 | 21.5 | 20.1 |
+| PnL | −$26.39 | +$3.90 | −$0.63 |
+| Profit Factor | 0.74 | 1.87 | 1.79 |
+| Trailing fire rate | 3.5% | 19.4% | **22.1%** |
+| Score↔PnL r | −0.145 | +0.035 | −0.023 |
+| Sizing asymmetry | 1.26× | 1.01× | **1.00×** |
+
+### Active Filters (Post-Audit #5, in order)
+
+1. Blocked hours (currently empty)
+2. EXTREME regime → skip
+3. Spread > 0.15% → reject
+4. Score < threshold (base 45 + CHOPPY +8 + session delta + 4H regime adj) → skip
+5. SHORT-specific: score ≥ 52, funding ≥ −0.0003, no squeeze, technical min ≥ 6
+6. Funding crowded gate (LONG fr>0.05%, SHORT fr<−0.05% → block)
+7. **ATR gate: LONG ≥ 0.0010, SHORT ≥ 0.0015** ← NEW
+8. **Min momentum: LONG ≥ 0.15%, SHORT ≥ 0.25%** ← UPDATED
+9. Momentum confirmation: leading → 2/5 (LONG) or 3/5 (SHORT); standard → 3/5 + net move
+10. **Price vs EMA21 trend-flip: below EMA → force SHORT, above → force LONG** ← NEW
+11. Displacement penalty (regime-aware)
+
+### Expected Impact of Fixes
+
+| Fix | Estimated Impact |
+|---|---|
+| ATR gate | Block ~40% time_exit losers (est. +$15-18) |
+| SHORT momentum 0.25% | Block ~10 SHORT losers (est. +$6) |
+| SHORT candle 3/5 | Additional filter for choppy entries |
+| Funding −0.0003 | Allow valid SHORTs like ALGO (score 68) |
+| EMA21 trend-flip | Prevent LONG in downtrend (LIT case), convert to SHORT |
+
+### Next Audit Checklist (22 Mei)
+
+1. ATR gate firing rate — berapa trades di-block?
+2. time_exit count turun dari 65% ke berapa?
+3. SHORT WR naik dari 22% ke berapa?
+4. Trend-flip: berapa kali fire? Profitable?
+5. Overall PnL flip positive?
+6. Score↔PnL r — improving?
+
+---
+
+## RINGKASAN PERUBAHAN SEBELUMNYA — AUDIT #4 (2026-05-21 malam)
 
 ### Audit Findings (72 unique trades, 3.3 jam, 21 Mei 2026 — 10:14-13:36 UTC)
 | Metric | Value |
@@ -1338,23 +1425,26 @@ Semua posisi akan ditutup di harga market saat ini.
 
 ---
 
-## VERDICT (Update 2026-05-21 malam — Audit #4)
+## VERDICT (Update 2026-05-21 malam — Audit #5)
 
 ### Status Saat Ini
 
-Bot **NET PROFITABLE** untuk pertama kalinya (PF 1.87, +$3.90 dalam 3.3 jam). Score tidak lagi inverse (r=+0.035). Overtrading resolved (21/jam vs 79/jam). Sizing symmetric (1.01×).
+Bot **near break-even** (PF 1.79, −$0.63 dalam 5.2 jam, 104 trades). Trailing stop tetap 100% WR dengan firing rate naik ke 22.1%. Score neutral (r=−0.023). Overtrading resolved (20/jam). Sizing symmetric (1.00×).
 
-Edge berasal dari **exit system** (trailing stop 100% WR, 19.4% firing rate), bukan entry quality (time_exit WR 10.9%). Entry masih perlu improvement tapi tidak lagi merusak.
+Edge berasal dari **exit system** (trailing stop), bukan entry quality. time_exit masih 65% of trades — ATR gate + trend-flip baru deployed untuk address ini.
 
-### Fix yang Diterapkan (2026-05-21 malam — Audit #4)
+### Fix yang Diterapkan (2026-05-21 malam — Audit #5)
 
-1. **DVI disabled** — 0% firing rate, 3 audits berturut-turut, redundant dengan CVD.
-2. **XAM re-enabled + fixed** — Relative lag detection (alt < 50% of leader move), leader threshold 0.15%.
-3. **CVD nerfed** — Threshold 0.15→0.25, requires price confirmation. Target 30-50% firing (was 100%).
-4. **Min momentum 0.15% gate** — Block flat entries. Data: blocked WR 24% vs passed WR 45%. Expectancy 4.4× improvement.
+1. **ATR gate** — LONG ≥ 0.0010, SHORT ≥ 0.0015. Data: low ATR = WR 11%, high ATR = WR 51%.
+2. **SHORT momentum gate** — 0.25% min (vs 0.15% LONG). SHORT winners avg vol 2× losers.
+3. **SHORT candle confirmation** — 3/5 bearish for leading signals.
+4. **short_min_funding_rate relaxed** — −0.0001 → −0.0003. ALGO score=68 was incorrectly blocked.
+5. **Price vs EMA21 trend-flip** — Price below EMA21 → force SHORT. Above → force LONG. Prevents LONG in downtrend (LIT case).
 
 ### Fix yang Masih Aktif dari Audit Sebelumnya
 
+- DVI disabled, XAM re-enabled, CVD nerfed (Audit #4)
+- Min momentum 0.15% gate for LONG (Audit #4)
 - Momentum Confirmation Gate (5min ≥0.04% + 3/5 candles)
 - CHOPPY threshold +8
 - Early loss cut -0.2%/5min (no gate)
@@ -1365,20 +1455,20 @@ Edge berasal dari **exit system** (trailing stop 100% WR, 19.4% firing rate), bu
 
 ### Risiko yang Tersisa
 
-- **Sample size** — 72 trades. Butuh 200+ untuk statistical confidence.
-- **Edge fragile** — 100% dari trailing stop. Kalau market berubah dan trailing jarang fire → kembali rugi.
-- **XAM untested** — Baru di-fix, belum ada data apakah benar-benar fire dan profitable.
+- **ATR gate untested** — Baru deployed. Bisa terlalu ketat (block >80%) atau terlalu longgar.
+- **Trend-flip untested** — Bisa flip ke SHORT yang juga loss (false signal).
+- **Edge fragile** — 100% dari trailing stop. Market regime change → trailing jarang fire → rugi.
+- **Sample size** — 104 trades. Butuh 200+ untuk confidence.
 - **Bybit blocked** — L/S ratio dead, OI enrichment dead. Hanya HL data.
-- **ML cold start** — 135 training samples, needs 200.
-- **Railway infra** — Live trading HARUS pindah VPS.
+- **ML cold start** — Needs 200 training samples.
 
 ### Next Steps
 
-1. ✅ Deployed (commit `45f6d47`)
-2. Kumpulkan 100+ trades dengan logic baru (estimasi 2-3 hari)
-3. Re-audit: validate XAM firing >0%, CVD firing 30-50%, min momentum blocking ~30%
-4. Target: WR ≥42%, PF ≥1.5, expectancy >$0.15/trade
-5. ML auto-activate setelah 200 trades
+1. ✅ Deployed (commits `ef2a18b`, `71e5eda`, `3ef13de`)
+2. Collect 100+ trades dengan semua fixes aktif (estimasi 1-2 hari)
+3. **Audit 22 Mei:** Cek ATR gate firing, time_exit reduction, SHORT WR, trend-flip results
+4. Target: time_exit <50%, SHORT WR >35%, overall PnL positive
+5. Jangan tambah hold time atau grace period — data menolak (91% never recover)
 
 ---
 
