@@ -1305,7 +1305,10 @@ class ScoringEngine:
                     bear_setup += 8; _c_div = 8
                     reasons.append(f"📉 RSI divergence: price↑ but RSI 1m({rsi:.0f})<5m({rsi_5m:.0f}) — reversal DOWN +8")
 
-        # ── CONFIRMATION LAYER: CVD divergence (leading when price hasn't moved) ──
+        # ── CONFIRMATION LAYER: CVD (confirms trend direction) ──
+        # [FIX 2026-05-21] Pure trend following: CVD only scores when ALIGNED with price.
+        # CVD divergence (buying but price flat/down) was a reversal signal — removed.
+        # Data: 46 trades, 0% WR on reversal entries. Trend confirmation only.
         recent_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
         if len(recent_trades) >= 20:
             sample = recent_trades[-80:]
@@ -1314,27 +1317,23 @@ class ScoringEngine:
             cvd_total = buy_vol + sell_vol
             if cvd_total > 0:
                 cvd_ratio = (buy_vol - sell_vol) / cvd_total
-                # CVD is ONLY valuable when it DIVERGES from price
-                # CVD bullish + price flat/down = hidden buying = SETUP (leading)
-                # CVD bullish + price already up = confirmation (lagging, less useful)
                 price_chg_3m = 0.0
                 if len(closes) >= 4:
                     price_chg_3m = (closes[-1] - closes[-4]) / closes[-4]
 
-                if cvd_ratio > 0.15 and price_chg_3m < 0.002:
-                    # Buying pressure but price hasn't moved = DIVERGENCE SETUP
-                    bull_setup += 10; _c_cvd = 10
-                    reasons.append(f"💚 CVD divergence: buying {cvd_ratio*100:.0f}% but price flat → setup")
-                elif cvd_ratio < -0.15 and price_chg_3m > -0.002:
-                    bear_setup += 10; _c_cvd = 10
-                    reasons.append(f"❤️ CVD divergence: selling {cvd_ratio*100:.0f}% but price flat → setup")
-                elif cvd_ratio > 0.20:
-                    # Strong CVD aligned with price = small confirmation
+                # CVD confirms: buying pressure + price already moving up = trend confirmation
+                if cvd_ratio > 0.20 and price_chg_3m > 0.001:
+                    confirm_pts += 10; _c_cvd = 10
+                    reasons.append(f"💚 CVD confirms ({cvd_ratio*100:.0f}%) + price moving → trend")
+                elif cvd_ratio < -0.20 and price_chg_3m < -0.001:
+                    confirm_pts += 10; _c_cvd = 10
+                    reasons.append(f"❤️ CVD confirms ({cvd_ratio*100:.0f}%) + price moving → trend")
+                elif cvd_ratio > 0.15:
                     confirm_pts += 3; _c_cvd = 3
-                    reasons.append(f"💚 CVD confirms ({cvd_ratio*100:.0f}%)")
-                elif cvd_ratio < -0.20:
+                    reasons.append(f"💚 CVD mild ({cvd_ratio*100:.0f}%)")
+                elif cvd_ratio < -0.15:
                     confirm_pts += 3; _c_cvd = 3
-                    reasons.append(f"❤️ CVD confirms ({cvd_ratio*100:.0f}%)")
+                    reasons.append(f"❤️ CVD mild ({cvd_ratio*100:.0f}%)")
 
         # ── SETUP LAYER 4: Bybit Long/Short Ratio (CONTRARIAN — fade the crowd) ──
         # Ratio > 1.5 = crowd heavily long → contrarian SHORT setup
@@ -1390,15 +1389,8 @@ class ScoringEngine:
                 bear_setup += abs(_dvi_pts)
             reasons.append(_dvi_reason)
 
-        # ── EDGE: Orderbook Absorption (wall holding under pressure) ──
-        # Only add if OB imbalance didn't already give max points (prevent double-count)
-        _abs_pts, _abs_reason = self._calc_ob_absorption(asset)
-        if _abs_pts != 0 and _c_ob < 18:
-            if _abs_pts > 0:
-                bull_setup += _abs_pts
-            else:
-                bear_setup += abs(_abs_pts)
-            reasons.append(_abs_reason)
+        # OB Absorption removed — reversal signal, not compatible with trend following strategy.
+        _abs_pts = 0
 
         disp_mult = 1.0
         if len(closes) >= 6:
@@ -1407,22 +1399,26 @@ class ScoringEngine:
                 displacement = (closes[-1] - price_5ago) / price_5ago
                 dir_disp = displacement if bull_setup >= bear_setup else -displacement
 
+                # [FIX 2026-05-21] Regime-aware displacement thresholds.
+                # Trending market: price already moved = trend confirmation, not stale.
+                # Choppy market: price already moved = chasing noise, penalize hard.
+                _is_trending = trend_pct is not None and abs(trend_pct) > 0.015
+                _disp_mild   = 0.010 if _is_trending else 0.003   # 1.0% trending, 0.3% choppy
+                _disp_stale  = 0.020 if _is_trending else 0.005   # 2.0% trending, 0.5% choppy
+                _disp_very   = 0.030 if _is_trending else 0.008   # 3.0% trending, 0.8% choppy
+
                 if bull_setup >= bear_setup:
-                    # LONG: original logic — penalize chasing up
-                    if dir_disp > 0.008:
+                    if dir_disp > _disp_very:
                         disp_mult = 0.40
                         reasons.append(f"🚫 Displacement {dir_disp*100:.2f}% — very stale (×0.40)")
-                    elif dir_disp > 0.005:
+                    elif dir_disp > _disp_stale:
                         disp_mult = 0.60
                         reasons.append(f"⚠️ Displacement {dir_disp*100:.2f}% — stale (×0.60)")
-                    elif dir_disp > 0.003:
+                    elif dir_disp > _disp_mild:
                         disp_mult = 0.80
                         reasons.append(f"📊 Displacement {dir_disp*100:.2f}% — mild (×0.80)")
-                    elif dir_disp < -0.002:
-                        disp_mult = 1.10
-                        reasons.append(f"✅ Counter-displacement {dir_disp*100:.2f}% — fresh entry (×1.10)")
                 else:
-                    # SHORT: only penalize extreme exhaustion (>1.5% drop = bounce risk)
+                    # SHORT: only penalize extreme exhaustion
                     if dir_disp > 0.015:
                         disp_mult = 0.50
                         reasons.append(f"🚫 SHORT exhaustion {dir_disp*100:.2f}% — bounce risk (×0.50)")

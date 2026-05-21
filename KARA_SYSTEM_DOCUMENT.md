@@ -34,32 +34,49 @@
 
 | Area | Sebelum | Sesudah | File |
 |---|---|---|---|
-| **Momentum Confirmation Gate** | Tidak ada — entry langsung saat score lolos | **NEW: Require 5min price move ≥0.05% in predicted direction + 3/5 candles directional. Relaxed to 0.02% saat CVD divergence aktif.** | `engine/scoring_engine.py` |
+| **Momentum Confirmation Gate** | Tidak ada — entry langsung saat score lolos | **NEW: Require 5min price move ≥0.04% + 3/5 candles directional** | `engine/scoring_engine.py` |
 | **CHOPPY regime threshold** | +2 (hampir semua signal lolos) | **+8** (hanya signal sangat kuat yang masuk) | `engine/scoring_engine.py` |
-| **Early loss cut** | 8 menit / -0.5% | **4 menit / -0.2%** (cut wrong direction faster) | `risk/risk_manager.py` |
-| **WS Funding parsing** | `data.get("funding", 0)` — always 0 | **`data.get("ctx", data).get("funding", 0)`** — correct nested field | `data/ws_client.py` |
-| **Funding fallback** | API only (Bybit blocked + HL rate limited = 0) | **WS cache fallback** — if API returns 0, use WS funding_history | `engine/scoring_engine.py` |
-| **Asia session threshold** | Double penalty (scoring + _handle_signals) | **Single penalty in scoring engine only** — removed duplicate in _handle_signals | `main.py`, `engine/scoring_engine.py` |
-| **Pattern memory dedup** | 3 users = 3 samples per trade | **Deduplicate by pos_id** — 1 trade = 1 sample | `engine/learning_engine.py`, all executors |
-| **Bybit ping diagnostic** | Silent `except: return False` | **Detailed error logging** (timeout/connection/JSON) | `data/bybit_client.py` |
-| **ScoreBreakdown total_bull/bear** | Always 0 in scalper | **Populated from bull_setup/bear_setup** | `engine/scoring_engine.py` |
-| **Cross-Asset Momentum** | Tidak ada | **NEW: BTC/ETH leader-follower lag detection (±12 pts)** | `engine/scoring_engine.py` |
-| **Delta Volume Imbalance** | Tidak ada | **NEW: Dollar-weighted aggressor buy/sell ratio (±10 pts)** | `engine/scoring_engine.py` |
-| **OB Absorption Detection** | Tidak ada | **NEW: Bid/ask wall surviving opposing flow (±10 pts, capped if OB imbalance already max)** | `engine/scoring_engine.py` |
-| **/resetml command** | Tidak ada | **NEW: Wipe pattern memory + ML training data via Telegram** | `notify/telegram.py`, `core/db.py`, `engine/learning_engine.py` |
-| **Component conflict resolution** | CVD divergence killed by momentum gate | **Momentum gate relaxed to 0.02% when CVD divergence active** | `engine/scoring_engine.py` |
-| **OB double-count prevention** | OB Absorption + OB Imbalance both fire | **OB Absorption only fires if OB Imbalance < max (18 pts)** | `engine/scoring_engine.py` |
+| **Early loss cut** | 8 menit / -0.5% | **5 menit / -0.3%** | `risk/risk_manager.py` |
+| **WS Funding parsing** | `data.get("funding", 0)` — always 0 | **`data.get("ctx", data).get("funding", 0)`** | `data/ws_client.py` |
+| **Funding fallback** | API only | **WS cache fallback** | `engine/scoring_engine.py` |
+| **Asia session threshold** | Double penalty | **Single penalty in scoring engine only** | `main.py` |
+| **Pattern memory dedup** | 3 users = 3 samples | **Deduplicate by pos_id** | `engine/learning_engine.py` |
+| **Cross-Asset Momentum** | Tidak ada | **NEW: BTC/ETH leader-follower (±12 pts)** | `engine/scoring_engine.py` |
+| **Delta Volume Imbalance** | Tidak ada | **NEW: Dollar-weighted aggressor flow (±10 pts)** | `engine/scoring_engine.py` |
+| **OB Absorption** | NEW (pembalikan) | **REMOVED** — reversal signal, tidak cocok trend following | `engine/scoring_engine.py` |
+| **CVD Divergence** | +10 saat harga flat/turun (pembalikan) | **REMOVED** — diganti CVD Confirms (searah harga) | `engine/scoring_engine.py` |
+| **CVD Confirms** | +3 (lagging) | **+10 saat CVD + harga searah, +3 mild** | `engine/scoring_engine.py` |
+| **Displacement penalty** | Sama untuk semua regime | **Regime-aware: trending toleran (>1%/2%/3%), choppy ketat (>0.3%/0.5%/0.8%)** | `engine/scoring_engine.py` |
+| **Counter-displacement bonus** | ×1.10 saat harga turun (pembalikan) | **REMOVED** — tidak ada bonus untuk masuk melawan arah | `engine/scoring_engine.py` |
+| **/resetml command** | Tidak ada | **NEW** | `notify/telegram.py` |
+
+### Filosofi Scoring: Pure Trend Following (2026-05-21)
+
+**Keputusan berdasarkan data 46 trades:**
+- 85% trades exit dengan harga bergerak MELAWAN posisi → sinyal pembalikan tidak bekerja
+- Satu-satunya profit: trailing_stop (LIT score=90) → momentum trade
+- CVD divergence (harga turun tapi ada buying) = 0% WR → dihapus
+
+**Prinsip baru:**
+- Bot hanya masuk kalau harga **sudah bergerak** ke arah yang benar
+- CVD hanya kasih poin kalau **searah** dengan harga yang bergerak
+- Di market trending, harga naik 1% masih boleh masuk (trend confirmation)
+- Di market sideways, harga naik 0.3% sudah kena penalti (tidak ada trend untuk diikuti)
 
 ### Known Component Interactions & Conflicts (2026-05-21 Audit)
 
 | # | Conflict | Severity | Status |
 |---|---|---|---|
-| 1 | OI/Funding contrarian (bear pts for positive funding) vs scoring directional (bull wins → LONG) | 🔴 By Design | **Accepted** — contrarian is the edge. High score can have opposing OI. |
-| 2 | CVD divergence (+10 saat harga flat) vs momentum gate (require harga bergerak) | 🔴 Fixed | **Relaxed gate to 0.02% when CVD divergence active** |
-| 3 | Displacement penalty (penalize chase) vs momentum gate (require movement) — narrow window | 🟡 Acceptable | Sweet spot 0.05%-0.3% is sufficient for 10min scalper |
+| 1 | OI/Funding contrarian (bear pts for positive funding) vs scoring directional (bull wins → LONG). Bot can go LONG while OI says "longs crowded". | 🔴 By Design | **Mitigated** — penalty -5 confirm_pts when OI opposes chosen side (oi_signed > ±8) |
+| 2 | CVD divergence (+10 saat harga flat) vs momentum gate (require harga bergerak) | 🔴 Fixed | **Gate relaxed for leading signals** — only require 2/5 candles, no net move |
+| 3 | Displacement penalty (penalize chase) vs momentum gate (require movement) — narrow window | 🟡 Acceptable | Sweet spot 0.04%-0.3% is sufficient for 10min scalper |
 | 4 | Double Asia penalty (scoring engine + _handle_signals both add +5) | 🟡 Fixed | **Removed duplicate in _handle_signals** |
 | 5 | Locked threshold 52 vs effective threshold 53-63 after adjustments | 🟡 Cosmetic | Not fixed — locked value never becomes bottleneck |
 | 6 | OB Absorption + OB Imbalance double-counting from same orderbook data | 🟡 Fixed | **OB Absorption capped when OB Imbalance already at max** |
+| 7 | OB snapshot (volatile, changes per second) can override OI/Funding (stable, 8h data) in direction decision | 🔴 Fixed | **Penalty -5 confirm_pts when OI opposes chosen side** — reduces score when OB overrides fundamental |
+| 8 | Cross-Asset Momentum fires when alt HASN'T moved (by design), but momentum gate requires price movement | 🔴 Fixed | **Leading signals (CVD, Cross-Asset, OB Absorption) get relaxed gate**: only 2/5 candles directional, no net move requirement |
+| 9 | Regime multiplier applied AFTER momentum gate — gate uses pre-regime score | 🟡 Acceptable | Gate checks direction not score level. No functional impact. |
+| 10 | Early loss cut -0.2%/4min too aggressive — kills trades that need 5-6min to develop | 🟡 Fixed | **Relaxed to -0.3%/5min** — gives trade 1 extra minute, only cuts real losers |
 
 ### Bybit Status: BLOCKED by Railway
 
@@ -224,10 +241,10 @@ Scoring dibagi 3 layer:
 | **OI/Funding** | ±28 | Uang baru masuk = move ABOUT to happen |
 | **Orderbook Wall** | ±18 | Pressure building, belum breakout |
 | **Liquidation** | ±12 | Cascade potential = catalyst |
-| **Cross-Asset Momentum** | ±12 | BTC/ETH moved but alt hasn't followed (NEW 2026-05-21) |
-| **Delta Volume Imbalance** | ±10 | Dollar-weighted aggressor urgency (NEW 2026-05-21) |
-| **OB Absorption** | ±10 | Wall surviving opposing flow = institutional support (NEW 2026-05-21) |
-| **Bybit L/S Ratio** | ±12 | DEAD — Bybit blocked by Railway |
+| **Cross-Asset Momentum** | ±12 | BTC/ETH moved, alt belum follow |
+| **Delta Volume Imbalance** | ±10 | Dollar-weighted aggressor urgency |
+| **OB Absorption** | ~~±10~~ | **REMOVED** — reversal signal |
+| **Bybit L/S Ratio** | ~~±12~~ | **DEAD** — Bybit blocked |
 | **RSI Divergence (1m vs 5m)** | ±8 | Price↓ + RSI recovering = reversal |
 
 #### Layer 2: CONFIRMATION (Lagging — range −15 to +25 pts)
@@ -238,28 +255,35 @@ Scoring dibagi 3 layer:
 | **EMA Cross (stale ≥8m)** | **−10** | Move sudah jalan lama = PENALTY |
 | **RSI neutral (42-58)** | +5 | Price hasn't moved = opportunity |
 | **RSI extreme (>75 or <25)** | **−8** | Exhaustion = PENALTY |
-| **CVD divergence** (buying but price flat) | +10 | Hidden accumulation = SETUP |
-| **CVD confirms** (aligned with price) | +3 | Lagging, small weight |
+| **CVD confirms** (CVD + harga searah) | +10 | Trend confirmation — CVD dan harga bergerak sama arah |
+| **CVD mild** (CVD saja) | +3 | Lagging, small weight |
 | **MTF 15m aligned** | +6 | Mild confirmation |
 | **MTF 15m discord** | −4 | Counter-trend warning |
 
-#### Layer 3: DISPLACEMENT MULTIPLIER (Anti-Chase)
+#### Layer 3: DISPLACEMENT MULTIPLIER (Regime-Aware)
 
-**LONG direction:**
+**LONG direction — Trending market (24h move >1.5%):**
 | Price already moved UP | Multiplier |
 |---|---|
-| > 0.8% | **×0.40** (very stale) |
-| > 0.5% | **×0.60** (stale) |
-| > 0.3% | **×0.80** (mild) |
-| < −0.2% (price dropping = fresh LONG) | **×1.10** |
+| > 3.0% | **×0.40** |
+| > 2.0% | **×0.60** |
+| > 1.0% | **×0.80** |
 
-**SHORT direction (FIXED 2026-05-20 — was penalizing trend confirmation):**
+**LONG direction — Choppy/Sideways market:**
+| Price already moved UP | Multiplier |
+|---|---|
+| > 0.8% | **×0.40** |
+| > 0.5% | **×0.60** |
+| > 0.3% | **×0.80** |
+
+**Catatan:** Counter-displacement bonus (×1.10 saat harga turun) **dihapus** — itu logika pembalikan.
+
+**SHORT direction:**
 | Price already moved DOWN | Multiplier |
 |---|---|
-| > 1.5% drop | **×0.50** (exhaustion, bounce risk) |
-| > 1.0% drop | **×0.70** (extended) |
-| 0.3-1.0% drop | **×1.05** (trend confirmed = BONUS) |
-| Price rising (counter-trend) | **×0.70** (wrong direction for SHORT) |
+| > 1.5% drop | **×0.50** (exhaustion) |
+| > 1.0% drop | **×0.70** |
+| 0.3-1.0% drop | **×1.05** (trend confirmed) |
 
 #### Formula Akhir
 
@@ -1232,11 +1256,14 @@ Bot mengalami **0-15% WR** setelah hard reset karena:
 
 ### Fix yang Diterapkan (2026-05-21)
 
-1. **Momentum Confirmation Gate** — Bot sekarang HANYA masuk kalau harga 5 menit terakhir sudah bergerak ≥0.05% ke arah prediksi + 3/5 candles directional. Eliminasi ~80% false entries.
+1. **Momentum Confirmation Gate** — Bot sekarang HANYA masuk kalau harga 5 menit terakhir sudah bergerak ke arah prediksi. Standard signals: ≥0.04% net move + 3/5 candles. Leading signals (CVD divergence, Cross-Asset, OB Absorption): hanya 2/5 candles directional (no net move requirement karena by design harga belum bergerak).
 2. **CHOPPY threshold +8** — Market tanpa arah jelas butuh signal sangat kuat (effective threshold 53+8=61).
-3. **Early loss cut 4min/-0.2%** — Kalau salah arah, cut dalam 4 menit bukan 15 menit.
+3. **Early loss cut 5min/-0.3%** — Kalau salah arah setelah 5 menit dan floating -0.3%, cut. Cukup waktu untuk develop tapi tidak tunggu 15 menit.
 4. **WS funding parsing fixed** — `ctx.funding` bukan `data.funding`. Funding rate sekarang terisi.
 5. **3 Edge Components baru** — Cross-Asset Momentum, Delta Volume Imbalance, OB Absorption. Total +32 pts potential dari data yang sudah ada.
+6. **OI vs Direction penalty** — Saat OI/Funding opposes chosen side (oi_signed > ±8), confirm_pts -5. Mencegah OB snapshot override fundamental data.
+7. **OB double-count prevention** — OB Absorption hanya fire kalau OB Imbalance belum di max (18 pts).
+8. **Double Asia penalty removed** — Hanya scoring engine yang apply session threshold, tidak lagi di _handle_signals.
 
 ### Expected Impact
 
