@@ -743,7 +743,7 @@ class ScoringEngine:
             cached_funding = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
             if cached_funding:
                 fr = cached_funding[-1] if isinstance(cached_funding[-1], float) else float(cached_funding[-1].get('fundingRate', 0) if isinstance(cached_funding[-1], dict) else cached_funding[-1])
-                min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', -0.0002)  # [FIX 2026-05-21] Was -0.0001, too tight. POL fr=-0.000119 was blocked despite score=60.
+                min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', -0.0003)  # [AUDIT FIX 2026-05-21] Use config value. -0.03%/8h allows normal negative funding.
                 if fr < min_fr:
                     log.info(
                         f"[SKIP] {asset} | score={score} | side=SHORT | "

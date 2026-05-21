@@ -434,7 +434,7 @@ class SignalConfig:
 
     # SHORT-specific filters (aktif saat ALLOW_SHORT = True)
     # Funding confirmation: block SHORT hanya jika funding sangat negatif (shorts sudah bayar longs)
-    short_min_funding_rate:  float = -0.0001  # SHORT valid jika funding >= -0.0001
+    short_min_funding_rate:  float = -0.0003  # [AUDIT FIX 2026-05-21] -0.0001 too tight, blocks valid SHORTs like ALGO(68). -0.03%/8h = still blocks extreme crowding.
     # Solusi 3: Anti-trend filter
     short_max_uptrend_pct:   float = 0.03     # Block SHORT jika 24h trend > +3% (jangan lawan trend)
 
