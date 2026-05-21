@@ -1389,10 +1389,10 @@ class ScoringEngine:
                     price_chg_3m = (closes[-1] - closes[-4]) / closes[-4]
 
                 # Only score when CVD is strong AND price confirms direction
-                if cvd_ratio > 0.35 and price_chg_3m > 0.001:
+                if cvd_ratio > 0.25 and price_chg_3m > 0.001:
                     confirm_pts += 10; _c_cvd = 10
                     reasons.append(f"💚 CVD confirms ({cvd_ratio*100:.0f}%) + price moving → trend")
-                elif cvd_ratio < -0.35 and price_chg_3m < -0.001:
+                elif cvd_ratio < -0.25 and price_chg_3m < -0.001:
                     confirm_pts += 10; _c_cvd = 10
                     reasons.append(f"❤️ CVD confirms ({cvd_ratio*100:.0f}%) + price moving → trend")
 
