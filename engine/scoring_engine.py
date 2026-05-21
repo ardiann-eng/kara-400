@@ -1843,14 +1843,20 @@ class ScoringEngine:
         # User cap diterapkan di executor (paper/bitget), bukan di signal.
         leverage = min(scfg.default_leverage, scfg.max_leverage)
 
+        # [AUDIT FIX 2026-05-21] TP display must match actual exit trigger in risk_manager.
+        # Actual trigger = sl_distance × partial_tp1/tp2_at_sl_multiple.
+        # Old tp1_pct/tp2_pct from score matrix were NEVER used for exit decisions.
+        _tp1_mult = getattr(scfg, 'partial_tp1_at_sl_multiple', 0.7)
+        _tp2_mult = getattr(scfg, 'partial_tp2_at_sl_multiple', 1.0)
+
         if side == Side.LONG:
             stop_loss = round(mark_price * (1 - sl_pct), 8)
-            tp1       = round(mark_price * (1 + tp1_pct), 8)
-            tp2       = round(mark_price * (1 + tp2_pct), 8)
+            tp1       = round(mark_price * (1 + sl_pct * _tp1_mult), 8)
+            tp2       = round(mark_price * (1 + sl_pct * _tp2_mult), 8)
         else:
             stop_loss = round(mark_price * (1 + sl_pct), 8)
-            tp1       = round(mark_price * (1 - tp1_pct), 8)
-            tp2       = round(mark_price * (1 - tp2_pct), 8)
+            tp1       = round(mark_price * (1 - sl_pct * _tp1_mult), 8)
+            tp2       = round(mark_price * (1 - sl_pct * _tp2_mult), 8)
 
         strength = SignalStrength.STRONG if score >= 70 else SignalStrength.MODERATE
         breakdown = ScoreBreakdown(

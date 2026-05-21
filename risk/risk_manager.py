@@ -967,7 +967,7 @@ class RiskManager:
         # Semua kalkulasi dari local OHLCV — ZERO API CALLS.
         if getattr(position, 'trade_mode', 'scalper') == 'scalper' and not position.tp1_hit:
             scfg = SCALPER
-            if getattr(scfg, 'momentum_exit_enabled', True):
+            if getattr(scfg, 'momentum_exit_enabled', False):
                 now    = _dt.now(_tz.utc)
                 opened = position.opened_at
                 if opened.tzinfo is None:
@@ -1379,7 +1379,7 @@ class RiskManager:
             else:
                 max_hold = 10.0
 
-            grace      = getattr(scfg, 'max_hold_grace_minutes', 10.0)
+            grace      = getattr(scfg, 'max_hold_grace_minutes', 5.0)
             soft_floor = getattr(scfg, 'max_hold_soft_floor_pct', -0.010)
 
             # Threshold baru dari config
