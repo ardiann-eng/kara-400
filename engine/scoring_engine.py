@@ -1357,6 +1357,34 @@ class ScoringEngine:
         # This is the #1 fix for "score inverse predictive" problem.
         # [AUDIT FIX 2026-05-20] SHORT fix: mild drop (0.3-0.8%) = trend confirmation, not stale.
         # Only penalize SHORT if drop > 1.5% (exhaustion/bounce risk).
+
+        # ── EDGE: Cross-Asset Momentum (leader-follower lag) ──
+        _xam_pts, _xam_reason = self._calc_cross_asset_momentum(asset)
+        if _xam_pts != 0:
+            if _xam_pts > 0:
+                bull_setup += _xam_pts
+            else:
+                bear_setup += abs(_xam_pts)
+            reasons.append(_xam_reason)
+
+        # ── EDGE: Delta Volume Imbalance (aggressor urgency) ──
+        _dvi_pts, _dvi_reason = self._calc_delta_volume_imbalance(asset)
+        if _dvi_pts != 0:
+            if _dvi_pts > 0:
+                bull_setup += _dvi_pts
+            else:
+                bear_setup += abs(_dvi_pts)
+            reasons.append(_dvi_reason)
+
+        # ── EDGE: Orderbook Absorption (wall holding under pressure) ──
+        _abs_pts, _abs_reason = self._calc_ob_absorption(asset, side)
+        if _abs_pts != 0:
+            if _abs_pts > 0:
+                bull_setup += _abs_pts
+            else:
+                bear_setup += abs(_abs_pts)
+            reasons.append(_abs_reason)
+
         disp_mult = 1.0
         if len(closes) >= 6:
             price_5ago = closes[-6]
@@ -1429,6 +1457,150 @@ class ScoringEngine:
             out_components["bear_setup"] = int(bear_setup)
 
         return score, side, reasons
+
+    # ══════════════════════════════════════════════════════════════════
+    # EDGE COMPONENTS (2026-05-21)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _calc_cross_asset_momentum(self, asset: str) -> Tuple[int, str]:
+        """
+        Cross-Asset Momentum: BTC/ETH move first, alts follow 30-120s later.
+        Returns (signed_pts, reason) — positive=LONG bias, negative=SHORT bias.
+        """
+        if asset in ("BTC", "ETH"):
+            return 0, ""
+        leaders = ["BTC", "ETH"]
+        leader_moves = []
+        for ldr in leaders:
+            history = self._price_history.get(ldr, [])
+            if len(history) < 2:
+                continue
+            now_mono = time.monotonic()
+            # 2-minute return of leader
+            pts_2m = [(t, p) for t, p in history if t > now_mono - 120]
+            if len(pts_2m) >= 2:
+                move = (pts_2m[-1][1] - pts_2m[0][1]) / pts_2m[0][1]
+                leader_moves.append(move)
+        if not leader_moves:
+            return 0, ""
+        avg_leader = sum(leader_moves) / len(leader_moves)
+        # Check if THIS asset has already followed
+        my_history = self._price_history.get(asset, [])
+        my_move = 0.0
+        if len(my_history) >= 2:
+            now_mono = time.monotonic()
+            pts_2m = [(t, p) for t, p in my_history if t > now_mono - 120]
+            if len(pts_2m) >= 2:
+                my_move = (pts_2m[-1][1] - pts_2m[0][1]) / pts_2m[0][1]
+        # Edge: leader moved significantly but alt hasn't followed yet
+        leader_threshold = 0.002  # 0.2% move in 2min
+        lag_threshold = 0.0005   # alt moved less than 0.05%
+        if avg_leader > leader_threshold and my_move < lag_threshold:
+            pts = min(12, int(avg_leader * 4000))  # scale: 0.2%=8, 0.3%=12
+            return pts, f"🔗 BTC/ETH leading +{avg_leader*100:.2f}%, {asset} lagging → LONG +{pts}"
+        elif avg_leader < -leader_threshold and my_move > -lag_threshold:
+            pts = min(12, int(abs(avg_leader) * 4000))
+            return -pts, f"🔗 BTC/ETH dumping {avg_leader*100:.2f}%, {asset} lagging → SHORT +{pts}"
+        return 0, ""
+
+    def _calc_delta_volume_imbalance(self, asset: str) -> Tuple[int, str]:
+        """
+        Delta Volume Imbalance: measure aggressor urgency via dollar-weighted buy/sell.
+        More predictive than simple CVD because it captures SIZE of aggression.
+        Returns (signed_pts, reason).
+        """
+        trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
+        if len(trades) < 30:
+            return 0, ""
+        # Last 2 minutes of trades
+        now_ms = time.time() * 1000
+        recent = [t for t in trades if float(t.get("time", 0)) > now_ms - 120_000]
+        if len(recent) < 15:
+            return 0, ""
+        buy_dollar = 0.0
+        sell_dollar = 0.0
+        for t in recent:
+            px = float(t.get("px", 0))
+            sz = float(t.get("sz", 0))
+            dollar = px * sz
+            side = t.get("side", "")
+            if side in ("B", "buy", "Ask"):
+                buy_dollar += dollar
+            elif side in ("S", "sell", "Bid"):
+                sell_dollar += dollar
+        total = buy_dollar + sell_dollar
+        if total < 100:  # minimum $100 volume
+            return 0, ""
+        imbalance = (buy_dollar - sell_dollar) / total  # -1 to +1
+        # Strong imbalance = aggressive positioning
+        if imbalance > 0.6:
+            pts = min(10, int(imbalance * 12))
+            return pts, f"🔥 Aggressive buying {imbalance*100:.0f}% (${buy_dollar:.0f} vs ${sell_dollar:.0f}) +{pts}"
+        elif imbalance < -0.6:
+            pts = min(10, int(abs(imbalance) * 12))
+            return -pts, f"🔥 Aggressive selling {imbalance*100:.0f}% (${sell_dollar:.0f} vs ${buy_dollar:.0f}) +{pts}"
+        return 0, ""
+
+    def _calc_ob_absorption(self, asset: str, side: "Side") -> Tuple[int, str]:
+        """
+        Orderbook Absorption: detect walls that HOLD under pressure.
+        A bid wall that survives selling = institutional support.
+        Returns (signed_pts, reason).
+        """
+        ob = self.cache.orderbook.get(asset) if hasattr(self.cache, 'orderbook') else None
+        if not ob:
+            return 0, ""
+        trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
+        try:
+            levels = ob.get("levels", [[], []]) if isinstance(ob, dict) else [[], []]
+            bids_raw = levels[0][:10] if len(levels) > 0 else []
+            asks_raw = levels[1][:10] if len(levels) > 1 else []
+            def parse_lvl(x):
+                if isinstance(x, dict):
+                    return float(x.get("px", 0)), float(x.get("sz", 0))
+                try: return float(x[0]), float(x[1])
+                except: return 0.0, 0.0
+            bids = [parse_lvl(b) for b in bids_raw]
+            asks = [parse_lvl(a) for a in asks_raw]
+            if not bids or not asks:
+                return 0, ""
+            # Find largest wall
+            bid_wall = max(bids, key=lambda x: x[0]*x[1]) if bids else (0, 0)
+            ask_wall = max(asks, key=lambda x: x[0]*x[1]) if asks else (0, 0)
+            bid_wall_dollar = bid_wall[0] * bid_wall[1]
+            ask_wall_dollar = ask_wall[0] * ask_wall[1]
+            # Check if wall is being tested (recent trades near wall price)
+            now_ms = time.time() * 1000
+            recent_sells = [t for t in trades
+                           if float(t.get("time", 0)) > now_ms - 180_000
+                           and t.get("side", "") in ("S", "sell", "Bid")]
+            recent_buys = [t for t in trades
+                          if float(t.get("time", 0)) > now_ms - 180_000
+                          and t.get("side", "") in ("B", "buy", "Ask")]
+            # Bid wall absorption: selling happened near bid wall but wall still stands
+            if bid_wall_dollar > 500:  # minimum $500 wall
+                sell_near_wall = sum(
+                    float(t.get("sz", 0)) * float(t.get("px", 0))
+                    for t in recent_sells
+                    if abs(float(t.get("px", 0)) - bid_wall[0]) / bid_wall[0] < 0.002
+                )
+                if sell_near_wall > bid_wall_dollar * 0.3:
+                    # Wall absorbed 30%+ of its size in selling → strong support
+                    pts = min(10, int(sell_near_wall / bid_wall_dollar * 10))
+                    return pts, f"🧱 Bid wall ${bid_wall_dollar:.0f} absorbing sells (${sell_near_wall:.0f} absorbed) +{pts}"
+            # Ask wall absorption
+            if ask_wall_dollar > 500:
+                buy_near_wall = sum(
+                    float(t.get("sz", 0)) * float(t.get("px", 0))
+                    for t in recent_buys
+                    if abs(float(t.get("px", 0)) - ask_wall[0]) / ask_wall[0] < 0.002
+                )
+                if buy_near_wall > ask_wall_dollar * 0.3:
+                    pts = min(10, int(buy_near_wall / ask_wall_dollar * 10))
+                    return -pts, f"🧱 Ask wall ${ask_wall_dollar:.0f} absorbing buys (${buy_near_wall:.0f} absorbed) +{pts}"
+        except Exception:
+            pass
+        return 0, ""
 
     def _infer_hh_hl_structure(self, closes: list) -> str:
         """
