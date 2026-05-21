@@ -906,30 +906,28 @@ class ScoringEngine:
             _mcandles = f"{_dir_candles}/5"
 
         # ── [AUDIT FIX 2026-05-21] PRICE vs EMA21 TREND FILTER ─────────────
-        # Don't LONG if price below EMA21 (downtrend). Don't SHORT if price above EMA21 (uptrend).
-        # Case: LIT LONG at $1.35 while price dumping from $1.44. EMA21 was above price = downtrend.
+        # Trend-following rule: price below EMA21 = downtrend = only SHORT allowed.
+        # Price above EMA21 = uptrend = only LONG allowed.
+        # Case: LIT scored LONG (OB bid wall) while price dumping. Bid wall = trap.
+        # Fix: override side based on actual price trend. Score stays, direction flips.
         if len(_closes) >= 21:
             _ema21_val = _closes[0]
             _k21 = 2 / 22
             for _v in _closes[1:]:
                 _ema21_val = _v * _k21 + _ema21_val * (1 - _k21)
             _price_vs_ema = (mark_price - _ema21_val) / _ema21_val
-            if side == Side.LONG and _price_vs_ema < -0.002:  # price >0.2% below EMA21
+            if side == Side.LONG and _price_vs_ema < -0.002:  # price >0.2% below EMA21 = downtrend
                 log.info(
-                    f"[SKIP] {asset} | score={score} | side=long | "
-                    f"reason=price_below_ema21 | context=price={mark_price:.4f} ema21={_ema21_val:.4f} gap={_price_vs_ema*100:.2f}%"
+                    f"[TREND-FLIP] {asset} | LONG→SHORT | price={mark_price:.4f} below EMA21={_ema21_val:.4f} ({_price_vs_ema*100:.2f}%)"
                 )
-                self.skip_counters["price_below_ema21"] = self.skip_counters.get("price_below_ema21", 0) + 1
-                self._skip_count_since_summary += 1
-                return None, score
-            elif side == Side.SHORT and _price_vs_ema > 0.002:  # price >0.2% above EMA21
+                side = Side.SHORT
+                reasons.append(f"🔄 Trend flip: price below EMA21 ({_price_vs_ema*100:.2f}%) → forced SHORT")
+            elif side == Side.SHORT and _price_vs_ema > 0.002:  # price >0.2% above EMA21 = uptrend
                 log.info(
-                    f"[SKIP] {asset} | score={score} | side=short | "
-                    f"reason=price_above_ema21 | context=price={mark_price:.4f} ema21={_ema21_val:.4f} gap={_price_vs_ema*100:.2f}%"
+                    f"[TREND-FLIP] {asset} | SHORT→LONG | price={mark_price:.4f} above EMA21={_ema21_val:.4f} ({_price_vs_ema*100:.2f}%)"
                 )
-                self.skip_counters["price_above_ema21"] = self.skip_counters.get("price_above_ema21", 0) + 1
-                self._skip_count_since_summary += 1
-                return None, score
+                side = Side.LONG
+                reasons.append(f"🔄 Trend flip: price above EMA21 ({_price_vs_ema*100:.2f}%) → forced LONG")
 
         signal = self._build_scalper_signal(
             asset, side, score, mark_price, reasons, vol_regime,
