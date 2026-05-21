@@ -727,7 +727,7 @@ class ScoringEngine:
             cached_funding = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
             if cached_funding:
                 fr = cached_funding[-1] if isinstance(cached_funding[-1], float) else float(cached_funding[-1].get('fundingRate', 0) if isinstance(cached_funding[-1], dict) else cached_funding[-1])
-                min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', -0.0001)
+                min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', -0.0002)  # [FIX 2026-05-21] Was -0.0001, too tight. POL fr=-0.000119 was blocked despite score=60.
                 if fr < min_fr:
                     log.info(
                         f"[SKIP] {asset} | score={score} | side=SHORT | "
@@ -751,7 +751,7 @@ class ScoringEngine:
             # Mencegah sinyal "session-only" lolos — misal score=59 tapi OI=0,Liq=0.
             # OB score tidak tersedia di scope ini, threshold pakai nilai lebih kecil (6).
             _tech_fundamental = (oi_bear or 0) + (liq_bear or 0)
-            _min_tech_short = max(getattr(config.SIGNAL, 'min_technical_score_short', 10) - 4, 6)
+            _min_tech_short = max(getattr(config.SIGNAL, 'min_technical_score_short', 10) - 4, 3)  # [FIX 2026-05-21] Was 6. OB not counted here, 6 blocks valid SHORTs with OB confirmation.
             if _tech_fundamental < _min_tech_short:
                 log.info(
                     f"[SKIP] {asset} | score={score} | side=SHORT | "
