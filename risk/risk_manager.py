@@ -1385,8 +1385,8 @@ class RiskManager:
             # Threshold baru dari config
             early_trail_pct   = getattr(scfg, 'time_exit_early_trail_pct',   0.003)
             early_trail_width = getattr(scfg, 'time_exit_early_trail_width',  0.0015)
-            early_loss_pct    = getattr(scfg, 'time_exit_early_loss_pct',    -0.002)  # [FIX 2026-05-21] Was -0.005. Data: avg loss=-0.32%. Cut at -0.2% saves ~40% of loss.
-            early_loss_mins   = getattr(scfg, 'time_exit_early_loss_mins',    4.0)    # [FIX 2026-05-21] Was 8.0. Wrong direction after 4min = signal was wrong, cut now.
+            early_loss_pct    = getattr(scfg, 'time_exit_early_loss_pct',    -0.003)  # [FIX 2026-05-21] -0.3%. Was -0.2% which killed potential winners recovering in min 4-6.
+            early_loss_mins   = getattr(scfg, 'time_exit_early_loss_mins',    5.0)    # [FIX 2026-05-21] 5min. Was 4min. Give trade 1 more min to develop before cutting.
 
             now    = _dt.now(_tz.utc)
             opened = position.opened_at

@@ -795,34 +795,40 @@ class ScoringEngine:
         atr_pct_now = self._compute_atr_pct(_highs, _lows, _closes, period=14)
 
         # ── [FIX 2026-05-21] MOMENTUM CONFIRMATION GATE ────────────────────
-        # Data: 46 trades, 85% exit with price moving AGAINST position.
-        # Root cause: bot enters on "setup potential" but price never follows through.
-        # Fix: require TWO conditions over last 5 candles (5 min):
-        #   1. Net price move >= 0.05% in predicted direction (not noise)
-        #   2. At least 3 of last 5 candles closed in predicted direction
-        # EXCEPTION: If CVD divergence is active (buying but price flat), relax to 0.02%
-        # because CVD divergence BY DEFINITION means price hasn't moved yet.
+        # Require price already moving in predicted direction before entry.
+        # EXCEPTIONS for leading signals that BY DEFINITION fire before price moves:
+        #   - CVD divergence (buying but price flat)
+        #   - Cross-Asset Momentum (BTC moved, alt hasn't)
+        #   - OB Absorption (wall holding, price hasn't bounced yet)
+        # For these: relax to candle-direction only (no net move requirement).
         if len(_closes) >= 6:
             _net_move = (_closes[-1] - _closes[-6]) / _closes[-6] if _closes[-6] > 0 else 0
 
-            # Relax threshold if CVD divergence contributed (price flat is expected)
-            _has_cvd_divergence = _c_cvd >= 10
-            _min_confirm = 0.0002 if _has_cvd_divergence else 0.0005
+            # Leading signal detection — these expect price HASN'T moved yet
+            _has_leading_signal = (_c_cvd >= 10 or _xam_pts != 0 or _abs_pts != 0)
 
-            # Count candles closing in right direction
-            _bullish_candles = sum(1 for i in range(-5, 0) if _closes[i] > _closes[i-1])
-            _bearish_candles = 5 - _bullish_candles
-
-            _direction_ok = False
-            if side == Side.LONG:
-                _direction_ok = (_net_move > _min_confirm and _bullish_candles >= 3)
+            if _has_leading_signal:
+                # Only require candle direction (3/5), no net move threshold
+                _bullish_candles = sum(1 for i in range(-5, 0) if _closes[i] > _closes[i-1])
+                _bearish_candles = 5 - _bullish_candles
+                _direction_ok = (
+                    (side == Side.LONG and _bullish_candles >= 2) or
+                    (side == Side.SHORT and _bearish_candles >= 2)
+                )
             else:
-                _direction_ok = (_net_move < -_min_confirm and _bearish_candles >= 3)
+                # Standard: require net move + candle direction
+                _min_confirm = 0.0004  # 0.04%
+                _bullish_candles = sum(1 for i in range(-5, 0) if _closes[i] > _closes[i-1])
+                _bearish_candles = 5 - _bullish_candles
+                _direction_ok = (
+                    (side == Side.LONG and _net_move > _min_confirm and _bullish_candles >= 3) or
+                    (side == Side.SHORT and _net_move < -_min_confirm and _bearish_candles >= 3)
+                )
 
             if not _direction_ok:
                 log.info(
                     f"[SKIP] {asset} | score={score} | side={side.value} | "
-                    f"reason=no_momentum_confirm | context=5m_move={_net_move*100:.4f}%,bull_candles={_bullish_candles}/5"
+                    f"reason=no_momentum_confirm | context=5m_move={_net_move*100:.4f}%,bull_candles={_bullish_candles}/5,leading={_has_leading_signal}"
                 )
                 self.skip_counters["no_micro_momentum"] = self.skip_counters.get("no_micro_momentum", 0) + 1
                 self._skip_count_since_summary += 1
@@ -1430,6 +1436,17 @@ class ScoringEngine:
         # Direction: determined by SETUP indicators (leading), not confirmation
         side = Side.LONG if bull_setup >= bear_setup else Side.SHORT
         dominant_setup = max(bull_setup, bear_setup)
+
+        # [FIX 2026-05-21 Conflict #7] Penalize when OI/Funding opposes chosen direction.
+        # OI is contrarian (crowded longs → bear pts). If bot goes LONG despite OI saying
+        # "longs crowded", apply confidence penalty. This prevents OB snapshot from
+        # overriding 8-hour fundamental data.
+        _oi_signed = int(oi_bull - oi_bear)
+        if _oi_signed != 0:
+            _oi_opposes = (side == Side.LONG and _oi_signed < -8) or (side == Side.SHORT and _oi_signed > 8)
+            if _oi_opposes:
+                confirm_pts -= 5
+                reasons.append(f"⚠️ OI/Funding opposes {side.value} (oi_signed={_oi_signed}) — confidence -5")
 
         # Raw score = setup (0-63) + confirmation (-15 to +31) → range 0-94 pre-scaling
         raw = dominant_setup + confirm_pts

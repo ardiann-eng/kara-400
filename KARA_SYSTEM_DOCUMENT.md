@@ -3,7 +3,7 @@
 > Ditulis dari hasil membaca seluruh kode Python. Setiap angka berasal dari kode, bukan asumsi.
 > Bahasa: Indonesia, dengan istilah teknis dalam bahasa Inggris bila lebih tepat.
 >
-> **Last updated:** 2026-05-20 — sinkron dengan perubahan: Opportunity Scoring v2, Profit-Lock Exit System, Learning Engine (Pattern Memory + ML), Bot Brain Dashboard, migrasi Railway.
+> **Last updated:** 2026-05-21 — sinkron dengan perubahan: Momentum Confirmation Gate, Edge Components (Cross-Asset, Delta Volume, OB Absorption), Component Conflict Resolution, WS Funding Fix.
 
 ---
 
@@ -34,19 +34,32 @@
 
 | Area | Sebelum | Sesudah | File |
 |---|---|---|---|
-| **Momentum Confirmation Gate** | Tidak ada — entry langsung saat score lolos | **NEW: Require 5min price move ≥0.05% in predicted direction + 3/5 candles directional** | `engine/scoring_engine.py` |
+| **Momentum Confirmation Gate** | Tidak ada — entry langsung saat score lolos | **NEW: Require 5min price move ≥0.05% in predicted direction + 3/5 candles directional. Relaxed to 0.02% saat CVD divergence aktif.** | `engine/scoring_engine.py` |
 | **CHOPPY regime threshold** | +2 (hampir semua signal lolos) | **+8** (hanya signal sangat kuat yang masuk) | `engine/scoring_engine.py` |
 | **Early loss cut** | 8 menit / -0.5% | **4 menit / -0.2%** (cut wrong direction faster) | `risk/risk_manager.py` |
 | **WS Funding parsing** | `data.get("funding", 0)` — always 0 | **`data.get("ctx", data).get("funding", 0)`** — correct nested field | `data/ws_client.py` |
 | **Funding fallback** | API only (Bybit blocked + HL rate limited = 0) | **WS cache fallback** — if API returns 0, use WS funding_history | `engine/scoring_engine.py` |
-| **Asia session threshold** | Same as other sessions (52) | **+5 during off-session hours** (effective 57) | `main.py` |
+| **Asia session threshold** | Double penalty (scoring + _handle_signals) | **Single penalty in scoring engine only** — removed duplicate in _handle_signals | `main.py`, `engine/scoring_engine.py` |
 | **Pattern memory dedup** | 3 users = 3 samples per trade | **Deduplicate by pos_id** — 1 trade = 1 sample | `engine/learning_engine.py`, all executors |
 | **Bybit ping diagnostic** | Silent `except: return False` | **Detailed error logging** (timeout/connection/JSON) | `data/bybit_client.py` |
 | **ScoreBreakdown total_bull/bear** | Always 0 in scalper | **Populated from bull_setup/bear_setup** | `engine/scoring_engine.py` |
 | **Cross-Asset Momentum** | Tidak ada | **NEW: BTC/ETH leader-follower lag detection (±12 pts)** | `engine/scoring_engine.py` |
 | **Delta Volume Imbalance** | Tidak ada | **NEW: Dollar-weighted aggressor buy/sell ratio (±10 pts)** | `engine/scoring_engine.py` |
-| **OB Absorption Detection** | Tidak ada | **NEW: Bid/ask wall surviving opposing flow (±10 pts)** | `engine/scoring_engine.py` |
+| **OB Absorption Detection** | Tidak ada | **NEW: Bid/ask wall surviving opposing flow (±10 pts, capped if OB imbalance already max)** | `engine/scoring_engine.py` |
 | **/resetml command** | Tidak ada | **NEW: Wipe pattern memory + ML training data via Telegram** | `notify/telegram.py`, `core/db.py`, `engine/learning_engine.py` |
+| **Component conflict resolution** | CVD divergence killed by momentum gate | **Momentum gate relaxed to 0.02% when CVD divergence active** | `engine/scoring_engine.py` |
+| **OB double-count prevention** | OB Absorption + OB Imbalance both fire | **OB Absorption only fires if OB Imbalance < max (18 pts)** | `engine/scoring_engine.py` |
+
+### Known Component Interactions & Conflicts (2026-05-21 Audit)
+
+| # | Conflict | Severity | Status |
+|---|---|---|---|
+| 1 | OI/Funding contrarian (bear pts for positive funding) vs scoring directional (bull wins → LONG) | 🔴 By Design | **Accepted** — contrarian is the edge. High score can have opposing OI. |
+| 2 | CVD divergence (+10 saat harga flat) vs momentum gate (require harga bergerak) | 🔴 Fixed | **Relaxed gate to 0.02% when CVD divergence active** |
+| 3 | Displacement penalty (penalize chase) vs momentum gate (require movement) — narrow window | 🟡 Acceptable | Sweet spot 0.05%-0.3% is sufficient for 10min scalper |
+| 4 | Double Asia penalty (scoring engine + _handle_signals both add +5) | 🟡 Fixed | **Removed duplicate in _handle_signals** |
+| 5 | Locked threshold 52 vs effective threshold 53-63 after adjustments | 🟡 Cosmetic | Not fixed — locked value never becomes bottleneck |
+| 6 | OB Absorption + OB Imbalance double-counting from same orderbook data | 🟡 Fixed | **OB Absorption capped when OB Imbalance already at max** |
 
 ### Bybit Status: BLOCKED by Railway
 
