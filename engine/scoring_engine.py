@@ -1377,7 +1377,7 @@ class ScoringEngine:
             reasons.append(_dvi_reason)
 
         # ── EDGE: Orderbook Absorption (wall holding under pressure) ──
-        _abs_pts, _abs_reason = self._calc_ob_absorption(asset, side)
+        _abs_pts, _abs_reason = self._calc_ob_absorption(asset)
         if _abs_pts != 0:
             if _abs_pts > 0:
                 bull_setup += _abs_pts
@@ -1541,7 +1541,7 @@ class ScoringEngine:
             return -pts, f"🔥 Aggressive selling {imbalance*100:.0f}% (${sell_dollar:.0f} vs ${buy_dollar:.0f}) +{pts}"
         return 0, ""
 
-    def _calc_ob_absorption(self, asset: str, side: "Side") -> Tuple[int, str]:
+    def _calc_ob_absorption(self, asset: str) -> Tuple[int, str]:
         """
         Orderbook Absorption: detect walls that HOLD under pressure.
         A bid wall that survives selling = institutional support.
