@@ -953,9 +953,9 @@ class RiskManager:
         tp3_at_mult = getattr(cfg, 'partial_tp3_trail_at', 2.0)
         be_at_mult  = getattr(cfg, 'breakeven_trigger_at_sl_multiple', 0.8)
 
-        tp1_ratio = 0.40   # close 40% at TP1
-        tp2_ratio = 0.50   # close 50% of remaining (≈30% of original) at TP2
-        tp3_ratio = 1.0    # trail remaining 30% — full close on trail trigger
+        tp1_ratio = getattr(cfg, 'tp1_close_ratio', 0.40)   # [AUDIT FIX 2026-05-21] Was hardcoded 0.40. Now reads config (scalper=0.50, standard=0.25).
+        tp2_ratio = getattr(cfg, 'tp2_close_ratio', 0.50)   # [AUDIT FIX 2026-05-21] Was hardcoded 0.50. Now reads config (scalper=0.667, standard=0.333).
+        tp3_ratio = 1.0    # trail remaining — full close on trail trigger
 
         # ── Rule E2: Momentum Exit — Multi-Confirmation Engine (v2) ─────────
         #

@@ -2392,40 +2392,56 @@ class KaraTelegram:
         entry   = pos.entry_price
         side_str = "LONG" if pos.side.value == "long" else "SHORT"
         
-        # Calculate ROE % (leverage-adjusted)
-        pnl_pct  = (pnl / (pos.size_initial * entry)) * pos.leverage * 100 if (entry and pos.size_initial) else 0
+        # Calculate ROE % (leverage-adjusted price move — NOT diluted by partial size)
+        # [AUDIT FIX 2026-05-21] Was: (pnl / (size_initial * entry)) * leverage * 100
+        # That showed diluted % (partial profit / total notional). Now shows actual ROE.
+        if entry and pos.size_current > 0:
+            price_move = (action.get("price", current) - entry) / entry
+            if pos.side.value == "short":
+                price_move = -price_move
+            pnl_pct = price_move * pos.leverage * 100
+        else:
+            pnl_pct = 0
         pnl_sign = "+" if pnl >= 0 else ""
+
+        # Get actual close ratio from action for display
+        _close_pct = int(action.get("close_ratio", 0.25) * 100)
 
         # Action types yang merupakan full/final close (posisi benar-benar selesai)
         FINAL_EXIT_TYPES = ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "early_trail")
 
         if action_type == "tp1":
+            _remaining = 100 - _close_pct
             text = (
                 "🌸 <b>KARA UPDATE: TP1 Tercapai</b>\n\n"
-                f"<i>Profit pertama diamankan untuk <b>{pos.asset}</b>. 25% posisi ditutup.</i>\n\n"
+                f"<i>Profit pertama diamankan untuk <b>{pos.asset}</b>. {_close_pct}% posisi ditutup.</i>\n\n"
 
-                f"🎯 <b>TP1 HIT — 25% Closed</b>\n"
+                f"🎯 <b>TP1 HIT — {_close_pct}% Closed</b>\n"
                 f"  • Entry   : <code>${format_price(entry)}</code>\n"
                 f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
 
                 f"🛡️ <b>Risk Adjustment</b>\n"
                 f"  • SL digeser ke Entry (breakeven) ✅\n"
-                f"  • Sisa 75% masih berjalan\n\n"
+                f"  • Sisa {_remaining}% masih berjalan\n\n"
 
                 f"<i>Monitoring TP2 → ATR Trail. ✨</i>"
             )
 
         elif action_type == "tp2":
+            # TP2 closes X% of remaining. Calculate cumulative closed.
+            _tp1_pct = int(getattr(pos, '_tp1_close_pct', 50))  # fallback 50% for scalper
+            _cumulative = _tp1_pct + int((100 - _tp1_pct) * action.get("close_ratio", 0.667))
+            _remaining = 100 - _cumulative
             text = (
                 "🏁 <b>KARA UPDATE: TP2 Tercapai</b>\n\n"
-                f"<i>Target kedua hit pada <b>{pos.asset}</b>. Total 50% posisi sudah dikunci.</i>\n\n"
+                f"<i>Target kedua hit pada <b>{pos.asset}</b>. Total {_cumulative}% posisi sudah dikunci.</i>\n\n"
 
-                f"🎯🎯 <b>TP2 HIT — 25% Closed</b>\n"
+                f"🎯🎯 <b>TP2 HIT — {_close_pct}% of remaining Closed</b>\n"
                 f"  • Entry   : <code>${format_price(entry)}</code>\n"
                 f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
 
                 f"🛡️ <b>Menuju ATR Trail</b>\n"
-                f"  • Sisa 50% masih berjalan\n"
+                f"  • Sisa {_remaining}% masih berjalan\n"
                 f"  • Menunggu trail activation... 🚀"
             )
 
