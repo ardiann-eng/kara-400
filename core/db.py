@@ -780,6 +780,21 @@ class UserDB:
             except Exception:
                 return 0
 
+    def clear_ml_data(self) -> dict:
+        """Wipe pattern_memory and training_data tables. Returns row counts deleted."""
+        summary = {}
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                for table in ("pattern_memory", "training_data"):
+                    cursor.execute(f"DELETE FROM {table}")
+                    summary[table] = cursor.rowcount
+                conn.commit()
+            except Exception as e:
+                log.error(f"Failed to clear ML data: {e}")
+        return summary
+
 # Global instance
 user_db = UserDB()
 

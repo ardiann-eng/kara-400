@@ -283,6 +283,21 @@ class LearningEngine:
         except Exception as e:
             log.warning(f"[LEARN-ML] Training failed: {e}")
 
+    def reset(self) -> dict:
+        """Wipe all pattern memory and ML training data. Returns summary."""
+        from core.db import user_db
+        summary = user_db.clear_ml_data()
+        self._patterns.clear()
+        self._model = None
+        self._model_ready = False
+        self._training_count = 0
+        self._last_retrain_count = 0
+        self._loaded = False
+        if hasattr(self, '_recorded_pos_ids'):
+            self._recorded_pos_ids.clear()
+        log.warning(f"[LEARN] Full reset: {summary}")
+        return summary
+
 
 # Singleton instance
 learning_engine = LearningEngine()

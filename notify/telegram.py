@@ -402,6 +402,7 @@ class KaraTelegram:
                 CommandHandler("setleverage",  self.cmd_direct_set_config),
                 CommandHandler("setmaxpos",    self.cmd_direct_set_config),
                 CommandHandler("resetdata",    self.cmd_reset_data),
+                CommandHandler("resetml",      self.cmd_reset_ml),
                 CommandHandler("weblogin",     self.cmd_weblogin),
 
                 # Bitget-specific commands
@@ -2165,6 +2166,34 @@ class KaraTelegram:
             )
         except Exception as e:
             await update.effective_message.reply_html(f"❌ Reset gagal: <code>{e}</code>")
+
+    async def cmd_reset_ml(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Wipe pattern memory + ML training data."""
+        if not self._is_authorized(update): return
+
+        args = ctx.args or []
+        if not (args and args[0].lower() == "confirm"):
+            await update.effective_message.reply_html(
+                "⚠️ <b>Konfirmasi Reset ML</b>\n\n"
+                "Ini akan menghapus:\n"
+                "• Semua pattern memory (win rate per asset/side)\n"
+                "• Semua ML training data\n\n"
+                "Model akan mulai belajar dari nol.\n\n"
+                "Ketik <code>/resetml confirm</code> untuk lanjutkan."
+            )
+            return
+
+        try:
+            from engine.learning_engine import learning_engine
+            summary = learning_engine.reset()
+            await update.effective_message.reply_html(
+                "✅ <b>ML data berhasil direset!</b>\n\n"
+                f"• pattern_memory: <b>{summary.get('pattern_memory', 0)} rows dihapus</b>\n"
+                f"• training_data: <b>{summary.get('training_data', 0)} rows dihapus</b>\n\n"
+                "<i>Learning engine mulai dari nol.</i>"
+            )
+        except Exception as e:
+            await update.effective_message.reply_html(f"❌ Reset ML gagal: <code>{e}</code>")
 
     # ──────────────────────────────────────────
     # SIGNAL NOTIFICATION
