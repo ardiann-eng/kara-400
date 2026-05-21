@@ -262,8 +262,9 @@ class MarketDataCache:
         coin = data.get("coin", data.get("name", ""))
         if coin:
             self.funding[coin] = data
-            # Keep rolling funding history for trend detection
-            rate = float(data.get("funding", 0))
+            # HL activeAssetCtx format: {"coin": "X", "ctx": {"funding": "0.0001", ...}}
+            ctx = data.get("ctx", data)
+            rate = float(ctx.get("funding", 0) if isinstance(ctx, dict) else data.get("funding", 0))
             if coin not in self.funding_history:
                 self.funding_history[coin] = []
             self.funding_history[coin].append(rate)
