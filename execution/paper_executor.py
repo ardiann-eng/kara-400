@@ -446,6 +446,7 @@ class PaperExecutor(BaseExecutor):
                 regime=getattr(pos, 'trade_mode', 'ranging'),
                 score=pos.entry_score,
                 pnl_usd=total_pnl,
+                pos_id=pos.position_id,
                 features={
                     'oi_funding_score': 0,
                     'orderbook_score': 0,

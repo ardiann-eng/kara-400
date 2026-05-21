@@ -583,6 +583,7 @@ class LiveExecutor(BaseExecutor):
                     asset=pos.asset, side=pos.side.value.lower(),
                     regime=getattr(pos, 'trade_mode', 'ranging'),
                     score=getattr(pos, 'entry_score', 50), pnl_usd=pnl,
+                    pos_id=pos.position_id,
                     features={
                         'oi_funding_score': 0, 'orderbook_score': 0, 'liquidation_score': 0,
                         'displacement_5m': getattr(pos, 'trend_pct', 0) or 0,

@@ -159,12 +159,27 @@ class LearningEngine:
         return decision
 
     def record_outcome(self, asset: str, side: str, regime: str, score: int,
-                       pnl_usd: float, features: Optional[Dict] = None):
+                       pnl_usd: float, features: Optional[Dict] = None,
+                       pos_id: Optional[str] = None):
         """
         Record trade outcome. Updates pattern memory and training data.
         Called from executors when a trade closes.
         """
         self.load()
+
+        # [FIX 2026-05-21] Deduplicate: multi-user bots record the same trade N times
+        # (once per user). Use pos_id as dedup key so 1 trade event = 1 sample.
+        if pos_id:
+            if not hasattr(self, '_recorded_pos_ids'):
+                self._recorded_pos_ids = set()
+            if pos_id in self._recorded_pos_ids:
+                log.debug(f"[LEARN] Skipping duplicate record for pos_id={pos_id}")
+                return
+            self._recorded_pos_ids.add(pos_id)
+            # Keep set bounded
+            if len(self._recorded_pos_ids) > 1000:
+                self._recorded_pos_ids = set(list(self._recorded_pos_ids)[-500:])
+
         win = pnl_usd > 0
         pattern_key = f"{asset}_{side}_{regime}"
 
