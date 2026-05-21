@@ -495,11 +495,9 @@ HARD_RESET_ON_DEPLOY = os.getenv("KARA_HARD_RESET", "false").lower() == "true"
 # ──────────────────────────────────────────────
 # BLOCKED TRADING HOURS (UTC)
 # ──────────────────────────────────────────────
-# [FIX 4 - 2026-04-22] London open blocked - data 124 trades:
-# 08:00 UTC: WR 7.1%, -$7.81 | 09:00 UTC: WR 21.4%, -$7.85
-# Total 2 jam: -$15.66 = hampir seluruh account loss
-# Volatilitas London open menyebabkan SL langsung kena opening spike
-BLOCKED_HOURS_UTC = [8, 9]
+# [AUDIT FIX 2026-05-21] Disabled. Early cut -0.2%/5m now handles spike risk.
+# Re-enable only if data shows WR < 30% at specific hours after 100+ trades.
+BLOCKED_HOURS_UTC = []
 
 # ──────────────────────────────────────────────
 # MARKET SCANNING (smart selection filter)
