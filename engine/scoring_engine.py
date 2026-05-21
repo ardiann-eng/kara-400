@@ -794,22 +794,31 @@ class ScoringEngine:
                     pass
         atr_pct_now = self._compute_atr_pct(_highs, _lows, _closes, period=14)
 
-        # ── [FIX 2026-05-21] MICRO-MOMENTUM CONFIRMATION ─────────────────
+        # ── [FIX 2026-05-21] MOMENTUM CONFIRMATION GATE ────────────────────
         # Data: 46 trades, 85% exit with price moving AGAINST position.
         # Root cause: bot enters on "setup potential" but price never follows through.
-        # Fix: require that price in last 2 candles (2 min) is already moving in
-        # the predicted direction. This confirms momentum has STARTED, not just "might start".
-        if len(_closes) >= 3:
-            _recent_move = (_closes[-1] - _closes[-3]) / _closes[-3] if _closes[-3] > 0 else 0
-            _min_confirm = 0.0001  # 0.01% minimum move in right direction
-            _direction_ok = (
-                (side == Side.LONG and _recent_move > _min_confirm) or
-                (side == Side.SHORT and _recent_move < -_min_confirm)
-            )
+        # Fix: require TWO conditions over last 5 candles (5 min):
+        #   1. Net price move >= 0.05% in predicted direction (not noise)
+        #   2. At least 3 of last 5 candles closed in predicted direction
+        # This ensures momentum is REAL and SUSTAINED, not a single tick.
+        if len(_closes) >= 6:
+            _net_move = (_closes[-1] - _closes[-6]) / _closes[-6] if _closes[-6] > 0 else 0
+            _min_confirm = 0.0005  # 0.05% net move required (5x spread)
+
+            # Count candles closing in right direction
+            _bullish_candles = sum(1 for i in range(-5, 0) if _closes[i] > _closes[i-1])
+            _bearish_candles = 5 - _bullish_candles
+
+            _direction_ok = False
+            if side == Side.LONG:
+                _direction_ok = (_net_move > _min_confirm and _bullish_candles >= 3)
+            else:
+                _direction_ok = (_net_move < -_min_confirm and _bearish_candles >= 3)
+
             if not _direction_ok:
                 log.info(
                     f"[SKIP] {asset} | score={score} | side={side.value} | "
-                    f"reason=no_micro_momentum | context=2m_move={_recent_move*100:.4f}%"
+                    f"reason=no_momentum_confirm | context=5m_move={_net_move*100:.4f}%,bull_candles={_bullish_candles}/5"
                 )
                 self.skip_counters["no_micro_momentum"] = self.skip_counters.get("no_micro_momentum", 0) + 1
                 self._skip_count_since_summary += 1
