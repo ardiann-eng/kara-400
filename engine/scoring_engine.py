@@ -800,10 +800,14 @@ class ScoringEngine:
         # Fix: require TWO conditions over last 5 candles (5 min):
         #   1. Net price move >= 0.05% in predicted direction (not noise)
         #   2. At least 3 of last 5 candles closed in predicted direction
-        # This ensures momentum is REAL and SUSTAINED, not a single tick.
+        # EXCEPTION: If CVD divergence is active (buying but price flat), relax to 0.02%
+        # because CVD divergence BY DEFINITION means price hasn't moved yet.
         if len(_closes) >= 6:
             _net_move = (_closes[-1] - _closes[-6]) / _closes[-6] if _closes[-6] > 0 else 0
-            _min_confirm = 0.0005  # 0.05% net move required (5x spread)
+
+            # Relax threshold if CVD divergence contributed (price flat is expected)
+            _has_cvd_divergence = _c_cvd >= 10
+            _min_confirm = 0.0002 if _has_cvd_divergence else 0.0005
 
             # Count candles closing in right direction
             _bullish_candles = sum(1 for i in range(-5, 0) if _closes[i] > _closes[i-1])
@@ -1377,8 +1381,9 @@ class ScoringEngine:
             reasons.append(_dvi_reason)
 
         # ── EDGE: Orderbook Absorption (wall holding under pressure) ──
+        # Only add if OB imbalance didn't already give max points (prevent double-count)
         _abs_pts, _abs_reason = self._calc_ob_absorption(asset)
-        if _abs_pts != 0:
+        if _abs_pts != 0 and _c_ob < 18:
             if _abs_pts > 0:
                 bull_setup += _abs_pts
             else:
