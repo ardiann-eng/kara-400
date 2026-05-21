@@ -142,6 +142,18 @@ class ScoreBreakdown(BaseModel):
     raw_score:             int = 0
     final_score:           int = 0
 
+    # Per-sub-component scores (OB, EMA, RSI, CVD, FUND, LIQ, MTF)
+    components:            Dict[str, int] = Field(default_factory=dict)
+
+    # Momentum gate result
+    momentum_gate_passed:  Optional[bool] = None
+    momentum_move_pct:     float = 0.0
+    momentum_candles:      str = ""   # e.g. "3/5"
+
+    # 4H HTF regime
+    htf_regime:            str = ""
+    htf_threshold_adj:     int = 0
+
     # Explanation strings for Telegram / Dashboard
     reasons:               List[str] = Field(default_factory=list)
     warnings:              List[str] = Field(default_factory=list)

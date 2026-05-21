@@ -318,14 +318,18 @@ class HyperliquidClient:
             return {}, False
 
     async def refresh_market_cache(self, force: bool = False):
-        """Fetch all market data batch and populate cache (30s TTL).
+        """Fetch all market data batch and populate cache (90s TTL).
+
+        TTL 90s: scan cycle bisa mencapai ~150s, TTL 30s menyebabkan re-fetch
+        di tengah scan dan menghasilkan stale cache warning yang misleading.
+        force=True tetap bypass TTL (dipakai di awal setiap scan).
 
         CRITICAL: jika fetch gagal, cache LAMA tetap dipertahankan (jangan di-clear).
         Ini mencegah semua asset return None hanya karena 1 API call gagal.
         """
         import time
         now = time.monotonic()
-        if not force and (now - self._market_cache_time) < 30 and self._market_cache:
+        if not force and (now - self._market_cache_time) < 90 and self._market_cache:
             return
 
         data = await self.get_get_all_market_data_raw()

@@ -184,6 +184,19 @@ class UserDB:
                 """)
 
                 conn.commit()
+
+                # ── Schema migrations (idempotent ALTER TABLE) ──────────
+                for col, typedef in [
+                    ("reasons",    "TEXT DEFAULT '[]'"),
+                    ("components", "TEXT DEFAULT '{}'"),
+                ]:
+                    try:
+                        cursor.execute(f"ALTER TABLE signals_history ADD COLUMN {col} {typedef}")
+                        conn.commit()
+                        log.info(f"[DB] Migration: signals_history.{col} added")
+                    except Exception:
+                        pass  # column already exists
+
                 cursor.execute("SELECT COUNT(*) FROM trade_history")
                 trade_count = cursor.fetchone()[0]
                 cursor.execute("SELECT COUNT(*) FROM paper_positions")
@@ -374,22 +387,33 @@ class UserDB:
             try:
                 conn = self._get_conn()
                 cursor = conn.cursor()
-                # model_dump is pydantic v2
                 sig_data = sig.model_dump_json() if hasattr(sig, 'model_dump_json') else json.dumps(sig.dict())
+                reasons_json = json.dumps(sig.breakdown.reasons if sig.breakdown else [])
+                components_json = json.dumps({
+                    "oi_funding": sig.breakdown.oi_funding_score if sig.breakdown else 0,
+                    "liquidation": sig.breakdown.liquidation_score if sig.breakdown else 0,
+                    "orderbook":   sig.breakdown.orderbook_score if sig.breakdown else 0,
+                    "session":     sig.breakdown.session_bonus if sig.breakdown else 0,
+                    "regime_mult": sig.breakdown.regime_multiplier if sig.breakdown else 1.0,
+                    "bull_total":  sig.breakdown.total_bull if sig.breakdown else 0,
+                    "bear_total":  sig.breakdown.total_bear if sig.breakdown else 0,
+                    "raw_score":   sig.breakdown.raw_score if sig.breakdown else 0,
+                })
                 cursor.execute(
-                    "INSERT OR REPLACE INTO signals_history VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO signals_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        sig.signal_id, 
-                        sig.asset, 
-                        sig.side.value, 
-                        sig.score, 
-                        sig.entry_price, 
-                        sig_data, 
-                        sig.timestamp.timestamp()
+                        sig.signal_id,
+                        sig.asset,
+                        sig.side.value,
+                        sig.score,
+                        sig.entry_price,
+                        sig_data,
+                        sig.timestamp.timestamp(),
+                        reasons_json,
+                        components_json,
                     )
                 )
                 conn.commit()
-                # conn.close() # Connection pooling applied
             except Exception as e:
                 log.error(f"Error saving signal {sig.signal_id}: {e}")
 

@@ -167,8 +167,9 @@ class LearningEngine:
         """
         self.load()
 
-        # [FIX 2026-05-21] Deduplicate: multi-user bots record the same trade N times
-        # (once per user). Use pos_id as dedup key so 1 trade event = 1 sample.
+        # Deduplicate: multi-user bots record the same signal N times (once per user).
+        # Use signal-level key: asset+side+entry_minute so all users sharing the same
+        # signal collapse to a single record.
         if pos_id:
             if not hasattr(self, '_recorded_pos_ids'):
                 self._recorded_pos_ids = set()

@@ -579,11 +579,13 @@ class LiveExecutor(BaseExecutor):
             # [LEARNING ENGINE] Record outcome
             try:
                 from engine.learning_engine import learning_engine
+                _entry_minute = int(pos.opened_at.timestamp() // 60) if pos.opened_at else 0
+                _signal_key = f"{pos.asset}_{pos.side.value.lower()}_{_entry_minute}"
                 learning_engine.record_outcome(
                     asset=pos.asset, side=pos.side.value.lower(),
                     regime=getattr(pos, 'trade_mode', 'ranging'),
                     score=getattr(pos, 'entry_score', 50), pnl_usd=pnl,
-                    pos_id=pos.position_id,
+                    pos_id=_signal_key,
                     features={
                         'oi_funding_score': 0, 'orderbook_score': 0, 'liquidation_score': 0,
                         'displacement_5m': getattr(pos, 'trend_pct', 0) or 0,

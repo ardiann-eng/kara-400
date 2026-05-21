@@ -3218,9 +3218,46 @@ class KaraTelegram:
                 short_risk_text = "\n\n🔴 <b>Risiko SHORT:</b>\n" + "\n".join(x for x in short_risk_lines if x)
 
             side_label = "SHORT 🔴" if is_short else "LONG 🟢"
+
+            # ── Component bar ─────────────────────────────────────────
+            comps = getattr(bd, 'components', {}) or {}
+            comp_line = ""
+            if comps:
+                def _fmt(v):
+                    return f"+{v}" if v > 0 else str(v)
+                parts = []
+                for k in ["OB", "EMA", "RSI", "CVD", "FUND", "LIQ", "MTF"]:
+                    if k in comps:
+                        parts.append(f"{k}:<b>{_fmt(comps[k])}</b>")
+                if parts:
+                    comp_line = "\n\n🔬 <b>Komponen Skor:</b>\n" + "  ".join(parts)
+
+            # ── Momentum gate ─────────────────────────────────────────
+            mgp = getattr(bd, 'momentum_gate_passed', None)
+            mom_line = ""
+            if mgp is not None:
+                move = getattr(bd, 'momentum_move_pct', 0.0)
+                candles_str = getattr(bd, 'momentum_candles', "")
+                icon = "✅" if mgp else "❌"
+                mom_line = (
+                    f"\n\n⚡ <b>Momentum Gate:</b> {icon} "
+                    f"5m move <b>{move*100:.3f}%</b> | candles <b>{candles_str}</b>"
+                )
+
+            # ── HTF regime ────────────────────────────────────────────
+            htf = getattr(bd, 'htf_regime', "")
+            htf_adj = getattr(bd, 'htf_threshold_adj', 0)
+            htf_line = ""
+            if htf:
+                adj_str = f"threshold {htf_adj:+d}" if htf_adj != 0 else "no adj"
+                htf_line = f"\n📊 <b>4H Regime:</b> <code>{htf}</code> ({adj_str})"
+
             explanation = (
                 f"<b>{signal.asset} {side_label}</b> — Skor <b>{signal.score}/100</b>\n\n"
                 f"{reasons_text}"
+                f"{comp_line}"
+                f"{mom_line}"
+                f"{htf_line}"
                 f"{warnings_text}"
                 f"{short_risk_text}"
             )

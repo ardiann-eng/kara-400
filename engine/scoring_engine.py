@@ -564,6 +564,15 @@ class ScoringEngine:
         score = int(score * _regime_mult)
         score = max(0, min(score, 100))
         reasons.append(f"🌐 Regime: {_regime_cat} (×{_regime_mult}, {score_pre}→{score})")
+        reasoning_logger.log_regime_adjustment(
+            asset,
+            regime=_regime_cat,
+            multiplier=_regime_mult,
+            score_before=score_pre,
+            score_after=score,
+            htf_regime=htf_regime,
+            htf_threshold_adj=htf_threshold_adj,
+        )
 
         # [SESSION FIX 2026-05-18]: Split session bonus — small portion to score,
         # majority to threshold. Old: +14 all to score → inflated top decile (21% WR).
@@ -577,6 +586,12 @@ class ScoringEngine:
         score += session_score_add
         score = max(0, min(score, 100))
         reasons.extend(session_reasons)
+
+        # ── SCORE-DEBUG final (post-regime, post-session) ─────────────
+        log.info(
+            f"[SCORE-DEBUG] {asset} | {side.value.upper()} score={score} | "
+            f"regime={_regime_cat}(×{_regime_mult}) session_add={session_score_add}"
+        )
 
         # ── [P0-2 FIX 2026-05-18] FUNDING RATE HARD GATE ──────────────
         # Data audit: funding_extreme adalah satu-satunya fitur dengan r>0 terhadap PnL.
@@ -795,12 +810,8 @@ class ScoringEngine:
         atr_pct_now = self._compute_atr_pct(_highs, _lows, _closes, period=14)
 
         # ── [FIX 2026-05-21] MOMENTUM CONFIRMATION GATE ────────────────────
-        # Require price already moving in predicted direction before entry.
-        # EXCEPTIONS for leading signals that BY DEFINITION fire before price moves:
-        #   - CVD divergence (buying but price flat)
-        #   - Cross-Asset Momentum (BTC moved, alt hasn't)
-        #   - OB Absorption (wall holding, price hasn't bounced yet)
-        # For these: relax to candle-direction only (no net move requirement).
+        # Defaults (used if candle data insufficient)
+        _direction_ok = True; _net_move = 0.0; _bullish_candles = 0; _bearish_candles = 0
         if len(_closes) >= 6:
             _net_move = (_closes[-1] - _closes[-6]) / _closes[-6] if _closes[-6] > 0 else 0
 
@@ -836,19 +847,55 @@ class ScoringEngine:
                 )
                 self.skip_counters["no_micro_momentum"] = self.skip_counters.get("no_micro_momentum", 0) + 1
                 self._skip_count_since_summary += 1
+                reasoning_logger.log_momentum_gate(
+                    asset, passed=False,
+                    move_pct=_net_move if side == Side.LONG else -_net_move,
+                    bull_candles=_bullish_candles, total_candles=5,
+                    is_leading=_has_leading_signal,
+                )
                 return None, score
+            else:
+                reasoning_logger.log_momentum_gate(
+                    asset, passed=True,
+                    move_pct=_net_move if side == Side.LONG else -_net_move,
+                    bull_candles=_bullish_candles, total_candles=5,
+                    is_leading=_has_leading_signal,
+                )
+
+        # Capture momentum gate result for breakdown (default: no gate data)
+        _mgp = None; _mmove = 0.0; _mcandles = ""
+        if len(_closes) >= 6:
+            _mgp = _direction_ok
+            _mmove = _net_move if side == Side.LONG else -_net_move
+            _dir_candles = _bullish_candles if side == Side.LONG else _bearish_candles
+            _mcandles = f"{_dir_candles}/5"
 
         signal = self._build_scalper_signal(
             asset, side, score, mark_price, reasons, vol_regime,
             session_bonus, realized_vol, trend_pct, atr_pct=atr_pct_now,
             fade_mode=fade_mode,
             late_trend=late_trend,
-            # [F1 FIX 2026-05-18] Pass per-analyzer signed scores for breakdown telemetry
             oi_signed=_scalper_components.get("oi_signed", 0),
             liq_signed=_scalper_components.get("liq_signed", 0),
             ob_signed=_scalper_components.get("ob_signed", 0),
             bull_setup=_scalper_components.get("bull_setup", 0),
             bear_setup=_scalper_components.get("bear_setup", 0),
+            sub_components={
+                "OB":   _scalper_components.get("ob_signed", 0),
+                "EMA":  _scalper_components.get("ema_pts", 0),
+                "RSI":  _scalper_components.get("rsi_pts", 0),
+                "CVD":  _scalper_components.get("cvd_pts", 0),
+                "FUND": _scalper_components.get("oi_signed", 0),
+                "LIQ":  _scalper_components.get("liq_signed", 0),
+                "MTF":  _scalper_components.get("mtf_pts", 0),
+                "XAM":  _scalper_components.get("xam_pts", 0),
+                "DVI":  _scalper_components.get("dvi_pts", 0),
+            },
+            momentum_gate_passed=_mgp,
+            momentum_move_pct=_mmove,
+            momentum_candles=_mcandles,
+            htf_regime=htf_regime,
+            htf_threshold_adj=htf_threshold_adj,
         )
 
         # Apply 4h regime leverage adjustment
@@ -1463,9 +1510,9 @@ class ScoringEngine:
         score = int(scaled * disp_mult)
         score = max(0, min(100, score))
 
-        # ── Per-coin SCORE-DEBUG log ──────────────────────────────────
+        # ── Per-coin SCORE-DEBUG log (pre-regime: before vol/regime multiplier) ──
         log.info(
-            f"[SCORE-DEBUG] {asset} | {side.value.upper()} score={score} | "
+            f"[SCORE-DEBUG] {asset} | {side.value.upper()} pre_regime={score} | "
             f"setup={dominant_setup} confirm={confirm_pts} disp={disp_mult:.2f} | "
             f"OB={_c_ob} EMA={_c_ema} RSI={_c_rsi} CVD={_c_cvd} "
             f"FUND={_c_fund} LIQ={_c_liq} MTF={_c_mtf} | "
@@ -1482,6 +1529,10 @@ class ScoringEngine:
             out_components["cvd_pts"] = int(_c_cvd)
             out_components["xam_pts"] = int(_xam_pts)
             out_components["abs_pts"] = int(_abs_pts)
+            out_components["ema_pts"] = int(_c_ema)
+            out_components["rsi_pts"] = int(_c_rsi)
+            out_components["mtf_pts"] = int(_c_mtf)
+            out_components["dvi_pts"] = int(_c_vol)
 
         return score, side, reasons
 
@@ -1670,6 +1721,13 @@ class ScoringEngine:
         ob_signed: int = 0,
         bull_setup: int = 0,
         bear_setup: int = 0,
+        # [2026-05-21] Sub-component detail + momentum gate + HTF regime
+        sub_components: dict = None,
+        momentum_gate_passed: bool = None,
+        momentum_move_pct: float = 0.0,
+        momentum_candles: str = "",
+        htf_regime: str = "",
+        htf_threshold_adj: int = 0,
     ) -> TradeSignal:
         """Build a TradeSignal with scalper-specific dynamic TP/SL levels."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
@@ -1806,7 +1864,13 @@ class ScoringEngine:
             session_bonus=session_bonus,
             total_bull=bull_setup,
             total_bear=bear_setup,
-            reasons=reasons
+            reasons=reasons,
+            components=sub_components or {},
+            momentum_gate_passed=momentum_gate_passed,
+            momentum_move_pct=momentum_move_pct,
+            momentum_candles=momentum_candles,
+            htf_regime=htf_regime,
+            htf_threshold_adj=htf_threshold_adj,
         )
 
         # [AUDIT FIX 2026 PHASE 3] Propagate realized_vol + entry_atr to signal

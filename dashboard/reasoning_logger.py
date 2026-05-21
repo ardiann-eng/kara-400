@@ -143,6 +143,45 @@ class ReasoningLogger:
             trace.add_step("filters", filter_data)
         self._live_steps.appendleft({"ts": time.time(), "asset": asset, "step": "filters", "data": filter_data})
 
+    def log_momentum_gate(self, asset: str, passed: bool, move_pct: float,
+                          bull_candles: int, total_candles: int, is_leading: bool,
+                          required_move: float = 0.04, required_candles: int = 3):
+        """Log momentum confirmation gate result (2026-05-21 change)."""
+        data = {
+            "passed": passed,
+            "move_pct": round(move_pct * 100, 4),
+            "bull_candles": bull_candles,
+            "total_candles": total_candles,
+            "is_leading_signal": is_leading,
+            "required_move_pct": required_move,
+            "required_candles": required_candles,
+            "gate": "momentum_confirmation",
+            "change": "2026-05-21: require 5m move ≥0.04% + 3/5 candles (leading: 2/5 only)",
+        }
+        trace = self._active_traces.get(asset)
+        if trace:
+            trace.add_step("momentum_gate", data)
+        self._live_steps.appendleft({"ts": time.time(), "asset": asset, "step": "momentum_gate", "data": data})
+
+    def log_regime_adjustment(self, asset: str, regime: str, multiplier: float,
+                              score_before: int, score_after: int,
+                              htf_regime: str = "", htf_threshold_adj: int = 0):
+        """Log regime multiplier + 4H HTF adjustment (2026-05-21: CHOPPY +8)."""
+        data = {
+            "vol_regime": regime,
+            "regime_multiplier": multiplier,
+            "score_before": score_before,
+            "score_after": score_after,
+            "htf_regime": htf_regime,
+            "htf_threshold_adj": htf_threshold_adj,
+            "gate": "regime_adjustment",
+            "change": "2026-05-21: CHOPPY threshold +8 (was +2), late_trend ×0.70",
+        }
+        trace = self._active_traces.get(asset)
+        if trace:
+            trace.add_step("regime_adjustment", data)
+        self._live_steps.appendleft({"ts": time.time(), "asset": asset, "step": "regime_adjustment", "data": data})
+
     def log_ml_prediction(self, asset: str, prob_win: float, size_mult: float):
         """Log ML model prediction."""
         trace = self._active_traces.get(asset)
