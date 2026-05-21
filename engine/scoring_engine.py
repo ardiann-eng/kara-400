@@ -538,9 +538,9 @@ class ScoringEngine:
                 htf_leverage_adj  = -3
                 reasons.append(f"⚠️ 4H TRENDING_DOWN — LONG counter-trend (+8 threshold)")
         else:  # CHOPPY
-            htf_threshold_adj = +2   # choppy 4h = lower edge, need stronger 1m signal
+            htf_threshold_adj = +8   # [FIX 2026-05-21] Was +2, data shows 0% WR in choppy. Need very strong signal.
             htf_leverage_adj  = -2
-            reasons.append(f"〰️ 4H CHOPPY — threshold +2, leverage reduced")
+            reasons.append(f"〰️ 4H CHOPPY — threshold +8, leverage reduced")
 
         # 4c. [OPPORTUNITY SCORING] Regime multiplier — ranging = opportunity, trending = stale
         # Data audit: trending ×1.2 caused score inflation at exhaustion points.
@@ -793,6 +793,28 @@ class ScoringEngine:
                 except (TypeError, ValueError):
                     pass
         atr_pct_now = self._compute_atr_pct(_highs, _lows, _closes, period=14)
+
+        # ── [FIX 2026-05-21] MICRO-MOMENTUM CONFIRMATION ─────────────────
+        # Data: 46 trades, 85% exit with price moving AGAINST position.
+        # Root cause: bot enters on "setup potential" but price never follows through.
+        # Fix: require that price in last 2 candles (2 min) is already moving in
+        # the predicted direction. This confirms momentum has STARTED, not just "might start".
+        if len(_closes) >= 3:
+            _recent_move = (_closes[-1] - _closes[-3]) / _closes[-3] if _closes[-3] > 0 else 0
+            _min_confirm = 0.0001  # 0.01% minimum move in right direction
+            _direction_ok = (
+                (side == Side.LONG and _recent_move > _min_confirm) or
+                (side == Side.SHORT and _recent_move < -_min_confirm)
+            )
+            if not _direction_ok:
+                log.info(
+                    f"[SKIP] {asset} | score={score} | side={side.value} | "
+                    f"reason=no_micro_momentum | context=2m_move={_recent_move*100:.4f}%"
+                )
+                self.skip_counters["no_micro_momentum"] = self.skip_counters.get("no_micro_momentum", 0) + 1
+                self._skip_count_since_summary += 1
+                return None, score
+
         signal = self._build_scalper_signal(
             asset, side, score, mark_price, reasons, vol_regime,
             session_bonus, realized_vol, trend_pct, atr_pct=atr_pct_now,
