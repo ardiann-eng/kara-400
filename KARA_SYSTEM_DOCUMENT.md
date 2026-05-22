@@ -353,7 +353,7 @@ Impact breakdown:
 | 4 | Double Asia penalty (scoring engine + _handle_signals both add +5) | 🟡 Fixed | **Removed duplicate in _handle_signals** |
 | 5 | Locked threshold 52 vs effective threshold 53-63 after adjustments | 🟡 Cosmetic | Not fixed — locked value never becomes bottleneck |
 | 6 | OB Absorption + OB Imbalance double-counting from same orderbook data | 🟡 Fixed | **OB Absorption capped when OB Imbalance already at max** |
-| 7 | OB snapshot (volatile, changes per second) can override OI/Funding (stable, 8h data) in direction decision | 🔴 Fixed | **Penalty -5 confirm_pts when OI opposes chosen side** — reduces score when OB overrides fundamental |
+| 7 | OB snapshot (volatile, changes per second) can override OI/Funding (stable, 8h data) in direction decision | 🟢 Fixed | **OB REMOVED from direction voting** (Audit #6). OB only contributes to score, not direction. Direction = OI + EMA + HTF + Whale + Momentum. |
 | 8 | Cross-Asset Momentum fires when alt HASN'T moved (by design), but momentum gate requires price movement | 🔴 Fixed | **Leading signals (CVD, Cross-Asset, OB Absorption) get relaxed gate**: only 2/5 candles directional, no net move requirement |
 | 9 | Regime multiplier applied AFTER momentum gate — gate uses pre-regime score | 🟡 Acceptable | Gate checks direction not score level. No functional impact. |
 | 10 | Early loss cut -0.2%/4min too aggressive — kills trades that need 5-6min to develop | 🟡 Fixed | **Relaxed to -0.3%/5min** — gives trade 1 extra minute, only cuts real losers |
@@ -424,7 +424,7 @@ KARA membuka satu koneksi WebSocket permanen ke Hyperliquid dan subscribe ke emp
 | Data | Channel WS | Frekuensi Update | Dipakai Untuk |
 |---|---|---|---|
 | **Orderbook L2** | `l2Book` | Setiap perubahan bid/ask | Imbalance scoring, spread filter, CVD |
-| **Trades** | `trades` | Setiap transaksi terjadi | CVD (Cumulative Volume Delta), momentum confirmation |
+| **Trades** | `trades` | Setiap transaksi terjadi | CVD (Cumulative Volume Delta), momentum confirmation, **Whale Trade Imbalance (LTI)** |
 | **Funding Rate** | `activeAssetCtx` | Setiap perubahan (biasanya per jam) | OI+Funding scoring, funding history 96 periode terakhir |
 | **Liquidations** | `liquidations` (global) | Setiap event likuidasi terjadi | Liquidation cascade scoring |
 
@@ -455,7 +455,7 @@ Beberapa data yang disebutkan dalam kode tapi **tidak diimplementasikan** atau t
 - Spot price dari exchange lain (hanya pakai `allMids` Hyperliquid sebagai proxy spot)
 - Order book depth dari level di luar top 20
 - ~~Long/Short ratio dari sumber eksternal~~ → **SEKARANG ADA dari Bybit** (2026-05-20)
-- Whale wallet tracking (butuh on-chain indexer)
+- ~~Whale wallet tracking (butuh on-chain indexer)~~ → **PARTIALLY SOLVED** via Large Trade Imbalance (Audit #6): filter trades >3× median size sebagai proxy whale activity. Bukan wallet-level tapi trade-size-level.
 
 ### 1.4 Sumber Data Bybit (⚠️ BLOCKED di Railway sejak 2026-05-21)
 
@@ -496,7 +496,7 @@ KARA mengambil 24 candle 1h terakhir, menghitung return per candle `(close - ope
 | `LOW_VOL` | Volatilitas < 1.5%/hari | ×0.90 |
 | `NORMAL` | 1.5% – 4%/hari | ×1.00 |
 | `HIGH_VOL` | 4% – 8%/hari | ×0.85 |
-| `EXTREME` | > 8%/hari | **Skip asset sepenuhnya** |
+| `EXTREME` | > 8%/hari | **Threshold +15** (scalper) / Skip (standard) |
 
 Selain itu ada **trend multiplier** terpisah berdasarkan perubahan harga 24 jam:
 - Jika trend > 1.5% atau < -1.5%: skor × 1.10 (trending market lebih dipercaya)
@@ -822,16 +822,56 @@ score += meta_delta
 Jika 3 dari 4 arah = LONG → trade LONG, jika 3 dari 4 = SHORT → trade SHORT.
 Jika tidak ada 3-of-4 consensus → signal tidak dibuat (`return None, score`).
 
-**Scalper Mode:** Arah ditentukan dari `bull_pts ≥ bear_pts` setelah semua komponen dihitung. Tidak ada 3-of-4 filter di scalper.
+**Scalper Mode (UPDATED 2026-05-22 — Audit #6):**
+
+Arah ditentukan oleh **Direction Voting System** — 7 voters dengan weighted votes.
+OB imbalance **DIKELUARKAN** dari direction decision (r=−0.098, counter-predictive).
+OB tetap masuk ke SCORE (setup strength).
+
+| # | Voter | Weight | Kondisi Fire |
+|---|---|---|---|
+| 1 | OI/Funding | 3 | `oi_signed > 3` → bull, `< -3` → bear |
+| 2 | EMA8/21 direction | 2 | EMA8 > EMA21×1.0003 → bull, < ×0.9997 → bear |
+| 3 | Price momentum 5m | 1 | net_move > 0.1% → bull, < -0.1% → bear |
+| 4 | RSI momentum | 1 | RSI accelerating + price rising → bull (atau sebaliknya) |
+| 5 | 4H HTF regime | 2 | TRENDING_UP → bull, TRENDING_DOWN → bear |
+| 6 | Momentum strength | 1 | Hanya fire kalau |momentum| > 0.5% (extra confidence) |
+| 7 | 🐋 Whale Trade Imbalance | 2 | Large trades (>3× median) buy/sell imbalance > 30% |
+
+**Decision logic:**
+```python
+if _dir_bull > _dir_bear:
+    side = LONG
+elif _dir_bear > _dir_bull:
+    side = SHORT
+else:
+    # Tie → fallback ke bull_setup vs bear_setup (includes OB)
+    side = LONG if bull_setup >= bear_setup else SHORT
+```
+
+**Max votes:** Bull 12, Bear 12. Minimum untuk menang: simple majority.
+
+**Kenapa OB dikeluarkan dari direction (data Audit #6, 115 trades):**
+- OB dominates direction → WR 38.8%, PnL −$7.25
+- OI dominates direction → WR 54.2%, PnL +$7.83
+- OB↔PnL correlation: r=−0.098 (counter-predictive)
+- OI↔PnL correlation: r=+0.091 (predictive)
+
+**Setelah direction ditentukan, ada Trend Structure Veto:**
+- LONG in confirmed downtrend (price >0.2% below EMA21 + EMA8<EMA21) → SKIP
+- SHORT in confirmed uptrend (price >0.2% above EMA21 + EMA8>EMA21) → SKIP
+- Ini bukan flip — hanya skip. Tunggu setup yang aligned.
 
 **SHORT tambahan filter (hanya berlaku jika SHORT diizinkan):**
-- Funding rate harus ≥ **-0.0001** (block hanya saat funding sangat negatif — shorts sudah bayar longs). Sebelumnya `+0.00001` yang terlalu ketat dan membuang neutral-funding SHORTs.
+- Funding rate harus ≥ **−0.0003** (block hanya saat funding sangat negatif)
 - 24h trend tidak boleh > +3% ke atas
-- Bull-bear gap minimal **25 poin** (naik dari 18 — fix 2026-05-14: SHORT struktural lebih lemah di HL karena positive funding bias)
-- **Technical minimum gate (BARU 2026-05-14):** `OI_bear + Liq_bear + OB_bear ≥ 10`. Mencegah sinyal "session-only" lolos — contoh nyata: KAITO SHORT score=59 tapi OI=0, Liq=0, OB=0 (pure session bonus). Sekarang diblok.
+- Bull-bear gap minimal **25 poin**
+- **Technical minimum gate:** `OI_bear + Liq_bear + OB_bear ≥ 6`
+- **Momentum gate:** dir_move ≥ 0.25% (vs 0.15% LONG)
+- **Candle confirmation:** 3/5 bearish (vs 2/5 LONG)
 
-**LONG tambahan filter (BARU 2026-05-14):**
-- **Technical minimum gate:** `OI_bull + Liq_bull + OB_bull ≥ 5`. Lebih permisif dari SHORT karena positive funding bias HL favors LONG.
+**LONG tambahan filter:**
+- **Technical minimum gate:** `OI_bull + Liq_bull + OB_bull ≥ 5`
 
 ---
 
@@ -859,7 +899,7 @@ Berikut urutan filter lengkap, berurutan dari scoring hingga eksekusi:
 **Di dalam Scoring Engine (memblok pembuatan sinyal):**
 
 1. **Blocked Hours** — ~~Jam 08:00 dan 09:00 UTC~~ **REMOVED** (Audit #3). `BLOCKED_HOURS_UTC = []`.
-2. **EXTREME Regime** — Volatilitas > 8%/hari. Asset di-skip.
+2. **EXTREME Regime** — Volatilitas > 8%/hari. Standard: skip. Scalper: **threshold +15** (hanya score 71+ lolos, Audit #6).
 3. **Mark Price = 0** — Jika API gagal return harga, asset di-skip.
 4. **Spread Filter (Standard)** — Jika bid-ask spread > 0.25%, asset di-reject.
 5. **Spread Filter (Scalper)** — Jika spread > 0.15%, asset di-reject.
