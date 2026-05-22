@@ -344,13 +344,18 @@ class PaperExecutor(BaseExecutor):
         if not pos or pos.status == PositionStatus.CLOSED:
             return None
 
-        # [AUDIT FIX] Use orderbook-based slippage for exit too
-        exit_side = Side.SHORT if pos.side == Side.LONG else Side.LONG
-        exit_notional = pos.size_current * current_price
-        fill_price = self._simulate_fill(
-            current_price, exit_side,
-            asset=pos.asset, notional_usd=exit_notional
-        )
+        # [AUDIT #6 FIX] Skip slippage for SL/trailing exits — price already determined
+        # by _execute_partial_close. Applying slippage again = double penalty.
+        if reason in ("stop_loss", "trailing_stop", "early_trail"):
+            fill_price = current_price  # already the exact trigger price
+        else:
+            # [AUDIT FIX] Use orderbook-based slippage for other exits
+            exit_side = Side.SHORT if pos.side == Side.LONG else Side.LONG
+            exit_notional = pos.size_current * current_price
+            fill_price = self._simulate_fill(
+                current_price, exit_side,
+                asset=pos.asset, notional_usd=exit_notional
+            )
         
         # The final PnL is what was made on the REMAINING size
         floating_pnl = pos.unrealized_pnl(fill_price)
