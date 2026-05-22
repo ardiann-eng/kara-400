@@ -514,6 +514,7 @@ class ScoringEngine:
             out_components=_scalper_components,
             trend_pct=trend_pct,
             ls_ratio=_ls_ratio,
+            htf_regime=htf_regime,
         )
 
         # 4b2. Apply 4h regime adjustment to score and leverage
@@ -711,11 +712,17 @@ class ScoringEngine:
         else:
             overlap_threshold_adj = 0
 
+        # [AUDIT #6 FIX 2026-05-22] EXTREME regime: don't block, raise threshold.
+        # Data: EXTREME score<60 = WR 33.3% (-$4.83), score 71+ = WR 44.4% (+$0.91).
+        # Raise threshold +15 so only high-conviction signals pass in extreme vol.
+        _vol_threshold_adj = 15 if vol_regime == MarketRegime.EXTREME else 0
+
         effective_threshold = (
             config.SCALPER.min_score_to_enter
             + overlap_threshold_adj         # [P0-1] overlap: +8, NY-only: +3
             + session_threshold_delta       # Asia: threshold rises
             + htf_threshold_adj             # 4h regime: aligned=-3, counter=+8, choppy=+2
+            + _vol_threshold_adj            # [AUDIT #6] EXTREME: +15 (only 71+ passes)
         )
         if score < effective_threshold:
             log.info(
@@ -905,11 +912,12 @@ class ScoringEngine:
             _dir_candles = _bullish_candles if side == Side.LONG else _bearish_candles
             _mcandles = f"{_dir_candles}/5"
 
-        # ── [AUDIT FIX 2026-05-21] PRICE vs EMA21 TREND FILTER ─────────────
-        # Trend-following rule with DOUBLE CONFIRMATION:
-        # Flip only when price below EMA21 AND EMA8 < EMA21 (confirmed downtrend).
-        # Single condition (price below EMA21) can be noise/bounce from support.
-        # EMA8 crossing below EMA21 = trend structure broken = safe to flip.
+        # ── [AUDIT #6 FIX 2026-05-22] TREND STRUCTURE VETO ─────────────
+        # Data (Audit #6): Trend-flip fired 2x, both LOSS (-$4.76). Flipping to SHORT
+        # in crypto = structural disadvantage (WR 20%). 
+        # NEW APPROACH: Don't flip. Instead, SKIP if direction contradicts trend structure.
+        # This is a quality gate: "don't enter if trend is against you."
+        # If trend aligns → proceed. If trend opposes → skip (wait for better setup).
         if len(_closes) >= 21:
             _ema21_val = _closes[0]
             _ema8_val = _closes[0]
@@ -919,20 +927,26 @@ class ScoringEngine:
                 _ema21_val = _v * _k21 + _ema21_val * (1 - _k21)
                 _ema8_val = _v * _k8 + _ema8_val * (1 - _k8)
             _price_vs_ema = (mark_price - _ema21_val) / _ema21_val
-            _ema_cross_bear = _ema8_val < _ema21_val * 0.9997  # EMA8 below EMA21
-            _ema_cross_bull = _ema8_val > _ema21_val * 1.0003  # EMA8 above EMA21
+            _ema_cross_bear = _ema8_val < _ema21_val * 0.9997
+            _ema_cross_bull = _ema8_val > _ema21_val * 1.0003
+
+            # LONG in confirmed downtrend = counter-trend → skip
             if side == Side.LONG and _price_vs_ema < -0.002 and _ema_cross_bear:
                 log.info(
-                    f"[TREND-FLIP] {asset} | LONG→SHORT | price={mark_price:.4f} below EMA21={_ema21_val:.4f} ({_price_vs_ema*100:.2f}%) + EMA8<EMA21"
+                    f"[SKIP] {asset} | score={score} | side=LONG | "
+                    f"reason=trend_structure_veto | context=price {_price_vs_ema*100:.2f}% below EMA21 + EMA8<EMA21"
                 )
-                side = Side.SHORT
-                reasons.append(f"🔄 Trend flip: price below EMA21 + EMA8<EMA21 → forced SHORT")
-            elif side == Side.SHORT and _price_vs_ema > 0.002 and _ema_cross_bull:
+                self.skip_counters["trend_structure_veto"] = self.skip_counters.get("trend_structure_veto", 0) + 1
+                return None, score
+
+            # SHORT in confirmed uptrend = counter-trend → skip
+            if side == Side.SHORT and _price_vs_ema > 0.002 and _ema_cross_bull:
                 log.info(
-                    f"[TREND-FLIP] {asset} | SHORT→LONG | price={mark_price:.4f} above EMA21={_ema21_val:.4f} ({_price_vs_ema*100:.2f}%) + EMA8>EMA21"
+                    f"[SKIP] {asset} | score={score} | side=SHORT | "
+                    f"reason=trend_structure_veto | context=price {_price_vs_ema*100:.2f}% above EMA21 + EMA8>EMA21"
                 )
-                side = Side.LONG
-                reasons.append(f"🔄 Trend flip: price above EMA21 + EMA8>EMA21 → forced LONG")
+                self.skip_counters["trend_structure_veto"] = self.skip_counters.get("trend_structure_veto", 0) + 1
+                return None, score
 
         signal = self._build_scalper_signal(
             asset, side, score, mark_price, reasons, vol_regime,
@@ -1140,6 +1154,7 @@ class ScoringEngine:
         out_components: dict = None,
         trend_pct: float = 0.0,
         ls_ratio: float = None,
+        htf_regime: str = "",
     ) -> Tuple[int, Side, List[str]]:
         """
         OPPORTUNITY SCORING v2 — measures UNTAPPED potential, not confirmation.
@@ -1532,20 +1547,115 @@ class ScoringEngine:
                         reasons.append(f"⚠️ SHORT counter-trend {dir_disp*100:.2f}% — price rising (×0.70)")
 
         # ── FINAL SCORE ASSEMBLY ──────────────────────────────────────
-        # Direction: determined by SETUP indicators (leading), not confirmation
-        side = Side.LONG if bull_setup >= bear_setup else Side.SHORT
-        dominant_setup = max(bull_setup, bear_setup)
+        # [AUDIT #6 FIX 2026-05-22] DIRECTION DECISION RESTRUCTURED
+        # Data (115 trades): OB dominates direction → WR 38.8%, PnL -$7.25
+        #                    OI dominates direction → WR 54.2%, PnL +$7.83
+        # OB imbalance r=-0.098 vs PnL (counter-predictive for direction).
+        # OI/Funding r=+0.091 vs PnL (predictive).
+        #
+        # FIX: Direction determined by STABLE signals only (OI/Funding + EMA + momentum).
+        # OB contributes to SCORE (setup strength) but NOT to direction decision.
+        # This prevents volatile OB snapshots from overriding 8h fundamental data.
 
-        # [FIX 2026-05-21 Conflict #7] Penalize when OI/Funding opposes chosen direction.
-        # OI is contrarian (crowded longs → bear pts). If bot goes LONG despite OI saying
-        # "longs crowded", apply confidence penalty. This prevents OB snapshot from
-        # overriding 8-hour fundamental data.
         _oi_signed = int(oi_bull - oi_bear)
-        if _oi_signed != 0:
-            _oi_opposes = (side == Side.LONG and _oi_signed < -8) or (side == Side.SHORT and _oi_signed > 8)
-            if _oi_opposes:
-                confirm_pts -= 5
-                reasons.append(f"⚠️ OI/Funding opposes {side.value} (oi_signed={_oi_signed}) — confidence -5")
+
+        # Direction votes (exclude OB — it's noise for direction, data proves it)
+        _dir_bull = 0
+        _dir_bear = 0
+
+        # Vote 1: OI/Funding (strongest predictor, weight 3x)
+        if _oi_signed > 3:
+            _dir_bull += 3
+        elif _oi_signed < -3:
+            _dir_bear += 3
+
+        # Vote 2: EMA direction (trend structure)
+        if ema_bullish:
+            _dir_bull += 2
+        elif ema_bearish:
+            _dir_bear += 2
+
+        # Vote 3: Price momentum (5min net move — already calculated)
+        _mom_5m = 0.0
+        if len(closes) >= 6:
+            _mom_5m = (closes[-1] - closes[-6]) / closes[-6] if closes[-6] > 0 else 0
+            if _mom_5m > 0.001:
+                _dir_bull += 1
+            elif _mom_5m < -0.001:
+                _dir_bear += 1
+
+        # Vote 4: RSI momentum (confirms trend acceleration)
+        if _c_div > 0:  # RSI momentum bullish (+8 was added to bull_setup)
+            if any("price rising" in r for r in reasons):
+                _dir_bull += 1
+            elif any("price falling" in r for r in reasons):
+                _dir_bear += 1
+
+        # Vote 5: 4H HTF regime (stable, higher-timeframe trend — data: aligned PnL +$3.74)
+        if htf_regime == "TRENDING_UP":
+            _dir_bull += 2
+        elif htf_regime == "TRENDING_DOWN":
+            _dir_bear += 2
+
+        # Vote 6: Momentum strength confidence
+        # Data: mom 0.50%+ = WR 57.6%, mom 0.30-0.50% = WR 36.4% (false breakout zone)
+        # Strong momentum in one direction = higher confidence that direction is correct
+        if len(closes) >= 6 and abs(_mom_5m) >= 0.005:  # 0.5%+ = strong trend
+            if _mom_5m > 0:
+                _dir_bull += 1
+            else:
+                _dir_bear += 1
+
+        # Vote 7: Large Trade Imbalance (institutional/whale flow detection)
+        # HL WS trades have: side ("B"=taker buy, "A"=taker sell), sz, px
+        # Large trades (>3× median size) = institutional conviction.
+        # Small trades = noise. Filter for whales only.
+        _lti_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
+        if len(_lti_trades) >= 50:
+            _recent = _lti_trades[-200:]  # last 200 trades
+            _sizes = [float(t.get('sz', 0)) * float(t.get('px', 0)) for t in _recent]
+            _median_sz = sorted(_sizes)[len(_sizes) // 2] if _sizes else 0
+            _whale_threshold = _median_sz * 3  # 3× median = whale
+
+            if _whale_threshold > 0:
+                _whale_buy_vol = sum(
+                    float(t.get('sz', 0)) * float(t.get('px', 0))
+                    for t in _recent
+                    if t.get('side', '') in ('B', 'buy', 'Ask')
+                    and float(t.get('sz', 0)) * float(t.get('px', 0)) >= _whale_threshold
+                )
+                _whale_sell_vol = sum(
+                    float(t.get('sz', 0)) * float(t.get('px', 0))
+                    for t in _recent
+                    if t.get('side', '') in ('S', 'sell', 'Bid')
+                    and float(t.get('sz', 0)) * float(t.get('px', 0)) >= _whale_threshold
+                )
+                _whale_total = _whale_buy_vol + _whale_sell_vol
+                if _whale_total > 0:
+                    _whale_ratio = (_whale_buy_vol - _whale_sell_vol) / _whale_total
+                    # Only vote if whale imbalance is significant (>30%)
+                    if _whale_ratio > 0.30:
+                        _dir_bull += 2
+                        reasons.append(f"🐋 Whale buy flow {_whale_ratio*100:.0f}% imbalance")
+                    elif _whale_ratio < -0.30:
+                        _dir_bear += 2
+                        reasons.append(f"🐋 Whale sell flow {_whale_ratio*100:.0f}% imbalance")
+
+        # Direction decision: if votes tied, fall back to bull_setup vs bear_setup
+        if _dir_bull > _dir_bear:
+            side = Side.LONG
+        elif _dir_bear > _dir_bull:
+            side = Side.SHORT
+        else:
+            # Tied — use full setup as tiebreaker (includes OB)
+            side = Side.LONG if bull_setup >= bear_setup else Side.SHORT
+
+        reasons.append(
+            f"🧭 Direction: {side.value.upper()} (votes: bull={_dir_bull} bear={_dir_bear} | "
+            f"OI={_oi_signed:+d} EMA={'bull' if ema_bullish else 'bear' if ema_bearish else 'flat'})"
+        )
+
+        dominant_setup = max(bull_setup, bear_setup)
 
         # Raw score = setup (0-63) + confirmation (-15 to +31) → range 0-94 pre-scaling
         raw = dominant_setup + confirm_pts

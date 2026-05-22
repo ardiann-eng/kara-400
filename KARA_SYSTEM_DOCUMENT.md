@@ -3,11 +3,111 @@
 > Ditulis dari hasil membaca seluruh kode Python. Setiap angka berasal dari kode, bukan asumsi.
 > Bahasa: Indonesia, dengan istilah teknis dalam bahasa Inggris bila lebih tepat.
 >
-> **Last updated:** 2026-05-21 (Audit #5 malam) — sinkron dengan perubahan: ATR gate, SHORT momentum/candle filters, funding rate relaxed, price vs EMA21 trend-flip.
+> **Last updated:** 2026-05-22 (Audit #6 siang) — sinkron dengan perubahan: Direction voting restructured, EXTREME threshold +15, trend structure veto, whale detection, HTF/momentum votes.
 
 ---
 
-## RINGKASAN PERUBAHAN TERBARU — AUDIT #5 (2026-05-21 malam, post-deploy)
+## RINGKASAN PERUBAHAN TERBARU — AUDIT #6 (2026-05-22 siang, post-deploy)
+
+### Audit Findings (115 trades, 14 jam, 21 Mei 16:00 – 22 Mei 05:58 UTC — single user)
+| Metric | Value |
+|---|---|
+| Win Rate | **45.2%** (52W / 63L) |
+| Total PnL | **+$0.58** (flipped positive) |
+| Profit Factor | 1.009 |
+| Avg Win | +$1.264 |
+| Avg Loss | −$1.034 |
+| Score ↔ PnL Pearson r | **+0.085** (improving) |
+| time_exit | 65/115 (56.5%), WR **12.3%**, PnL −$44.43 |
+| trailing_stop | 38/115 (33%), WR **100%**, PnL +$49.84 |
+| stop_loss | 12/115 (10.4%), WR 50%, PnL −$4.83 |
+| Trades/hour | 8.2 |
+| LONG | 105 trades, WR 47.6%, PnL +$9.40 |
+| SHORT | 10 trades, WR 20%, PnL −$8.82 |
+
+### Key Findings (ROOT CAUSES IDENTIFIED)
+
+1. **OB imbalance COUNTER-PREDICTIVE for direction** (r=−0.098 vs PnL). OB dominates direction → WR 38.8%, PnL −$7.25. OI dominates → WR 54.2%, PnL +$7.83.
+2. **EXTREME regime NOT BLOCKED in scalper** — 37 trades, WR 29.7%, PnL −$16.52. time_exit in EXTREME: 23 trades, 0% WR, −$30.60.
+3. **Trend-flip MERUSAK** — fired 2×, both LOSS (−$4.76). Flip ke SHORT = masuk sisi struktural lemah.
+4. **Hold time 5-10 min = WORST** — 55 trades, WR 16.4%, PnL −$37.98. Trailing needs 13.4 min avg to fire.
+5. **Score IDENTICAL winners vs losers** — trailing avg score 63.8, time_exit avg score 64.1. Score cannot discriminate.
+6. **ATR gate WORKING** — 0 trades below 0.0010 threshold. Gate effective.
+7. **Trailing fire rate UP** — 33% (from 22.1%). Edge strengthening.
+
+### Component Correlation vs PnL (115 trades)
+| Component | r vs PnL | Interpretation |
+|---|---|---|
+| OI/Funding | **+0.091** | Predictive (direction correct) |
+| Orderbook | **−0.098** | Counter-predictive (direction wrong) |
+| Score total | +0.085 | Weak positive (improving) |
+
+### Perubahan Implementasi (Audit #6, 2026-05-22 siang)
+
+| # | Area | Sebelum | Sesudah | File |
+|---|---|---|---|---|
+| 1 | **Direction Decision** | `side = LONG if bull_setup >= bear_setup` — OB (±18) dominates | **Voting system 7 voters.** OB excluded from direction. OI/Funding weight 3, EMA weight 2, HTF weight 2, Whale weight 2, Momentum weight 1-2. | `engine/scoring_engine.py` |
+| 2 | **EXTREME Regime** | ×0.90 multiplier only (tetap lolos) | **Threshold +15** — hanya score 71+ lolos di EXTREME. Data: score<60 WR 33.3%, score 71+ WR 44.4%. | `engine/scoring_engine.py` |
+| 3 | **Trend-Flip** | Force flip LONG→SHORT saat price below EMA21 (0% WR, −$4.76) | **Trend Structure Veto** — SKIP (jangan entry) kalau direction melawan trend. Tidak flip ke sisi lemah. | `engine/scoring_engine.py` |
+| 4 | **4H HTF Regime Vote** | Hanya adjust threshold (±3/+8) | **Tambah direction vote weight 2** — TRENDING_UP → +2 bull, TRENDING_DOWN → +2 bear. Data: aligned PnL +$3.74. | `engine/scoring_engine.py` |
+| 5 | **Momentum Strength Vote** | Tidak ada | **Extra +1 vote kalau momentum >0.5%.** Data: 0.5%+ = WR 57.6%, 0.3-0.5% = WR 36.4%. | `engine/scoring_engine.py` |
+| 6 | **Whale Detection (LTI)** | Tidak ada | **Large Trade Imbalance: filter trades >3× median size, hitung buy vs sell. Vote +2 kalau imbalance >30%.** Zero extra API calls — uses existing WS trades cache. | `engine/scoring_engine.py` |
+
+### Direction Voting System (NEW — replaces old `bull_setup >= bear_setup`)
+
+| # | Voter | Weight | Data Source | Stability |
+|---|---|---|---|---|
+| 1 | OI/Funding | 3 | 8h funding cycle (HL WS) | Sangat stabil |
+| 2 | EMA8/21 direction | 2 | 21 candle 1m | Stabil |
+| 3 | Price momentum 5m | 1 | 6 candle terakhir | Medium |
+| 4 | RSI momentum | 1 | RSI acceleration | Medium |
+| 5 | 4H HTF regime | 2 | 4H candles | Sangat stabil |
+| 6 | Momentum strength (>0.5%) | 1 | Conditional | High confidence |
+| 7 | 🐋 Whale Trade Imbalance | 2 | HL WS trades (real-time) | Medium-stabil |
+
+**Max votes:** Bull 12, Bear 12. Tie → fallback ke bull_setup vs bear_setup.
+
+**OB imbalance tetap masuk ke SCORE** (setup strength), hanya dikeluarkan dari direction decision.
+
+### Comparison Across Audits
+
+| Metric | Audit #2 (20 Mei) | Audit #4 (21 Mei AM) | Audit #5 (21 Mei PM) | Audit #6 (22 Mei) |
+|---|---|---|---|---|
+| Trades/hour | 79 | 21.5 | 20.1 | **8.2** |
+| WR | 47.7% | 37.5% | 35.6% | **45.2%** |
+| PnL | −$26.39 | +$3.90 | −$0.63 | **+$0.58** |
+| Profit Factor | 0.74 | 1.87 | 1.79 | 1.01 |
+| Trailing fire rate | 3.5% | 19.4% | 22.1% | **33%** |
+| Score↔PnL r | −0.145 | +0.035 | −0.023 | **+0.085** |
+| time_exit % | 81% | 64% | 65% | **56.5%** |
+
+### Active Filters (Post-Audit #6, in order)
+
+1. Blocked hours (currently empty)
+2. Spread > 0.15% → reject
+3. Score < threshold (base 45 + CHOPPY +8 + session delta + 4H regime adj + **EXTREME +15**) → skip
+4. SHORT-specific: score ≥ 52, funding ≥ −0.0003, no squeeze, technical min ≥ 6
+5. Funding crowded gate (LONG fr>0.05%, SHORT fr<−0.05% → block)
+6. ATR gate: LONG ≥ 0.0010, SHORT ≥ 0.0015
+7. Min momentum: LONG ≥ 0.15%, SHORT ≥ 0.25%
+8. Momentum confirmation: leading → 2/5 (LONG) or 3/5 (SHORT); standard → 3/5 + net move
+9. **Trend structure veto: LONG in confirmed downtrend → skip. SHORT in confirmed uptrend → skip.** ← CHANGED (was flip)
+10. Displacement penalty (regime-aware)
+11. **Direction voting (7 voters, OB excluded)** ← NEW
+
+### Next Audit Checklist (23 Mei)
+
+1. Direction accuracy — berapa % trades harga bergerak SEARAH dalam 5 menit? Target >30% (baseline 12.3%)
+2. time_exit count — target <45% (baseline 56.5%)
+3. Whale vote firing rate — target 20-50%
+4. EXTREME threshold — berapa signals di-block?
+5. Trend structure veto — berapa kali fire?
+6. Overall PnL — target >+$5
+7. Score↔PnL r — target >+0.10
+
+---
+
+## RINGKASAN PERUBAHAN SEBELUMNYA — AUDIT #5 (2026-05-21 malam, post-deploy)
 
 ### Audit Findings (104 trades, 5.2 jam, 21 Mei 2026 — 10:18-15:28 UTC)
 | Metric | Value |
@@ -1425,50 +1525,53 @@ Semua posisi akan ditutup di harga market saat ini.
 
 ---
 
-## VERDICT (Update 2026-05-21 malam — Audit #5)
+## VERDICT (Update 2026-05-22 siang — Audit #6)
 
 ### Status Saat Ini
 
-Bot **near break-even** (PF 1.79, −$0.63 dalam 5.2 jam, 104 trades). Trailing stop tetap 100% WR dengan firing rate naik ke 22.1%. Score neutral (r=−0.023). Overtrading resolved (20/jam). Sizing symmetric (1.00×).
+Bot **net positive** (PnL +$0.58, WR 45.2%, 115 trades dalam 14 jam). Trailing stop 100% WR dengan firing rate naik ke **33%** (tertinggi sepanjang audit). Score correlation improving ke +0.085. Selectivity meningkat (8.2 trades/hr).
 
-Edge berasal dari **exit system** (trailing stop), bukan entry quality. time_exit masih 65% of trades — ATR gate + trend-flip baru deployed untuk address ini.
+**ROOT CAUSE DITEMUKAN:** OB imbalance (r=−0.098) counter-predictive untuk direction. Bot salah pilih arah 87.7% dari time_exit trades karena OB snapshot (volatile, berubah tiap detik) mendominasi direction decision. Fix: direction voting system yang mengeluarkan OB dari direction dan mengandalkan sinyal stabil (OI/Funding, EMA, HTF, whale flow).
 
-### Fix yang Diterapkan (2026-05-21 malam — Audit #5)
+### Fix yang Diterapkan (2026-05-22 siang — Audit #6)
 
-1. **ATR gate** — LONG ≥ 0.0010, SHORT ≥ 0.0015. Data: low ATR = WR 11%, high ATR = WR 51%.
-2. **SHORT momentum gate** — 0.25% min (vs 0.15% LONG). SHORT winners avg vol 2× losers.
-3. **SHORT candle confirmation** — 3/5 bearish for leading signals.
-4. **short_min_funding_rate relaxed** — −0.0001 → −0.0003. ALGO score=68 was incorrectly blocked.
-5. **Price vs EMA21 trend-flip** — Price below EMA21 → force SHORT. Above → force LONG. Prevents LONG in downtrend (LIT case).
+1. **Direction voting restructured** — 7 voters, OB excluded. OI weight 3, EMA weight 2, HTF weight 2, Whale weight 2.
+2. **EXTREME regime threshold +15** — bukan block, tapi hanya high-conviction (score 71+) yang lolos.
+3. **Trend-flip → trend structure veto** — skip kalau melawan trend, jangan flip ke sisi lemah.
+4. **4H HTF regime vote** — TRENDING_UP/DOWN sebagai direction vote weight 2.
+5. **Momentum strength vote** — >0.5% momentum = extra confidence vote.
+6. **Whale detection (LTI)** — large trade imbalance dari HL WS trades, vote weight 2.
 
 ### Fix yang Masih Aktif dari Audit Sebelumnya
 
+- ATR gate LONG ≥ 0.0010, SHORT ≥ 0.0015 (Audit #5)
+- SHORT momentum 0.25%, candle 3/5 (Audit #5)
+- short_min_funding_rate −0.0003 (Audit #5)
 - DVI disabled, XAM re-enabled, CVD nerfed (Audit #4)
 - Min momentum 0.15% gate for LONG (Audit #4)
 - Momentum Confirmation Gate (5min ≥0.04% + 3/5 candles)
 - CHOPPY threshold +8
 - Early loss cut -0.2%/5min (no gate)
 - WS funding parsing fixed (ctx.funding)
-- OI vs Direction penalty (-5 confirm_pts)
 - MTF disabled
 - Displacement penalty (regime-aware)
 
 ### Risiko yang Tersisa
 
-- **ATR gate untested** — Baru deployed. Bisa terlalu ketat (block >80%) atau terlalu longgar.
-- **Trend-flip untested** — Bisa flip ke SHORT yang juga loss (false signal).
-- **Edge fragile** — 100% dari trailing stop. Market regime change → trailing jarang fire → rugi.
-- **Sample size** — 104 trades. Butuh 200+ untuk confidence.
-- **Bybit blocked** — L/S ratio dead, OI enrichment dead. Hanya HL data.
-- **ML cold start** — Needs 200 training samples.
+- **Direction voting UNTESTED** — 6 perubahan sekaligus. Tidak bisa isolasi mana yang bekerja.
+- **Whale detection UNVALIDATED** — fitur baru, belum ada data. Bisa counter-predictive.
+- **Edge masih fragile** — 100% dari trailing stop. Market regime change → trailing jarang fire → rugi.
+- **Sample size** — 115 trades. Butuh 200+ untuk confidence.
+- **Momentum 0.30-0.50% = false breakout zone** — WR 36.4%, PnL −$12.61. Mungkin ter-fix oleh direction restructuring.
+- **Normal regime anomaly** — WR 21.4%. Mungkin ter-fix oleh OB removal dari direction.
 
 ### Next Steps
 
-1. ✅ Deployed (commits `ef2a18b`, `71e5eda`, `3ef13de`)
-2. Collect 100+ trades dengan semua fixes aktif (estimasi 1-2 hari)
-3. **Audit 22 Mei:** Cek ATR gate firing, time_exit reduction, SHORT WR, trend-flip results
-4. Target: time_exit <50%, SHORT WR >35%, overall PnL positive
-5. Jangan tambah hold time atau grace period — data menolak (91% never recover)
+1. Deploy perubahan Audit #6
+2. Collect 100+ trades (estimasi 12-24 jam pada 5-8 trades/hr)
+3. **Audit 23 Mei:** Cek direction accuracy, whale firing rate, time_exit reduction
+4. Kalau PnL < −$5 atau score correlation negatif → REVERT semua changes
+5. Kalau whale detection WR < overall WR → disable whale vote
 
 ---
 
