@@ -717,12 +717,29 @@ class ScoringEngine:
         # Raise threshold +15 so only high-conviction signals pass in extreme vol.
         _vol_threshold_adj = 15 if vol_regime == MarketRegime.EXTREME else 0
 
+        # [AUDIT #7] Vote margin gate: low consensus = raise threshold
+        # Data: margin<4 WR 50% PnL -$1.70, margin 8+ WR 66.7% PnL +$11.87
+        _vote_margin = _scalper_components.get("vote_margin", 99)
+        _vote_margin_adj = 5 if _vote_margin < 4 else 0
+
+        # [AUDIT #7] OI score gate: low OI = no fundamental conviction
+        # Data: OI<6 = WR 41.2% PnL -$7.05. OI>=6 = WR 69.6% PnL +$15.28
+        _oi_abs = abs(_scalper_components.get("oi_signed", 0))
+        _oi_gate_adj = 3 if _oi_abs < 6 else 0
+
+        # [AUDIT #7] Funding negative bonus: contrarian LONG when shorts crowded
+        # Data: funding<0 = WR 88.9% PnL +$11.09 (9 trades, 8 wins)
+        _funding_bonus = -3 if (funding.funding_rate < 0 and side == Side.LONG) else 0
+
         effective_threshold = (
             config.SCALPER.min_score_to_enter
             + overlap_threshold_adj         # [P0-1] overlap: +8, NY-only: +3
             + session_threshold_delta       # Asia: threshold rises
-            + htf_threshold_adj             # 4h regime: aligned=-3, counter=+8, choppy=+2
+            + htf_threshold_adj             # 4h regime: aligned=-3, counter=+8, choppy=+8
             + _vol_threshold_adj            # [AUDIT #6] EXTREME: +15 (only 71+ passes)
+            + _vote_margin_adj              # [AUDIT #7] low consensus: +5
+            + _oi_gate_adj                  # [AUDIT #7] low OI: +5
+            + _funding_bonus                # [AUDIT #7] negative funding LONG: -3 (easier entry)
         )
         if score < effective_threshold:
             log.info(
@@ -822,7 +839,7 @@ class ScoringEngine:
         #                    ATR >= 0.0012 → WR 51%, PnL +$18.17
         # SHORT-specific: winners avg ATR=0.00305, losers avg ATR=0.00157.
         # SHORT needs higher threshold due to structural upward bias + bounce risk.
-        _min_atr = 0.0015 if side == Side.SHORT else 0.0010
+        _min_atr = 0.0015 if side == Side.SHORT else 0.0013  # [AUDIT #7] LONG 0.0010→0.0013: ATR<0.0013 = dead zone, trailing never fires
         if atr_pct_now > 0 and atr_pct_now < _min_atr:
             log.info(
                 f"[SKIP] {asset} | score={score} | side={side.value} | "
@@ -1440,8 +1457,8 @@ class ScoringEngine:
         recent_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
         if len(recent_trades) >= 20:
             sample = recent_trades[-80:]
-            buy_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('B', 'buy', 'Ask'))
-            sell_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('S', 'sell', 'Bid'))
+            buy_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('B', 'buy'))
+            sell_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('A', 'S', 'sell'))
             cvd_total = buy_vol + sell_vol
             if cvd_total > 0:
                 cvd_ratio = (buy_vol - sell_vol) / cvd_total
@@ -1621,13 +1638,13 @@ class ScoringEngine:
                 _whale_buy_vol = sum(
                     float(t.get('sz', 0)) * float(t.get('px', 0))
                     for t in _recent
-                    if t.get('side', '') in ('B', 'buy', 'Ask')
+                    if t.get('side', '') in ('B', 'buy')
                     and float(t.get('sz', 0)) * float(t.get('px', 0)) >= _whale_threshold
                 )
                 _whale_sell_vol = sum(
                     float(t.get('sz', 0)) * float(t.get('px', 0))
                     for t in _recent
-                    if t.get('side', '') in ('S', 'sell', 'Bid')
+                    if t.get('side', '') in ('A', 'S', 'sell', 'Bid')
                     and float(t.get('sz', 0)) * float(t.get('px', 0)) >= _whale_threshold
                 )
                 _whale_total = _whale_buy_vol + _whale_sell_vol
@@ -1686,6 +1703,7 @@ class ScoringEngine:
             out_components["liq_signed"] = int(liq_bull - liq_bear)
             out_components["bull_setup"] = int(bull_setup)
             out_components["bear_setup"] = int(bear_setup)
+            out_components["vote_margin"] = abs(_dir_bull - _dir_bear)
             out_components["cvd_pts"] = int(_c_cvd)
             out_components["xam_pts"] = int(_xam_pts)
             out_components["abs_pts"] = int(_abs_pts)
@@ -2223,7 +2241,7 @@ class ScoringEngine:
         cvd_val = 0.0
         if recent_trades:
             buys = sum(float(t.get('sz', 0)) for t in recent_trades if t.get('side') == 'B')
-            sells = sum(float(t.get('sz', 0)) for t in recent_trades if t.get('side') == 'S')
+            sells = sum(float(t.get('sz', 0)) for t in recent_trades if t.get('side') in ('A', 'S'))
             cvd_val = buys - sells
 
         log.debug(

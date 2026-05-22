@@ -1,7 +1,7 @@
 # KARA Bot — Dokumentasi Teknis Lengkap
 
-**Versi**: 8.1.0 (Post-Audit #6)  
-**Tanggal Dokumen**: 22 Mei 2026  
+**Versi**: 8.1.1 (Post-Audit #7)  
+**Tanggal Dokumen**: 22 Mei 2026 (malam)  
 **Platform**: Hyperliquid Futures (Mainnet only — Railway blocked Bybit/Binance/OKX)  
 **Mode**: Scalper only, Paper Trading  
 **Bahasa**: Python 3.10+
@@ -31,12 +31,13 @@
 
 KARA adalah bot scalping futures otomatis untuk **Hyperliquid** (DEX on-chain perpetual futures). Menggunakan **multi-factor scoring** + **direction voting system** untuk entry, dan **trailing stop** sebagai primary edge source.
 
-### Status Saat Ini (22 Mei 2026)
+### Status Saat Ini (22 Mei 2026 Malam)
 - **Mode**: Scalper only, paper trading
-- **Users**: 3 users, ~$70/user (dari $62.50 start)
+- **Users**: 4 users, ~$70/user (dari $62.50 start)
 - **Edge**: Trailing stop (100% WR, 33% firing rate)
 - **Deploy**: Railway service `rare-youthfulness`
 - **Data**: Hyperliquid WS only (Bybit/Binance BLOCKED 403)
+- **Last Audit (#7)**: 57 trades, WR 52.6%, PnL +$8.23, PF 1.115
 
 ### Filosofi
 - **Data > intuisi.** Metric kontradiksi hipotesis → metric menang.
@@ -131,7 +132,7 @@ Railway IP mendapat 403 dari Bybit/Binance/OKX. L/S ratio, Bybit funding, Bybit 
 | Cross-Asset Momentum (XAM) | ±12 | Setup | ✅ Re-enabled |
 | EMA Cross (8/21) | ±10 | Confirmation + **Direction vote (weight 2)** | ✅ Active |
 | RSI (14) | ±8 | Confirmation + Direction vote (weight 1) | ✅ Active |
-| CVD Confirms | ±10 | Confirmation (threshold 0.25 + price confirm) | ✅ Active |
+| CVD Confirms | ±10 | Confirmation (threshold 0.25 + price confirm) | ✅ Active (bug fixed Audit #7) |
 | RSI Momentum (1m vs 5m) | ±8 | Setup | ✅ Active |
 
 **Disabled:** DVI (0% firing), OB Absorption (reversal), MTF 15m (r=-0.68), Bybit L/S (blocked).
@@ -204,6 +205,7 @@ Tidak flip ke sisi lain (data: flip 0% WR, SHORT structural WR 20%).
 - Whale buy vol vs sell vol → imbalance ratio
 - If |imbalance| > 30% → vote +2 ke sisi dominan
 - Zero extra API calls
+- **Bug fix (Audit #7):** Sell side detection pakai `'A'` (HL format), bukan `'S'`. Sebelumnya sell vol selalu 0 → 100% buy bias.
 
 ---
 
@@ -214,18 +216,21 @@ Urutan filter (scoring engine → signal handler → pre_trade_check):
 | # | Filter | Kondisi Skip |
 |---|---|---|
 | 1 | Spread | > 0.15% |
-| 2 | Score threshold | < base 45 + CHOPPY +8 + session + HTF adj + **EXTREME +15** |
+| 2 | Score threshold | < base 45 + CHOPPY +8 + session + HTF adj + **EXTREME +15** + vote margin + OI gate + funding bonus |
 | 3 | SHORT-specific | score < 52, funding < -0.0003, squeeze, tech_min < 6 |
 | 4 | Funding crowded | LONG fr>0.05%, SHORT fr<-0.05% |
-| 5 | ATR gate | LONG < 0.0010, SHORT < 0.0015 |
+| 5 | ATR gate | LONG < **0.0013**, SHORT < 0.0015 |
 | 6 | Min momentum | LONG < 0.15%, SHORT < 0.25% |
 | 7 | Momentum confirm | Leading: 2/5 candles. Standard: 3/5 + 0.04% net |
 | 8 | Trend structure veto | Direction vs EMA21 trend |
 | 9 | Direction voting | 7-voter system determines LONG/SHORT |
-| 10 | Displacement penalty | Regime-aware multiplier |
-| 11 | Signal cooldown | 5 min per asset |
-| 12 | Max positions | 3 concurrent (scalper) |
-| 13 | Kill switch / pause | Drawdown > 95% or daily loss > 90% |
+| 10 | **Vote margin gate** | margin < 4 → threshold +5 |
+| 11 | **OI conviction gate** | abs(OI score) < 6 → threshold +3 |
+| 12 | **Funding negative bonus** | FR < 0 + LONG → threshold -3 (easier entry) |
+| 13 | Displacement penalty | Regime-aware multiplier |
+| 14 | Signal cooldown | 5 min per asset |
+| 15 | Max positions | 3 concurrent (scalper) |
+| 16 | Kill switch / pause | Drawdown > 95% or daily loss > 90% |
 
 ---
 
@@ -374,19 +379,42 @@ FastAPI + Tailwind + WebSocket real-time.
 | #3 | 21 Mei AM | 21 | 47.6% | -$5.74 | 0.58 | — | -0.449 |
 | #4 | 21 Mei PM | 72 | 37.5% | +$3.90 | 1.87 | 19.4% | +0.035 |
 | #5 | 21 Mei night | 104 | 35.6% | -$0.63 | 1.79 | 22.1% | -0.023 |
-| **#6** | **22 Mei** | **115** | **45.2%** | **+$0.58** | **1.01** | **33%** | **+0.085** |
+| #6 | 22 Mei | 115 | 45.2% | +$0.58 | 1.01 | 33% | +0.085 |
+| **#7** | **22 Mei PM** | **57** | **52.6%** | **+$8.23** | **1.12** | **33.3%** | **+0.098** |
 
 ### Key Milestones
 - **Audit #4:** First net profitable. Edge = trailing stop (100% WR).
 - **Audit #5:** ATR gate deployed. Trailing fire rate 22%.
 - **Audit #6:** Root cause found (OB counter-predictive). Direction voting implemented. Trailing 33%.
+- **Audit #7:** Whale/CVD sell-side bug found & fixed. OI = best predictor (r=+0.211). Funding negative = WR 89%.
 
 ### Current Edge Analysis
-- **Trailing stop** = sole profit source. 100% WR, 33% fire rate, +$49.84 in 115 trades.
-- **time_exit** = sole loss source. 56.5% of trades, 12.3% WR, -$44.43.
-- **Score** = weak predictor (r=+0.085). Cannot discriminate winners from losers at entry.
-- **Direction fix** = untested. Expected to reduce time_exit by improving direction accuracy.
+- **Trailing stop** = sole profit source. 100% WR, 33% fire rate, +$32.36 in 57 trades.
+- **time_exit** = sole loss source. 59.6% of trades, 29.4% WR, -$17.73.
+- **ATR + Vol** = real predictor of trailing fire. Winners avg ATR 0.0026 vs losers 0.0017.
+- **OI score** = best component predictor. OI≥6 = WR 69.6%, OI<6 = WR 41.2%.
+- **Funding negative** = strongest edge signal. FR<0 + LONG = WR 88.9% (9 trades).
+- **Whale/CVD** = were broken (sell side = 0). Fixed in Audit #7. Needs validation.
+
+### Audit #7 Findings (22 Mei 2026 Malam)
+
+**Bugs Found:**
+1. Whale detection: HL uses `"A"` for sell, code checked `"S"` → sell vol always 0 → 100% buy bias (89.6% constant fire)
+2. CVD calculation: same bug → always bullish → constant noise
+3. Both fixed by adding `'A'` to sell side detection
+
+**Data-Driven Additions:**
+4. ATR gate LONG raised: 0.0010 → 0.0013 (dead zone elimination)
+5. Vote margin gate: margin < 4 → threshold +5 (low consensus = coin flip)
+6. OI conviction gate: abs(OI) < 6 → threshold +3 (no fundamental backing)
+7. Funding negative bonus: FR < 0 + LONG → threshold -3 (contrarian edge)
+
+**Key Data Points:**
+- EXTREME regime = best performer (WR 88.9%, +$14.95) — don't over-filter
+- Vote margin 8+ = WR 66.7%, +$11.87
+- Leverage 30x underperforms 20x (WR 40% vs 55%)
+- Hour 07 UTC (London open) = WR 86%
 
 ---
 
-*Dokumen ini sinkron dengan commit `318a25e` (22 Mei 2026). Untuk detail per-audit, lihat `KARA_SYSTEM_DOCUMENT.md`.*
+*Dokumen ini sinkron dengan Audit #7 (22 Mei 2026 malam). Untuk detail per-audit, lihat `KARA_SYSTEM_DOCUMENT.md`.*
