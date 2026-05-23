@@ -265,8 +265,12 @@ class OIFundingAnalyzer:
         else:
             log.warning(f"[{asset}] Spot/Oracle price unavailable, skipping Basis score")
 
-        # Cap dikembalikan ke 35 — sumber inflasi utama sudah dihapus
-        bull = min(bull, 35)
-        bear = min(bear, 35)
+        # [AUDIT #9 FIX 2026-05-23] Cap reduced 35 → 8.
+        # Data (134 trades): OI/Funding does NOT predict trailing_stop fire rate
+        # (32-34% across all score buckets). High OI score = high realized_vol =
+        # bigger time_exit losses (-7.9% vs -1.2%). OI inflates score without
+        # adding edge for 12-min scalper hold. OB (±18) is the real predictor.
+        bull = min(bull, 8)
+        bear = min(bear, 8)
 
         return bull, bear, reasons, warnings

@@ -1,7 +1,7 @@
 # KARA Bot — Dokumentasi Teknis Lengkap
 
-**Versi**: 8.1.1 (Post-Audit #7)  
-**Tanggal Dokumen**: 22 Mei 2026 (malam)  
+**Versi**: 8.2.0 (Post-Audit #9 — Pump Timing Gate)  
+**Tanggal Dokumen**: 24 Mei 2026  
 **Platform**: Hyperliquid Futures (Mainnet only — Railway blocked Bybit/Binance/OKX)  
 **Mode**: Scalper only, Paper Trading  
 **Bahasa**: Python 3.10+
@@ -31,19 +31,21 @@
 
 KARA adalah bot scalping futures otomatis untuk **Hyperliquid** (DEX on-chain perpetual futures). Menggunakan **multi-factor scoring** + **direction voting system** untuk entry, dan **trailing stop** sebagai primary edge source.
 
-### Status Saat Ini (22 Mei 2026 Malam)
+### Status Saat Ini (24 Mei 2026)
 - **Mode**: Scalper only, paper trading
 - **Users**: 4 users, ~$70/user (dari $62.50 start)
 - **Edge**: Trailing stop (100% WR, 33% firing rate)
 - **Deploy**: Railway service `rare-youthfulness`
 - **Data**: Hyperliquid WS only (Bybit/Binance BLOCKED 403)
-- **Last Audit (#7)**: 57 trades, WR 52.6%, PnL +$8.23, PF 1.115
+- **Last Audit (#9)**: 134 trades, WR 44.8%, PnL +$1.70, PF 1.027
+- **Critical Fix Deployed (23 Mei malam)**: Pump Timing Gate, OI cap, CVD/EMA threshold, CHOPPY penalty off
 
 ### Filosofi
 - **Data > intuisi.** Metric kontradiksi hipotesis → metric menang.
-- **Edge yang tidak terukur = tidak ada.** Komponen yang tidak bisa di-validate → disable.
-- **Exit system = the edge.** Entry quality secondary; trailing stop catches trend continuation.
-- **Direction voting > single indicator.** OB snapshot volatile (r=-0.098); OI/Funding stabil (r=+0.091).
+- **Root cause first.** "Disable" bukan solusi — trace bug, fix root cause.
+- **Entry timing > entry score.** Masuk saat pump BARU MULAI, bukan setelah pump selesai.
+- **Exit system = the edge.** Trailing stop catches trend continuation.
+- **Direction voting > single indicator.** OI/Funding stabil untuk direction, OB untuk score.
 
 ---
 
@@ -69,11 +71,15 @@ KARA adalah bot scalping futures otomatis untuk **Hyperliquid** (DEX on-chain pe
 main.py (orchestrator)
 ├── scan_loop (15s interval)
 │   └── ScoringEngine._run_scalper()
-│       ├── OI/Funding Analyzer
+│       ├── OI/Funding Analyzer (capped ±8)
 │       ├── Liquidation Analyzer
 │       ├── Orderbook Analyzer (score only, NOT direction)
 │       ├── Direction Voting (7 voters)
-│       ├── Filters (ATR, momentum, trend veto, threshold)
+│       ├── Filters:
+│       │   ├── Score threshold
+│       │   ├── ATR gate
+│       │   ├── Momentum gate (fast reject)
+│       │   └── ★ Pump Timing Gate (vol surge + accel + not late)
 │       └── _build_scalper_signal() → TradeSignal
 ├── position_monitor_loop (5s interval)
 │   └── RiskManager.check_tp_trail()
@@ -113,6 +119,7 @@ Cache: `cache.trades[asset]` = 500 trades terakhir per asset.
 | Mark Price + OI + Funding | `metaAndAssetCtxs` | 30s |
 | Candles 1m (30) | `candleSnapshot` | Per scan |
 | Candles 1h (24) | `candleSnapshot` | 60min (vol regime) |
+| Candles 4h (20) | `candleSnapshot` | 4h (HTF regime) |
 | All Mids | `allMids` | 10s |
 
 ### 4.3 Bybit — BLOCKED
@@ -122,30 +129,33 @@ Railway IP mendapat 403 dari Bybit/Binance/OKX. L/S ratio, Bybit funding, Bybit 
 
 ## 5. Sistem Scoring
 
-### 5.1 Komponen Aktif (Post-Audit #6)
+### 5.1 Komponen Aktif (Post-Audit #8)
 
 | Komponen | Max Pts | Role | Status |
 |---|---|---|---|
-| OI/Funding (contrarian) | ±28 | Setup + **Direction vote (weight 3)** | ✅ Active |
-| Orderbook Imbalance | ±18 | **Score only** (NOT direction) | ✅ Active |
-| Liquidation | ±12 | Setup | ⚠️ Barely fires (8%) |
-| Cross-Asset Momentum (XAM) | ±12 | Setup | ✅ Re-enabled |
-| EMA Cross (8/21) | ±10 | Confirmation + **Direction vote (weight 2)** | ✅ Active |
-| RSI (14) | ±8 | Confirmation + Direction vote (weight 1) | ✅ Active |
-| CVD Confirms | ±10 | Confirmation (threshold 0.25 + price confirm) | ✅ Active (bug fixed Audit #7) |
+| OI/Funding (contrarian) | **±8** | Setup + **Direction vote (weight 3)** | ✅ Capped (was ±35, inflated score) |
+| Orderbook Imbalance | ±18 | **Score only** (NOT direction) | ✅ Best predictor (OB=18 WR 55.9%) |
+| Liquidation | ±12 | Setup | ⚠️ Barely fires (22%) |
+| Cross-Asset Momentum (XAM) | ±12 | Setup | ⚠️ Barely fires (0.8%) |
+| EMA Cross (8/21) | ±10 | Confirmation + **Direction vote (weight 2)** | ✅ Gap raised 0.03%→0.1% (target fire ~35%) |
+| RSI (14) | ±8 | Confirmation + Direction vote (weight 1) | ✅ Active (67% fire) |
+| CVD Confirms | ±10 | Confirmation (threshold **0.40** + price **0.2%** confirm) | ✅ Threshold raised (target fire ~40%) |
 | RSI Momentum (1m vs 5m) | ±8 | Setup | ✅ Active |
 
 **Disabled:** DVI (0% firing), OB Absorption (reversal), MTF 15m (r=-0.68), Bybit L/S (blocked).
 
-### 5.2 Score Formula
+### 5.2 Score Formula (Post-Audit #8 Fix)
 
 ```
 bull_setup = OI_bull + OB_bull + Liq_bull + XAM_bull + EMA_boost + RSI_momentum
 bear_setup = OI_bear + OB_bear + Liq_bear + XAM_bear + EMA_boost + RSI_momentum
 confirm_pts = EMA_freshness + RSI_neutral + CVD_confirms (range -15 to +25)
 
-dominant_setup = max(bull_setup, bear_setup)
-raw = max(0, dominant_setup + confirm_pts)
+# [AUDIT #8 FIX] Score = conviction in CHOSEN direction only
+# Before: max(bull, bear) → high score from OPPOSING setup = inverse predictive
+# After: aligned setup only
+aligned_setup = bull_setup if direction == LONG else bear_setup
+raw = max(0, aligned_setup + confirm_pts)
 scaled = int(raw × 1.6)
 score = int(scaled × displacement_mult)  # regime-aware anti-chase
 score = clamp(0, 100)
@@ -165,7 +175,22 @@ score + learning_engine adjustment (−20 to +12)
 | HIGH_VOL | 4–8% | ×0.90 (volatile category) |
 | EXTREME | > 8% | **Threshold +15** (hanya score 71+ lolos) |
 
-4H HTF regime (TRENDING_UP/DOWN/CHOPPY) juga mempengaruhi threshold (±3/+8).
+### 5.4 4H HTF Regime (Post-Audit #8 Fix)
+
+```
+# [AUDIT #8 FIX] EMA uses full candle array for proper convergence
+# Before: _ema(closes[-10:], 10) → EMA10≈EMA20 always → CHOPPY 91.6%
+# After: _ema(closes, 10) → proper warm-up → realistic detection
+ema10 = _ema(closes, 10)  # full 20 candles
+ema20 = _ema(closes, 20)  # full 20 candles
+strength = net_move / total_range  # must be > 0.30
+
+TRENDING_UP:   EMA10 > EMA20×1.002 AND strength ≥ 0.30
+TRENDING_DOWN: EMA10 < EMA20×0.998 AND strength ≥ 0.30
+CHOPPY:        otherwise
+```
+
+Effect: TRENDING aligned → threshold -3, lev +2. Counter-trend → threshold +8, lev -3. CHOPPY → threshold +0 (penalty disabled, detector unreliable 91.9%), lev -2.
 
 ---
 
@@ -185,27 +210,22 @@ score + learning_engine adjustment (−20 to +12)
 | 4 | RSI momentum | 1 | RSI accelerating + price direction |
 | 5 | 4H HTF regime | 2 | TRENDING_UP → bull, DOWN → bear |
 | 6 | Momentum strength | 1 | Only fires if |mom| > 0.5% |
-| 7 | 🐋 Whale Trade Imbalance | 2 | Large trades (>3× median) imbalance >30% |
+| 7 | 🐋 Whale Trade Imbalance | 2 | Large trades (≥5 whales) imbalance >50% |
 
 **Decision:** `bull_votes > bear_votes` → LONG. Tie → fallback `bull_setup >= bear_setup`.
 
-### 6.2 Trend Structure Veto (replaces old trend-flip)
-
-Setelah direction ditentukan:
-- LONG + price >0.2% below EMA21 + EMA8<EMA21 → **SKIP** (jangan entry)
-- SHORT + price >0.2% above EMA21 + EMA8>EMA21 → **SKIP**
-
-Tidak flip ke sisi lain (data: flip 0% WR, SHORT structural WR 20%).
-
-### 6.3 Whale Trade Imbalance (LTI)
+### 6.2 Whale Trade Imbalance (Post-Audit #8 Fix)
 
 - Ambil 200 trades terakhir dari WS cache
 - Hitung median trade size (USD)
 - Filter trades > 3× median = "whale"
-- Whale buy vol vs sell vol → imbalance ratio
-- If |imbalance| > 30% → vote +2 ke sisi dominan
-- Zero extra API calls
-- **Bug fix (Audit #7):** Sell side detection pakai `'A'` (HL format), bukan `'S'`. Sebelumnya sell vol selalu 0 → 100% buy bias.
+- **[AUDIT #8 FIX] Minimum 5 whale trades required** (sebelumnya 1 trade = 100% imbalance)
+- **[AUDIT #8 FIX] Threshold raised to 50%** (sebelumnya 30% = selalu fire)
+- If whale_count ≥ 5 AND |imbalance| > 50% → vote +2 ke sisi dominan
+- Sell side detection: `'A'` (HL format) + `'S'` + `'sell'` + `'Bid'`
+
+**Before fix:** 78% fire rate, 219/299 = "100% imbalance" (noise)  
+**Expected after:** ~20-40% fire rate (meaningful signal)
 
 ---
 
@@ -216,21 +236,46 @@ Urutan filter (scoring engine → signal handler → pre_trade_check):
 | # | Filter | Kondisi Skip |
 |---|---|---|
 | 1 | Spread | > 0.15% |
-| 2 | Score threshold | < base 45 + CHOPPY +8 + session + HTF adj + **EXTREME +15** + vote margin + OI gate + funding bonus |
+| 2 | Score threshold | < base 45 + session + HTF adj + EXTREME +15 + vote margin + OI gate + funding bonus |
 | 3 | SHORT-specific | score < 52, funding < -0.0003, squeeze, tech_min < 6 |
 | 4 | Funding crowded | LONG fr>0.05%, SHORT fr<-0.05% |
-| 5 | ATR gate | LONG < **0.0013**, SHORT < 0.0015 |
-| 6 | Min momentum | LONG < 0.15%, SHORT < 0.25% |
+| 5 | ATR gate | LONG < 0.0013, SHORT < 0.0015 |
+| 6 | Min momentum (fast reject) | LONG < 0.15%, SHORT < 0.25% |
 | 7 | Momentum confirm | Leading: 2/5 candles. Standard: 3/5 + 0.04% net |
-| 8 | Trend structure veto | Direction vs EMA21 trend |
-| 9 | Direction voting | 7-voter system determines LONG/SHORT |
-| 10 | **Vote margin gate** | margin < 4 → threshold +5 |
-| 11 | **OI conviction gate** | abs(OI score) < 6 → threshold +3 |
-| 12 | **Funding negative bonus** | FR < 0 + LONG → threshold -3 (easier entry) |
-| 13 | Displacement penalty | Regime-aware multiplier |
-| 14 | Signal cooldown | 5 min per asset |
-| 15 | Max positions | 3 concurrent (scalper) |
-| 16 | Kill switch / pause | Drawdown > 95% or daily loss > 90% |
+| 8 | **★ PUMP TIMING GATE** | vol_surge < 1.5×(LONG)/2.0×(SHORT) OR accel < 1.2× OR move > 0.7% OR direction wrong OR coin dead |
+| 9 | Signal cooldown | 5 min per asset |
+| 10 | Max positions | 3 concurrent (scalper) |
+| 11 | Kill switch / pause | Drawdown > 95% or daily loss > 90% |
+
+**Removed (Audit #9):** Trend structure veto — redundant dengan pump gate (3/5 candle direction + move < 0.7% sudah cover).
+
+### 7.1 Pump Timing Gate (Audit #9, 24 Mei 2026)
+
+**Problem:** 62% trades = time_exit karena entry SETELAH pump selesai (lagging indicators).
+
+**Solution:** Hanya entry saat pump BARU MULAI:
+
+```python
+# Volume: median baseline (robust vs spikes)
+vol_baseline = median(volumes[-35:-5])  # 30 candle
+vol_recent = mean(volumes[-5:])          # 5 candle
+vol_surge = vol_recent / vol_baseline
+
+# Price acceleration
+avg_candle = mean(|close[i] - close[i-1]| / close[i-1] for last 10)
+last_candle = |close[-1] - close[-2]| / close[-2]
+
+# Gate conditions (ALL must be true)
+pump_starting = (
+    vol_surge >= 1.5 (LONG) / 2.0 (SHORT) and  # volume expanding
+    last_candle >= avg_candle × 1.2 and          # price accelerating
+    move_5m < 0.7% and                           # not too late
+    3/5 candles in trade direction and            # directional
+    avg_candle > 0.04%                            # coin alive
+)
+```
+
+**Expected impact:** time_exit 62% → <40%, trailing fire 33% → >45%
 
 ---
 
@@ -264,8 +309,8 @@ Score-driven max_hold: score 70+ = 25min, score 60+ = 20min, score 50+ = 15min.
 ### 8.4 Trailing Stop (Edge Source)
 - Activates after TP1 hit
 - Trail distance: `max(realized_vol × 50%, 0.5%)` pre-TP2, `max(vol × 30%, 0.3%)` post-TP2
-- **Performance:** 100% WR, 33% firing rate, avg PnL +$1.31/trade
-- Avg fire time: minute 13.4
+- **Performance (Audit #8):** 100% WR, 40% firing rate (14/35), avg PnL +$2.03/trade
+- Avg fire time: minute 4-8
 
 ---
 
@@ -320,12 +365,6 @@ Drawdown guards: equity ≤ 80% start → ×0.50. Drawdown ≥ 15% peak → ×0.
 - TP1/TP2/trailing/SL/time_exit notifications
 - Daily summary card (PNG)
 
-### Reasoning Display (via button)
-Shows all `reasons` from scoring engine including:
-- Direction votes: `🧭 Direction: LONG (votes: bull=7 bear=2)`
-- Whale detection: `🐋 Whale buy flow 45% imbalance`
-- All component contributions
-
 ---
 
 ## 12. Dashboard Web
@@ -340,11 +379,6 @@ FastAPI + Tailwind + WebSocket real-time.
 | `/api/admin/reasoning/decisions` | Decision traces |
 | `/api/admin/learning/patterns` | Pattern memory |
 | `/ws/admin/reasoning` | Real-time reasoning feed |
-
-### Bot Brain Section
-- Live reasoning flow (step-by-step per asset)
-- Pattern memory ranking (top winners/losers)
-- ML stats (when active)
 
 ---
 
@@ -380,41 +414,42 @@ FastAPI + Tailwind + WebSocket real-time.
 | #4 | 21 Mei PM | 72 | 37.5% | +$3.90 | 1.87 | 19.4% | +0.035 |
 | #5 | 21 Mei night | 104 | 35.6% | -$0.63 | 1.79 | 22.1% | -0.023 |
 | #6 | 22 Mei | 115 | 45.2% | +$0.58 | 1.01 | 33% | +0.085 |
-| **#7** | **22 Mei PM** | **57** | **52.6%** | **+$8.23** | **1.12** | **33.3%** | **+0.098** |
+| #7 | 22 Mei PM | 57 | 52.6% | +$8.23 | 1.12 | 33.3% | +0.098 |
+| #8 | 23 Mei AM | 35 | 40% | +$1.56 | 1.587 | 40% | -0.18 |
+| **#9** | **23 Mei PM** | **134** | **44.8%** | **+$1.70** | **1.027** | **33%** | **-0.11** |
 
-### Key Milestones
-- **Audit #4:** First net profitable. Edge = trailing stop (100% WR).
-- **Audit #5:** ATR gate deployed. Trailing fire rate 22%.
-- **Audit #6:** Root cause found (OB counter-predictive). Direction voting implemented. Trailing 33%.
-- **Audit #7:** Whale/CVD sell-side bug found & fixed. OI = best predictor (r=+0.211). Funding negative = WR 89%.
+### Audit #9 Findings (23 Mei 2026 Malam)
+
+**Fundamental Problem Identified:** Bot masuk SETELAH pump selesai (lagging indicators), bukan saat pump DIMULAI.
+
+**Data:**
+- 134 trades, 32.8h, 4.1/hr, WR 44.8%, PnL +$1.70, PF 1.027
+- time_exit 62% (83 trades, -$42.89) — harga tidak gerak setelah entry
+- Score MASIH inverse r=-0.11 (high score = high vol = bigger time_exit loss)
+- CVD fire 81% = constant bias (CVD=0 WR 52% > CVD=10 WR 43%)
+- EMA fire 77% = noise on 1m (EMA=10 WR 39.6% < EMA≤0 WR 65%)
+- OB=18 = best predictor (WR 55.9%, trailing 38%)
+- OB≥10 + CVD=0 = WR 80% (10 trades)
+
+**5 Fixes Deployed:**
+
+| # | Fix | Root Cause |
+|---|---|---|
+| 1 | OI/Funding cap ±35 → ±8 | OI inflate score tanpa improve trailing rate |
+| 2 | HTF CHOPPY penalty +8 → 0 | Detector broken (91.9% CHOPPY), penalty meaningless |
+| 3 | CVD threshold 25% → 40% | Fire 81% = constant bias, not signal |
+| 4 | EMA gap 0.03% → 0.1% | 1m cross too frequent = noise |
+| 5 | **★ Pump Timing Gate** | Entry setelah pump = time_exit. Entry saat pump mulai = trailing fire. |
+
+### Audit #9 Cutoff
+- Timestamp: `1748001600` (23 Mei 2026 06:40 UTC / 13:40 WIB)
 
 ### Current Edge Analysis
-- **Trailing stop** = sole profit source. 100% WR, 33% fire rate, +$32.36 in 57 trades.
-- **time_exit** = sole loss source. 59.6% of trades, 29.4% WR, -$17.73.
-- **ATR + Vol** = real predictor of trailing fire. Winners avg ATR 0.0026 vs losers 0.0017.
-- **OI score** = best component predictor. OI≥6 = WR 69.6%, OI<6 = WR 41.2%.
-- **Funding negative** = strongest edge signal. FR<0 + LONG = WR 88.9% (9 trades).
-- **Whale/CVD** = were broken (sell side = 0). Fixed in Audit #7. Needs validation.
-
-### Audit #7 Findings (22 Mei 2026 Malam)
-
-**Bugs Found:**
-1. Whale detection: HL uses `"A"` for sell, code checked `"S"` → sell vol always 0 → 100% buy bias (89.6% constant fire)
-2. CVD calculation: same bug → always bullish → constant noise
-3. Both fixed by adding `'A'` to sell side detection
-
-**Data-Driven Additions:**
-4. ATR gate LONG raised: 0.0010 → 0.0013 (dead zone elimination)
-5. Vote margin gate: margin < 4 → threshold +5 (low consensus = coin flip)
-6. OI conviction gate: abs(OI) < 6 → threshold +3 (no fundamental backing)
-7. Funding negative bonus: FR < 0 + LONG → threshold -3 (contrarian edge)
-
-**Key Data Points:**
-- EXTREME regime = best performer (WR 88.9%, +$14.95) — don't over-filter
-- Vote margin 8+ = WR 66.7%, +$11.87
-- Leverage 30x underperforms 20x (WR 40% vs 55%)
-- Hour 07 UTC (London open) = WR 86%
+- **Trailing stop** = sole profit source. 100% WR, 33% fire rate, +$54.99 in 134 trades.
+- **time_exit** = sole loss source. 62% of trades, 18% WR, -$42.89.
+- **OB=18** = best entry predictor. WR 55.9%, trailing 38%, PnL +$7.02.
+- **Pump gate** = expected to increase trailing rate from 33% to >45% by filtering dead-market entries.
 
 ---
 
-*Dokumen ini sinkron dengan Audit #7 (22 Mei 2026 malam). Untuk detail per-audit, lihat `KARA_SYSTEM_DOCUMENT.md`.*
+*Dokumen ini sinkron dengan Audit #9 (23 Mei 2026 malam). Next audit: 24 Mei 2026.*

@@ -539,9 +539,13 @@ class ScoringEngine:
                 htf_leverage_adj  = -3
                 reasons.append(f"⚠️ 4H TRENDING_DOWN — LONG counter-trend (+8 threshold)")
         else:  # CHOPPY
-            htf_threshold_adj = +8   # [FIX 2026-05-21] Was +2, data shows 0% WR in choppy. Need very strong signal.
+            # [AUDIT #9 FIX 2026-05-23] Was +8. But HTF detector returns CHOPPY 91.9%
+            # of the time — detection is broken (EMA10≈EMA20 on 4H for most alts).
+            # +8 penalty applied to ALL trades = meaningless filter (doesn't discriminate).
+            # Set to 0 until detector is fixed or replaced.
+            htf_threshold_adj = 0
             htf_leverage_adj  = -2
-            reasons.append(f"〰️ 4H CHOPPY — threshold +8, leverage reduced")
+            reasons.append(f"〰️ 4H CHOPPY — leverage reduced (threshold penalty disabled, detector unreliable)")
 
         # 4c. [OPPORTUNITY SCORING] Regime multiplier — ranging = opportunity, trending = stale
         # Data audit: trending ×1.2 caused score inflation at exhaustion points.
@@ -929,41 +933,74 @@ class ScoringEngine:
             _dir_candles = _bullish_candles if side == Side.LONG else _bearish_candles
             _mcandles = f"{_dir_candles}/5"
 
-        # ── [AUDIT #6 FIX 2026-05-22] TREND STRUCTURE VETO ─────────────
-        # Data (Audit #6): Trend-flip fired 2x, both LOSS (-$4.76). Flipping to SHORT
-        # in crypto = structural disadvantage (WR 20%). 
-        # NEW APPROACH: Don't flip. Instead, SKIP if direction contradicts trend structure.
-        # This is a quality gate: "don't enter if trend is against you."
-        # If trend aligns → proceed. If trend opposes → skip (wait for better setup).
-        if len(_closes) >= 21:
-            _ema21_val = _closes[0]
-            _ema8_val = _closes[0]
-            _k21 = 2 / 22
-            _k8 = 2 / 9
-            for _v in _closes[1:]:
-                _ema21_val = _v * _k21 + _ema21_val * (1 - _k21)
-                _ema8_val = _v * _k8 + _ema8_val * (1 - _k8)
-            _price_vs_ema = (mark_price - _ema21_val) / _ema21_val
-            _ema_cross_bear = _ema8_val < _ema21_val * 0.9997
-            _ema_cross_bull = _ema8_val > _ema21_val * 1.0003
+        # ── [AUDIT #9 FIX 2026-05-24] PUMP TIMING GATE ─────────────────
+        # Data: 62% trades = time_exit (entry AFTER pump, price diam).
+        # Fix: Only enter when pump is STARTING (vol surge + price accel + not too late).
+        # This is the fundamental shift: from "high score" to "pump beginning".
+        if len(candles) >= 35:
+            _volumes = []
+            for _c in candles[-35:]:
+                if isinstance(_c, dict):
+                    try:
+                        _volumes.append(float(_c.get("v", 0)))
+                    except (TypeError, ValueError):
+                        _volumes.append(0.0)
 
-            # LONG in confirmed downtrend = counter-trend → skip
-            if side == Side.LONG and _price_vs_ema < -0.002 and _ema_cross_bear:
-                log.info(
-                    f"[SKIP] {asset} | score={score} | side=LONG | "
-                    f"reason=trend_structure_veto | context=price {_price_vs_ema*100:.2f}% below EMA21 + EMA8<EMA21"
-                )
-                self.skip_counters["trend_structure_veto"] = self.skip_counters.get("trend_structure_veto", 0) + 1
-                return None, score
+            if len(_volumes) >= 35 and len(_closes) >= 11:
+                # Volume baseline: MEDIAN of 30 candles before recent 5 (robust vs spikes)
+                _vol_baseline_arr = sorted(_volumes[:-5])
+                _vol_baseline = _vol_baseline_arr[len(_vol_baseline_arr) // 2] if _vol_baseline_arr else 1e-10
+                _vol_recent = sum(_volumes[-5:]) / 5
+                _vol_surge = _vol_recent / max(_vol_baseline, 1e-10)
 
-            # SHORT in confirmed uptrend = counter-trend → skip
-            if side == Side.SHORT and _price_vs_ema > 0.002 and _ema_cross_bull:
-                log.info(
-                    f"[SKIP] {asset} | score={score} | side=SHORT | "
-                    f"reason=trend_structure_veto | context=price {_price_vs_ema*100:.2f}% above EMA21 + EMA8>EMA21"
+                # Price acceleration: last candle vs avg candle size (10 candles)
+                _candle_sizes = [abs(_closes[i] - _closes[i-1]) / _closes[i-1]
+                                 for i in range(-10, 0) if _closes[i-1] > 0]
+                _avg_candle = sum(_candle_sizes) / max(len(_candle_sizes), 1)
+                _last_candle = abs(_closes[-1] - _closes[-2]) / _closes[-2] if _closes[-2] > 0 else 0
+
+                # Total move last 5 candles
+                _move_5m = abs(_closes[-1] - _closes[-6]) / _closes[-6] if len(_closes) >= 6 and _closes[-6] > 0 else 0
+
+                # Direction check: 3 of last 5 candles in trade direction (forgiving)
+                _up_candles = sum(1 for i in range(-5, 0) if _closes[i] > _closes[i-1])
+                _down_candles = 5 - _up_candles
+                _direction_match = (_up_candles >= 3 if side == Side.LONG else _down_candles >= 3)
+
+                # Min avg candle size: filter dead coins (< 0.04% per candle)
+                _coin_alive = _avg_candle > 0.0004
+
+                # Thresholds: SHORT more strict (crypto upward bias)
+                _vol_surge_min = 2.0 if side == Side.SHORT else 1.5
+                _price_accel_min = 1.2
+                _max_move = 0.007  # 0.7%
+
+                _pump_starting = (
+                    _vol_surge >= _vol_surge_min and
+                    _last_candle >= _avg_candle * _price_accel_min and
+                    _move_5m < _max_move and
+                    _direction_match and
+                    _coin_alive
                 )
-                self.skip_counters["trend_structure_veto"] = self.skip_counters.get("trend_structure_veto", 0) + 1
-                return None, score
+
+                if not _pump_starting:
+                    _reason = (
+                        f"vol_surge={_vol_surge:.1f}x(need {_vol_surge_min}x) "
+                        f"accel={_last_candle/_avg_candle:.1f}x(need {_price_accel_min}x) "
+                        f"move={_move_5m*100:.2f}%(max {_max_move*100:.1f}%) "
+                        f"dir={'ok' if _direction_match else 'wrong'} "
+                        f"alive={'ok' if _coin_alive else 'dead'}"
+                    )
+                    log.info(
+                        f"[SKIP] {asset} | score={score} | side={side.value} | "
+                        f"reason=pump_not_starting | context={_reason}"
+                    )
+                    self.skip_counters["pump_not_starting"] = self.skip_counters.get("pump_not_starting", 0) + 1
+                    self._skip_count_since_summary += 1
+                    return None, score
+
+        # [AUDIT #9] Trend structure veto REMOVED — redundant with pump gate.
+        # Pump gate already checks 3/5 candle direction + move < 0.7%.
 
         signal = self._build_scalper_signal(
             asset, side, score, mark_price, reasons, vol_regime,
@@ -1344,9 +1381,11 @@ class ScoringEngine:
         ema8 = ema(closes[-21:], 8) if len(closes) >= 8 else closes[-1]
         ema21 = ema(closes[-21:], 21) if len(closes) >= 21 else closes[-1]
 
-        # EMA freshness: fresh cross = good confirmation, stale cross = move already happened
-        ema_bullish = ema8 > ema21 * 1.0003
-        ema_bearish = ema8 < ema21 * 0.9997
+        # [AUDIT #9 FIX] Gap raised 0.03%→0.1%. On 1m candles, EMA8/21 cross
+        # too frequently at 0.03% gap = 77% fire rate = constant bias (not signal).
+        # Data: EMA=10 WR 39.6% PnL -$7.05 vs EMA≤0 WR 65% PnL +$6.50.
+        ema_bullish = ema8 > ema21 * 1.001
+        ema_bearish = ema8 < ema21 * 0.999
         candles_since_cross = 0
         if ema_bullish or ema_bearish:
             for i in range(len(closes) - 2, max(0, len(closes) - 12), -1):
@@ -1466,11 +1505,13 @@ class ScoringEngine:
                 if len(closes) >= 4:
                     price_chg_3m = (closes[-1] - closes[-4]) / closes[-4]
 
-                # Only score when CVD is strong AND price confirms direction
-                if cvd_ratio > 0.25 and price_chg_3m > 0.001:
+                # [AUDIT #9 FIX] CVD threshold raised: 25%→40%, price 0.1%→0.2%.
+                # Data: CVD fired 81% at old threshold = constant bias, not signal.
+                # CVD=0 WR 52% vs CVD=10 WR 43% = CVD was HURTING performance.
+                if cvd_ratio > 0.40 and price_chg_3m > 0.002:
                     confirm_pts += 10; _c_cvd = 10
                     reasons.append(f"💚 CVD confirms ({cvd_ratio*100:.0f}%) + price moving → trend")
-                elif cvd_ratio < -0.25 and price_chg_3m < -0.001:
+                elif cvd_ratio < -0.40 and price_chg_3m < -0.002:
                     confirm_pts += 10; _c_cvd = 10
                     reasons.append(f"❤️ CVD confirms ({cvd_ratio*100:.0f}%) + price moving → trend")
 
