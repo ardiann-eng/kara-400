@@ -226,6 +226,13 @@ class PaperExecutor(BaseExecutor):
         self._available   -= margin
         self._positions[pos.position_id] = pos
 
+        # [AUDIT #8] Store signal component scores for ML training
+        if hasattr(signal, 'breakdown') and signal.breakdown:
+            _bd = signal.breakdown
+            pos._ml_features = _bd.components.copy() if _bd.components else {}
+            pos._ml_features['momentum_move'] = _bd.momentum_move_pct
+            pos._ml_features['regime_code'] = 1 if _bd.htf_regime == 'TRENDING_UP' else (-1 if _bd.htf_regime == 'TRENDING_DOWN' else 0)
+
         # BUG 1 FIX: Persist to SQLite
         from core.db import user_db
         cid = self.chat_id
@@ -449,6 +456,8 @@ class PaperExecutor(BaseExecutor):
             # who traded the same signal, preventing N-times recording.
             _entry_minute = int(pos.opened_at.timestamp() // 60) if pos.opened_at else 0
             _signal_key = f"{pos.asset}_{pos.side.value.lower()}_{_entry_minute}"
+            # [AUDIT #8 FIX] Use real component scores from position metadata
+            _comps = getattr(pos, '_ml_features', None) or {}
             learning_engine.record_outcome(
                 asset=pos.asset,
                 side=pos.side.value.lower(),
@@ -457,14 +466,14 @@ class PaperExecutor(BaseExecutor):
                 pnl_usd=total_pnl,
                 pos_id=_signal_key,
                 features={
-                    'oi_funding_score': 0,
-                    'orderbook_score': 0,
-                    'liquidation_score': 0,
-                    'displacement_5m': getattr(pos, 'trend_pct', 0) or 0,
-                    'rsi': 50,
-                    'ema_freshness': 5,
+                    'oi_funding_score': _comps.get('FUND', 0),
+                    'orderbook_score': _comps.get('OB', 0),
+                    'liquidation_score': _comps.get('LIQ', 0),
+                    'displacement_5m': _comps.get('momentum_move', 0),
+                    'rsi': _comps.get('RSI', 0),
+                    'ema_freshness': _comps.get('EMA', 0),
                     'atr_pct': getattr(pos, 'atr_pct', 0) or 0,
-                    'regime_code': 0,
+                    'regime_code': _comps.get('regime_code', 0),
                     'hour_utc': pos.opened_at.hour if pos.opened_at else 0,
                     'score': pos.entry_score,
                 }
