@@ -476,6 +476,10 @@ class PaperExecutor(BaseExecutor):
                     'regime_code': _comps.get('regime_code', 0),
                     'hour_utc': pos.opened_at.hour if pos.opened_at else 0,
                     'score': pos.entry_score,
+                    'cvd_score': _comps.get('CVD', 0),
+                    'xam_score': _comps.get('XAM', 0),
+                    'vote_margin': _comps.get('vote_margin', 0),
+                    'side_code': 1 if pos.side.value.lower() == 'long' else -1,
                 }
             )
         except Exception as _le:

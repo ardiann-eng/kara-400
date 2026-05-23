@@ -231,7 +231,8 @@ class LearningEngine:
         feature_order = [
             'oi_funding_score', 'orderbook_score', 'liquidation_score',
             'displacement_5m', 'rsi', 'ema_freshness', 'atr_pct',
-            'regime_code', 'hour_utc', 'score'
+            'regime_code', 'hour_utc', 'score',
+            'cvd_score', 'xam_score', 'vote_margin', 'side_code'
         ]
         x = np.array([[features.get(f, 0.0) for f in feature_order]])
         prob = self._model.predict_proba(x)[0][1]  # P(win)
@@ -251,7 +252,8 @@ class LearningEngine:
             feature_order = [
                 'oi_funding_score', 'orderbook_score', 'liquidation_score',
                 'displacement_5m', 'rsi', 'ema_freshness', 'atr_pct',
-                'regime_code', 'hour_utc', 'score'
+                'regime_code', 'hour_utc', 'score',
+                'cvd_score', 'xam_score', 'vote_margin', 'side_code'
             ]
 
             X, y = [], []
