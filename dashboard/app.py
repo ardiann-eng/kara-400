@@ -1117,7 +1117,7 @@ async def api_ml_insights():
         'displacement_5m', 'rsi', 'ema_freshness', 'atr_pct',
         'regime_code', 'hour_utc', 'score'
     ]
-    importances = learning_engine._model.feature_importances_.tolist()
+    importances = learning_engine._model.feature_importances_.tolist() if hasattr(learning_engine._model, 'feature_importances_') else [0.0] * len(feature_names)
     feature_imp = sorted(
         [{"feature": f, "importance": round(i, 4)} for f, i in zip(feature_names, importances)],
         key=lambda x: -x["importance"]
