@@ -970,6 +970,18 @@ class ScoringEngine:
                 # Min avg candle size: filter dead coins (< 0.04% per candle)
                 _coin_alive = _avg_candle > 0.0004
 
+                # Total displacement: don't buy at top, don't sell at bottom
+                # LONG: how far is price from 30-candle low? If >2% = overextended
+                # SHORT: how far is price from 30-candle high? If >2% = overextended
+                _max_displacement = 0.02  # 2%
+                if side == Side.LONG:
+                    _low_30 = min(_closes[-30:]) if len(_closes) >= 30 else min(_closes)
+                    _total_disp = (_closes[-1] - _low_30) / _low_30 if _low_30 > 0 else 0
+                else:
+                    _high_30 = max(_closes[-30:]) if len(_closes) >= 30 else max(_closes)
+                    _total_disp = (_high_30 - _closes[-1]) / _closes[-1] if _closes[-1] > 0 else 0
+                _not_overextended = _total_disp < _max_displacement
+
                 # Thresholds: SHORT more strict (crypto upward bias)
                 _vol_surge_min = 2.0 if side == Side.SHORT else 1.5
                 _price_accel_min = 1.2
@@ -980,7 +992,8 @@ class ScoringEngine:
                     _last_candle >= _avg_candle * _price_accel_min and
                     _move_5m < _max_move and
                     _direction_match and
-                    _coin_alive
+                    _coin_alive and
+                    _not_overextended
                 )
 
                 if not _pump_starting:
@@ -989,7 +1002,8 @@ class ScoringEngine:
                         f"accel={_last_candle/_avg_candle:.1f}x(need {_price_accel_min}x) "
                         f"move={_move_5m*100:.2f}%(max {_max_move*100:.1f}%) "
                         f"dir={'ok' if _direction_match else 'wrong'} "
-                        f"alive={'ok' if _coin_alive else 'dead'}"
+                        f"alive={'ok' if _coin_alive else 'dead'} "
+                        f"disp={_total_disp*100:.1f}%(max {_max_displacement*100:.0f}%)"
                     )
                     log.info(
                         f"[SKIP] {asset} | score={score} | side={side.value} | "
