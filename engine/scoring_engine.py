@@ -1647,14 +1647,20 @@ class ScoringEngine:
                     if t.get('side', '') in ('A', 'S', 'sell', 'Bid')
                     and float(t.get('sz', 0)) * float(t.get('px', 0)) >= _whale_threshold
                 )
+                # [AUDIT #8 FIX] Minimum sample: need >=5 whale trades for statistical significance.
+                # Before: 1 whale trade = 100% imbalance = always votes. 78% fire rate.
+                _whale_count = sum(
+                    1 for t in _recent
+                    if float(t.get('sz', 0)) * float(t.get('px', 0)) >= _whale_threshold
+                )
                 _whale_total = _whale_buy_vol + _whale_sell_vol
-                if _whale_total > 0:
+                if _whale_count >= 5 and _whale_total > 0:
                     _whale_ratio = (_whale_buy_vol - _whale_sell_vol) / _whale_total
-                    # Only vote if whale imbalance is significant (>30%)
-                    if _whale_ratio > 0.30:
+                    # [AUDIT #8 FIX] Raise threshold from 30% to 50% — need clear dominance
+                    if _whale_ratio > 0.50:
                         _dir_bull += 2
                         reasons.append(f"🐋 Whale buy flow {_whale_ratio*100:.0f}% imbalance")
-                    elif _whale_ratio < -0.30:
+                    elif _whale_ratio < -0.50:
                         _dir_bear += 2
                         reasons.append(f"🐋 Whale sell flow {_whale_ratio*100:.0f}% imbalance")
 
@@ -1672,7 +1678,11 @@ class ScoringEngine:
             f"OI={_oi_signed:+d} EMA={'bull' if ema_bullish else 'bear' if ema_bearish else 'flat'})"
         )
 
-        dominant_setup = max(bull_setup, bear_setup)
+        # [AUDIT #8 FIX] Score must reflect conviction in the CHOSEN direction.
+        # Before: max(bull, bear) → high score from OPPOSING setup = inverse predictive.
+        # After: use setup aligned with direction. High score = strong evidence FOR the trade.
+        aligned_setup = bull_setup if side == Side.LONG else bear_setup
+        dominant_setup = aligned_setup  # keep var name for downstream log compatibility
 
         # Raw score = setup (0-63) + confirmation (-15 to +31) → range 0-94 pre-scaling
         raw = dominant_setup + confirm_pts
@@ -2710,8 +2720,8 @@ class ScoringEngine:
                     e = v * k + e * (1 - k)
                 return e
 
-            ema10 = _ema(closes[-10:], 10) if len(closes) >= 10 else closes[-1]
-            ema20 = _ema(closes[-20:], 20) if len(closes) >= 20 else closes[-1]
+            ema10 = _ema(closes, 10) if len(closes) >= 10 else closes[-1]
+            ema20 = _ema(closes, 20) if len(closes) >= 20 else closes[-1]
 
             # Trend strength: ratio of directional move vs total range
             # High ratio = trending, low ratio = choppy

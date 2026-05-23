@@ -1,85 +1,71 @@
-# KARA Audit #8 — 23 Mei 2026
+# KARA — TODO 23 Mei 2026
 
-## Changes Deployed (22 Mei Malam)
+## ✅ DONE Hari Ini
 
-1. **Whale/CVD sell side bug fix** — added `'A'` (HL format) to sell detection
-2. **ATR gate LONG** — 0.0010 → 0.0013
-3. **Vote margin gate** — margin < 4 → threshold +5
-4. **OI score gate** — abs(OI) < 6 → threshold +3
-5. **Funding negative bonus** — FR < 0 + LONG → threshold -3
+### Audit #8 Completed
+- Data: 35 trades, 15.7 jam, 2.2 trades/hr
+- WR 40%, PnL +$1.56, PF 1.587
+- Score↔PnL r = -0.18 (INVERSE) ← root cause ditemukan
 
-## Baseline (Audit #7, 22 Mei)
+### 3 Bug Fix Deployed (engine/scoring_engine.py)
 
-| Metric | Value |
+1. **Score Alignment** — `max(bull, bear)` → `aligned_setup` (bull jika LONG, bear jika SHORT)
+   - Root cause: score tinggi dari setup BERLAWANAN arah = inverse predictive
+   - Evidence: SOL long score=71 tapi OI=-22 (bearish). Score inflated oleh bear_setup.
+
+2. **HTF EMA Fix** — `_ema(closes[-10:], 10)` → `_ema(closes, 10)`
+   - Root cause: EMA dihitung dari data terlalu pendek → EMA10≈EMA20 selalu → CHOPPY 91.6%
+   - Evidence: HTF CHOPPY 91.6% = detector broken, bukan market selalu choppy
+
+3. **Whale Min Sample** — tambah `_whale_count >= 5` + threshold 30%→50%
+   - Root cause: 1 whale trade = 100% imbalance = selalu vote. Fire rate 78%.
+   - Evidence: 219/299 signals = "100% imbalance" (sample size 1-2 trades)
+
+---
+
+## 🔲 TODO — Belum Deploy
+
+### Setelah Deploy Fix #1-3, Monitor:
+
+- [ ] Deploy ke Railway (commit + push)
+- [ ] Tunggu 6-8 jam, kumpulkan 30+ trades
+- [ ] Audit #9: cek apakah score↔PnL r membaik (target ≥ 0)
+- [ ] Cek HTF regime distribution (target: CHOPPY < 70%)
+- [ ] Cek whale fire rate (target: < 40%)
+- [ ] Cek trades/hr (target: ≥ 4)
+
+### Jika Audit #9 Masih Bermasalah:
+
+- [ ] **OI weight reduction** — ±28 → ±12 (OI terlalu dominan untuk 12-min hold)
+  - Evidence: OI high (16+) = WR 30%, PnL -$3.40. OI zero = WR 60%, PnL +$4.35
+  - OI beroperasi di siklus 8h, bot hold 12 menit = timeframe mismatch
+- [ ] **OB weight increase** — ±18 → ±22 (satu-satunya komponen predictive)
+  - Evidence: OB aligned = WR 44%, PnL +$5.18. OB against = WR 0%, PnL -$2.73
+
+---
+
+## 📊 Key Findings Audit #8
+
+| Finding | Data | Status |
+|---|---|---|
+| Score INVERSE | r=-0.18, decile 9 = 0% WR | ✅ Fixed (aligned_setup) |
+| HTF always CHOPPY | 91.6% CHOPPY | ✅ Fixed (EMA calc) |
+| Whale always fires | 78% fire rate | ✅ Fixed (min sample + threshold) |
+| OI contrarian vs trend-following | OI aligned SHORT = WR 27% | ⚠️ Monitor post-fix |
+| OB = best predictor | OB aligned = WR 44%, +$5.18 | 📝 Noted for next iteration |
+| time_exit 0% WR | 20/35 trades, -$24.30 | Should improve with better scoring |
+| Trade clustering | 26% within 5min, then 3h gaps | Should improve with HTF fix |
+
+---
+
+## 📅 Timeline Update
+
+| Tanggal | Action |
 |---|---|
-| Trades | 57 (5.6 jam) |
-| Trades/hr | 10.2 |
-| WR | 52.6% |
-| PnL | +$8.23 |
-| PF | 1.115 |
-| Score↔PnL r | +0.098 |
-| Trailing fire rate | 33.3% |
-| time_exit % | 59.6% |
-| time_exit WR | 29.4% |
-| Whale fire rate | 89.6% (BROKEN — now fixed) |
-| CVD | constant bullish (BROKEN — now fixed) |
-
-## What to Check (in order)
-
-### Tier 1: Apakah Bug Fix Tidak Merusak?
-
-- [ ] **Overall PnL ≥ $0** (baseline +$8.23)
-- [ ] **Score↔PnL r ≥ +0.08** (baseline +0.098)
-- [ ] **Trailing fire rate ≥ 25%** (baseline 33.3%)
-- [ ] **Trades/hr ≥ 5** (kalau <3 = filter terlalu ketat)
-
-### Tier 2: Whale + CVD Fix Bekerja?
-
-- [ ] **Whale fire rate** — target 20-50% (was 89.6%)
-- [ ] **Whale buy vs sell** — harus ada MIX (bukan 100% buy lagi)
-- [ ] **Whale-voted trades WR** — harus > overall WR (kalau < → disable whale)
-- [ ] **CVD distribution** — harus ada bullish DAN bearish signals (bukan 100% bullish)
-- [ ] **SHORT signal count** — harus naik (CVD fix memungkinkan bear detection)
-
-### Tier 3: Filter Gates Bekerja?
-
-- [ ] **ATR gate blocks** — berapa trades di-skip oleh ATR 0.0013? (`skip_counters["low_atr"]`)
-- [ ] **Vote margin gate blocks** — berapa? (`_vote_margin_adj` fires)
-- [ ] **OI gate blocks** — berapa? (threshold naik +3)
-- [ ] **Funding bonus fires** — berapa LONG masuk karena FR < 0? Apakah profitable?
-- [ ] **time_exit %** — target < 50% (was 59.6%)
-
-### Tier 4: Regresi Check
-
-- [ ] **OI score vs outcome** — masih predictive? (OI≥6 harus WR > OI<6)
-- [ ] **Vote margin vs outcome** — high margin masih WR > low margin?
-- [ ] **EXTREME regime** — masih best performer?
-- [ ] **Score decile 9 (75-90)** — masih underperform? (whale fix should help)
-
-## Red Flags (REVERT jika)
-
-- PnL < -$5
-- Score correlation < 0
-- Trailing fire rate < 15%
-- 0 trades dalam 6 jam
-- Whale fire rate masih >80% (fix tidak bekerja)
-
-## Success Criteria
-
-- PnL > +$10
-- WR > 55%
-- Whale fire rate 20-50% dengan mix buy/sell
-- time_exit < 50%
-- Trailing fire rate maintained >30%
-
-## Runbook
-
-```powershell
-# 1. Pull data (sama seperti AUDIT_RUNBOOK.md Step 1)
-# 2. Deduplicate
-# 3. Run: venv\Scripts\python.exe tmp\deep_audit7.py
-# 4. Run: venv\Scripts\python.exe tmp\deep_audit7b.py
-# 5. Run: venv\Scripts\python.exe tmp\deep_audit7c.py
-# 6. Run: venv\Scripts\python.exe tmp\deep_audit7d.py
-# 7. Paste output ke Kiro untuk analisis
-```
+| 23 Mei (sekarang) | Deploy Fix #1-3 |
+| 24 Mei | Audit #9 (30+ trades post-fix) |
+| 25 Mei | Evaluate. Jika OK → mulai live executor |
+| 26-27 Mei | Live executor dev |
+| 28-29 Mei | Micro-live test ($10) |
+| 30-31 Mei | Validation |
+| 1 Juni | GO/NO-GO |
