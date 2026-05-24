@@ -2,14 +2,15 @@
 
 ## Context
 
-Deploy malam ini (24 Mei ~23:45 WIB / 16:45 UTC) berisi 4 perubahan:
+Deploy malam ini (24 Mei ~23:45 WIB / 16:45 UTC) berisi 5 perubahan:
 
 | # | Fix | Expected Impact |
 |---|---|---|
 | 1 | EMA 8/21 → **13/34**, gap 0.04% | Fire rate 93% → ~50%. Cross hanya pada real trend. |
-| 2 | DVI **disabled** | Remove +10pts noise yang inverse (r=-0.126) |
+| 2 | DVI **disabled** → diganti **MFI** | Remove noise inverse, ganti volume-weighted confirmation |
 | 3 | Regime threshold 6%/12% → **10%/18%** | Mayoritas altcoin jadi NORMAL (×1.0) → frequency naik |
 | 4 | **Liq Cluster** (baru) | Real Binance+HL cascade events → replace OI proxy |
+| 5 | **MFI (Money Flow Index)** ±8 pts | Confirmation: money flowing in/out, 14-bar lookback |
 
 ---
 
@@ -44,6 +45,12 @@ Deploy malam ini (24 Mei ~23:45 WIB / 16:45 UTC) berisi 4 perubahan:
 - [ ] Cek di signal reasons: apakah ada "💥 Liq cluster:" message?
 - [ ] Kalau >40% → threshold $2k terlalu rendah, naikkan ke $5k
 
+### MFI (Money Flow Index)
+- [ ] **MFI fire rate** — target **30-60%** (>60 bullish atau <40 bearish)
+- [ ] Kalau >80% → threshold 60/40 terlalu longgar, ketatkan ke 65/35
+- [ ] Kalau <20% → threshold 60/40 terlalu ketat untuk 1m, longgarkan ke 55/45
+- [ ] Cek di signal reasons: apakah ada "💰 MFI" message?
+
 ---
 
 ## Tier 2 — Quality Tetap Terjaga?
@@ -64,6 +71,7 @@ Deploy malam ini (24 Mei ~23:45 WIB / 16:45 UTC) berisi 4 perubahan:
 - [ ] EMA correlation — **TARGET ≥ 0** (was -0.33 saat over-fire)
 - [ ] FUND correlation — should stay netral (±0.1)
 - [ ] **Liq Cluster correlation** — target ≥ 0 (baru, any data = good)
+- [ ] **MFI correlation** — target ≥ 0 (baru, should be positive if money flow = predictive)
 
 ---
 
@@ -71,12 +79,13 @@ Deploy malam ini (24 Mei ~23:45 WIB / 16:45 UTC) berisi 4 perubahan:
 
 | Kondisi | Action |
 |---|---|
-| PF < 0.8 | Rollback semua 4 fix |
+| PF < 0.8 | Rollback semua 5 fix |
 | Trailing < 25% | Rollback — edge hilang |
 | Frequency > 8/hr + PF < 1.0 | Regime terlalu longgar → revert ke 8%/15% |
 | Score inverse WORSE (r < -0.15) | Ada komponen baru yang rusak |
 | 0 trades dalam 4+ jam | Scoring collapse — cek threshold, EMA, regime |
 | Liq cluster fire >50% + PnL negatif | Cluster picking wrong side, threshold too low |
+| MFI fire >80% + r < -0.1 | MFI jadi noise seperti DVI, disable |
 
 ---
 
@@ -88,6 +97,8 @@ Deploy malam ini (24 Mei ~23:45 WIB / 16:45 UTC) berisi 4 perubahan:
 | EMA fire <20% | Gap 0.04% → 0.02% ATAU period 13/34 → 10/26 |
 | Liq cluster fire 0% | Monitor 24h lagi, altcoin sparse. Bukan bug. |
 | Liq cluster fire >40% | Notional threshold $2k → $5k |
+| MFI fire >80% | Threshold 60/40 → 65/35 |
+| MFI fire <20% | Threshold 60/40 → 55/45 |
 | Regime still all volatile | Vol window terlalu panjang? Cek 1h candle count. |
 | SHORT masih 0% WR (20+ trades total) | DISABLE SHORT |
 | Frequency <1.5/hr + regime NORMAL | Score threshold terlalu tinggi, turunkan base -3 |
@@ -130,6 +141,7 @@ Deploy malam ini (24 Mei ~23:45 WIB / 16:45 UTC) berisi 4 perubahan:
 | time_exit | 53% | <50% |
 | EMA fire | 93% | 40-60% |
 | DVI fire | 60% (disabled) | N/A |
+| MFI fire | N/A (baru) | 30-60% |
 | Regime | 100% volatile | majority NORMAL |
 | Liq cluster | N/A (baru) | 10-25% |
 | LONG WR | 60% | >50% |
@@ -139,11 +151,12 @@ Deploy malam ini (24 Mei ~23:45 WIB / 16:45 UTC) berisi 4 perubahan:
 
 ## Catatan
 
-### Kenapa Deploy 4 Fix Sekaligus (Lagi)
+### Kenapa Deploy 5 Fix Sekaligus (Lagi)
 Deadline 1 Juni = 7 hari. Trade-off sama: speed > attribution. Tapi kali ini lebih aman karena:
-- Fix 1-3 = **parameter tuning** (bukan logic change) → mudah revert
+- Fix 1,3 = **parameter tuning** (bukan logic change) → mudah revert
+- Fix 2,5 = **swap** (DVI off, MFI on) → slot confirmation tetap 1, bukan nambah
 - Fix 4 = **additive** (liq cluster) dengan fallback ke proxy lama → worst case = no change, bukan regresi
-- Kalau ada regresi, bisect: disable liq cluster dulu (paling baru), lalu cek EMA, lalu regime
+- Kalau ada regresi, bisect: disable MFI dulu (paling baru), lalu liq cluster, lalu cek EMA, lalu regime
 
 ### Vol Cache
 Regime fix baru efektif setelah vol_cache expire (max 1 jam). Expect jam pertama post-deploy masih pakai data lama.

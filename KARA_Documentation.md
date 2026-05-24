@@ -1,6 +1,6 @@
 # KARA Bot — Dokumentasi Teknis Lengkap
 
-**Versi**: 8.4.0 (Post-Audit #11 — EMA 13/34 + DVI Disabled + Regime Retuned + Liq Cluster)  
+**Versi**: 8.5.0 (Post-Audit #11 — EMA 13/34 + MFI + Regime Retuned + Liq Cluster)  
 **Tanggal Dokumen**: 24 Mei 2026 (Malam)  
 **Platform**: Hyperliquid Futures (Mainnet only — Railway blocked Bybit/Binance/OKX REST, WS OK)  
 **Mode**: Scalper only, Paper Trading  
@@ -38,7 +38,7 @@ KARA adalah bot scalping futures otomatis untuk **Hyperliquid** (DEX on-chain pe
 - **Deploy**: Railway service `rare-youthfulness`
 - **Data**: Hyperliquid WS + **Binance WS liquidation stream**
 - **Last Audit (#11)**: 15 trades post-deploy, WR 46.7%, PnL +$3.98, PF 1.697
-- **Deployed**: EMA 13/34, DVI disabled, regime 10%/18%, liq cluster
+- **Deployed**: EMA 13/34, MFI (replaces DVI), regime 10%/18%, liq cluster
 
 ### Filosofi
 - **Data > intuisi.** Metric kontradiksi hipotesis → metric menang.
@@ -75,6 +75,7 @@ main.py (orchestrator)
 │       ├── Liq Cluster (Binance+HL real events, fallback OI proxy)
 │       ├── Orderbook Analyzer (score only, NOT direction)
 │       ├── EMA 13/34 (confirmation, direction vote)
+│       ├── MFI 14 (confirmation, volume-weighted)
 │       ├── Direction Voting (7 voters)
 │       ├── Filters:
 │       │   ├── Score threshold
@@ -109,7 +110,7 @@ main.py (orchestrator)
 | Channel | Source | Data | Dipakai Untuk |
 |---|---|---|---|
 | `l2Book` | HL | Orderbook L2 (20 levels) | OB imbalance scoring, spread filter |
-| `trades` | HL | Setiap transaksi | DVI, momentum, Whale Trade Imbalance |
+| `trades` | HL | Setiap transaksi | Momentum, Whale Trade Imbalance, MFI volume |
 | `activeAssetCtx` | HL | Funding + OI | OI/Funding scoring, funding history |
 | `liquidations` | HL | Liquidation events | Liq analyzer (sparse) |
 | **`!forceOrder@arr`** | **Binance** | **ALL futures liquidations** | **Liq analyzer (10-50x more data)** |
@@ -157,12 +158,13 @@ Railway IP mendapat 403 dari Bybit/Binance/OKX REST. L/S ratio = dead code. Bina
 | Cross-Asset Momentum (XAM) | ±12 | Setup | ⚠️ Barely fires (0%) |
 | **EMA Cross (13/34)** | ±10 | Confirmation + Direction vote (weight 2) | 🔧 Period naik (was 8/21), gap 0.04% |
 | RSI (14) | ±8 | Confirmation + Direction vote (weight 1) | ✅ Best confirmation (r=+0.587) |
+| **MFI (Money Flow Index)** | ±8 | Confirmation (volume-weighted) | 🆕 Replaces DVI, 14-bar lookback |
 
 ### Disabled
 
 | Komponen | Alasan | Audit |
 |---|---|---|
-| **DVI** | r=-0.126 inverse, 60% fire = noise, redundant dgn momentum gate, measures exhaustion bukan initiation | #11 |
+| **DVI** | r=-0.126 inverse, 60% fire = noise, redundant dgn momentum gate. **Replaced by MFI.** | #11 |
 | **CVD** | r=-0.21 INVERSE. Fire 74% = lagging constant bias. | #10 |
 | OB Absorption | Reversal signal, not trend-following | #4 |
 | MTF 15m | r=-0.68 inverse predictor | #6 |
@@ -173,7 +175,7 @@ Railway IP mendapat 403 dari Bybit/Binance/OKX REST. L/S ratio = dead code. Bina
 ```
 bull_setup = OI_bull + OB_bull + Liq_bull + XAM_bull + EMA_boost + RSI_momentum
 bear_setup = OI_bear + OB_bear + Liq_bear + XAM_bear + EMA_boost + RSI_momentum
-confirm_pts = EMA_freshness + RSI_neutral (range -15 to +18)
+confirm_pts = EMA_freshness + RSI_neutral + MFI_aligned (range -18 to +26)
 
 # Score = conviction in CHOSEN direction only
 aligned_setup = bull_setup if direction == LONG else bear_setup
@@ -244,7 +246,30 @@ ema_bearish = ema13 < ema34 × 0.9996
 - EMA 13/34 = cross setiap ~15-20 menit → hanya fire pada real trend formation
 - Period sendiri sudah jadi filter, jadi gap bisa kecil (0.04% vs 0.08% sebelumnya)
 
-### 5.6 4H HTF Regime (Post-Audit #8 Fix)
+### 5.6 MFI — Money Flow Index (Post-Audit #11 — Replaces DVI)
+
+```python
+# Standard MFI 14-period dari 1m candles
+typical_price = (high + low + close) / 3
+raw_money_flow = typical_price × volume
+
+# 14-bar positive vs negative money flow
+mfi = 100 - (100 / (1 + positive_flow / negative_flow))
+
+# Scoring (aligned with trade direction):
+MFI > 60 + LONG  → confirm_pts +4 to +8 (money flowing IN)
+MFI < 40 + SHORT → confirm_pts +4 to +8 (money flowing OUT)
+MFI opposed      → penalty -3 (money against trade)
+MFI 40-60        → 0 (netral)
+```
+
+**Kenapa MFI > DVI:**
+- DVI = 2-min snapshot aggression (noisy, measures exhaustion)
+- MFI = 14-bar sustained money flow (smoother, measures conviction)
+- MFI two-sided: aligned = bonus, opposed = penalty (DVI was asymmetric, only add)
+- MFI uses volume (new information vs pure price-based RSI)
+
+### 5.7 4H HTF Regime (Post-Audit #8 Fix)
 
 ```
 ema10 = _ema(closes, 10)  # full 20 candles

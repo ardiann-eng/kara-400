@@ -1040,7 +1040,7 @@ class ScoringEngine:
                 "OB":   _scalper_components.get("ob_signed", 0),
                 "EMA":  _scalper_components.get("ema_pts", 0),
                 "RSI":  _scalper_components.get("rsi_pts", 0),
-                "DVI":  _scalper_components.get("dvi_pts", 0),
+                "MFI":  _scalper_components.get("mfi_pts", 0),
                 "FUND": _scalper_components.get("oi_signed", 0),
                 "LIQ":  _scalper_components.get("liq_signed", 0),
                 "XAM":  _scalper_components.get("xam_pts", 0),
@@ -1559,11 +1559,29 @@ class ScoringEngine:
                 bear_setup += abs(_xam_pts)
             reasons.append(_xam_reason)
 
-        # ── DVI — DISABLED (Audit #11, 24 Mei) ──
-        # Reason: r=-0.126 inverse, 60% fire = noise, redundant with momentum gate.
-        # Theory: DVI measures "who is aggressive NOW" but we need "will trend CONTINUE 12min".
-        # Aggressive buying at entry = often exhaustion tail, not initiation.
-        _dvi_pts = 0
+        # ── CONFIRMATION: MFI (Money Flow Index) — replaces DVI (Audit #11) ──
+        # MFI = volume-weighted RSI. Measures conviction (money) behind price move.
+        # Unlike DVI (snapshot aggression), MFI uses 14-bar lookback = smoother, less noise.
+        _mfi_pts = 0
+        if len(closes) >= 15 and len(volumes) >= 15 and len(highs_c) >= 15 and len(lows_c) >= 15:
+            # Typical price = (H + L + C) / 3
+            tp = [(highs_c[i] + lows_c[i] + closes[i]) / 3 for i in range(-15, 0)]
+            raw_mf = [tp[i] * volumes[len(volumes)-15+i] for i in range(15)]
+            pos_mf, neg_mf = 0.0, 0.0
+            for i in range(1, 15):
+                if tp[i] > tp[i-1]:
+                    pos_mf += raw_mf[i]
+                else:
+                    neg_mf += raw_mf[i]
+            mfi = 100 - (100 / (1 + pos_mf / neg_mf)) if neg_mf > 0 else 100
+            
+            if mfi > 60:
+                _mfi_pts = min(8, int((mfi - 50) / 5))
+                reasons.append(f"💰 MFI {mfi:.0f} — money flowing in (+{_mfi_pts})")
+            elif mfi < 40:
+                _mfi_pts = -min(8, int((50 - mfi) / 5))
+                reasons.append(f"💰 MFI {mfi:.0f} — money flowing out ({_mfi_pts})")
+        
 
         # OB Absorption removed — reversal signal, not compatible with trend following strategy.
         _abs_pts = 0
@@ -1723,10 +1741,13 @@ class ScoringEngine:
             f"OI={_oi_signed:+d} EMA={'bull' if ema_bullish else 'bear' if ema_bearish else 'flat'})"
         )
 
-        # DVI alignment: only add confirm points if DVI direction matches chosen side
-        if _dvi_pts != 0:
-            if (side == Side.LONG and _dvi_pts > 0) or (side == Side.SHORT and _dvi_pts < 0):
-                confirm_pts += abs(_dvi_pts)
+        # MFI alignment: only add confirm points if MFI direction matches chosen side
+        if _mfi_pts != 0:
+            if (side == Side.LONG and _mfi_pts > 0) or (side == Side.SHORT and _mfi_pts < 0):
+                confirm_pts += abs(_mfi_pts)
+            else:
+                # MFI opposing = slight penalty (money flowing against trade)
+                confirm_pts -= min(3, abs(_mfi_pts))
 
         # [AUDIT #8 FIX] Score must reflect conviction in the CHOSEN direction.
         # Before: max(bull, bear) → high score from OPPOSING setup = inverse predictive.
@@ -1770,7 +1791,7 @@ class ScoringEngine:
             out_components["ema_pts"] = int(_c_ema)
             out_components["rsi_pts"] = int(_c_rsi)
             out_components["mtf_pts"] = int(_c_mtf)
-            out_components["dvi_pts"] = int(_dvi_pts)
+            out_components["mfi_pts"] = int(_mfi_pts)
 
         return score, side, reasons
 
