@@ -1550,12 +1550,11 @@ class ScoringEngine:
 
         # ── EDGE: Delta Volume Imbalance — RE-ENABLED (side bug fixed 2026-05-24) ──
         # Root cause 0% fire: HL sends 'A' for sell, DVI checked 'S'/'Bid'. Now fixed.
+        # NOTE: side not yet determined here, alignment checked after direction vote.
         _dvi_pts = 0
         _dvi_result = self._calc_delta_volume_imbalance(asset)
         if _dvi_result[0] != 0:
             _dvi_pts = _dvi_result[0]
-            if (side == "long" and _dvi_pts > 0) or (side == "short" and _dvi_pts < 0):
-                confirm_pts += abs(_dvi_pts)
             reasons.append(_dvi_result[1])
 
         # OB Absorption removed — reversal signal, not compatible with trend following strategy.
@@ -1715,6 +1714,11 @@ class ScoringEngine:
             f"🧭 Direction: {side.value.upper()} (votes: bull={_dir_bull} bear={_dir_bear} | "
             f"OI={_oi_signed:+d} EMA={'bull' if ema_bullish else 'bear' if ema_bearish else 'flat'})"
         )
+
+        # DVI alignment: only add confirm points if DVI direction matches chosen side
+        if _dvi_pts != 0:
+            if (side == Side.LONG and _dvi_pts > 0) or (side == Side.SHORT and _dvi_pts < 0):
+                confirm_pts += abs(_dvi_pts)
 
         # [AUDIT #8 FIX] Score must reflect conviction in the CHOSEN direction.
         # Before: max(bull, bear) → high score from OPPOSING setup = inverse predictive.
