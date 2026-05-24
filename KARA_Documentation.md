@@ -1,7 +1,7 @@
 # KARA Bot — Dokumentasi Teknis Lengkap
 
-**Versi**: 8.3.0 (Post-Audit #10 — CVD→DVI Swap + Regime Fix + Binance Liq)  
-**Tanggal Dokumen**: 24 Mei 2026  
+**Versi**: 8.4.0 (Post-Audit #11 — EMA 13/34 + DVI Disabled + Regime Retuned + Liq Cluster)  
+**Tanggal Dokumen**: 24 Mei 2026 (Malam)  
 **Platform**: Hyperliquid Futures (Mainnet only — Railway blocked Bybit/Binance/OKX REST, WS OK)  
 **Mode**: Scalper only, Paper Trading  
 **Bahasa**: Python 3.10+
@@ -31,14 +31,14 @@
 
 KARA adalah bot scalping futures otomatis untuk **Hyperliquid** (DEX on-chain perpetual futures). Menggunakan **multi-factor scoring** + **direction voting system** untuk entry, dan **trailing stop** sebagai primary edge source.
 
-### Status Saat Ini (24 Mei 2026 Siang)
+### Status Saat Ini (24 Mei 2026 Malam — Post-Audit #11)
 - **Mode**: Scalper only, paper trading
 - **Users**: 4 users, ~$70/user (dari $62.50 start)
-- **Edge**: Trailing stop (100% WR, 47% firing rate — post pump gate)
+- **Edge**: Trailing stop (100% WR, 47% firing rate)
 - **Deploy**: Railway service `rare-youthfulness`
-- **Data**: Hyperliquid WS + **Binance WS liquidation stream** (baru)
-- **Last Audit (#10)**: 19 trades, WR 52.6%, PnL +$3.92, PF 1.430
-- **Pending Deploy**: CVD→DVI swap, EMA fix, regime fix, Binance liq stream
+- **Data**: Hyperliquid WS + **Binance WS liquidation stream**
+- **Last Audit (#11)**: 15 trades post-deploy, WR 46.7%, PnL +$3.98, PF 1.697
+- **Deployed**: EMA 13/34, DVI disabled, regime 10%/18%, liq cluster
 
 ### Filosofi
 - **Data > intuisi.** Metric kontradiksi hipotesis → metric menang.
@@ -72,9 +72,9 @@ main.py (orchestrator)
 ├── scan_loop (15s interval)
 │   └── ScoringEngine._run_scalper()
 │       ├── OI/Funding Analyzer (capped ±8)
-│       ├── Liquidation Analyzer (HL + Binance data)
+│       ├── Liq Cluster (Binance+HL real events, fallback OI proxy)
 │       ├── Orderbook Analyzer (score only, NOT direction)
-│       ├── DVI - Delta Volume Imbalance (2min, dollar-weighted)
+│       ├── EMA 13/34 (confirmation, direction vote)
 │       ├── Direction Voting (7 voters)
 │       ├── Filters:
 │       │   ├── Score threshold
@@ -147,25 +147,23 @@ Railway IP mendapat 403 dari Bybit/Binance/OKX REST. L/S ratio = dead code. Bina
 
 ## 5. Sistem Scoring
 
-### 5.1 Komponen Aktif (Post-Audit #10)
+### 5.1 Komponen Aktif (Post-Audit #11)
 
 | Komponen | Max Pts | Role | Status |
 |---|---|---|---|
-| OI/Funding (contrarian) | **±8** | Setup + Direction vote (weight 3) | ✅ Capped |
-| Orderbook Imbalance | ±18 | **Score only** (NOT direction) | ✅ Best predictor (r=+0.205) |
-| Liquidation | ±12 | Setup | ⚠️ Expected improve with Binance data |
-| Cross-Asset Momentum (XAM) | ±12 | Setup | ⚠️ Barely fires (0.8%) |
-| EMA Cross (8/21) | ±10 | Confirmation + Direction vote (weight 2) | ✅ Gap **0.06%** (was 0.1% = dead) |
-| RSI (14) | ±8 | Confirmation + Direction vote (weight 1) | ✅ Active (r=+0.191) |
-| **DVI (Delta Volume Imbalance)** | **±10** | **Confirmation (2min dollar-weighted)** | ✅ **Re-enabled** (side bug fixed) |
-| RSI Momentum (1m vs 5m) | ±8 | Setup | ✅ Active |
+| OI/Funding (contrarian) | **±8** | Setup + Direction vote (weight 3) | ✅ Capped, r=-0.013 netral |
+| Orderbook Imbalance | ±18 | **Score only** (NOT direction) | ✅ Best predictor (r=+0.293) |
+| **Liq Cluster** | ±12 | Setup (real cascade detection) | 🆕 Binance+HL events, replaces OI proxy |
+| Cross-Asset Momentum (XAM) | ±12 | Setup | ⚠️ Barely fires (0%) |
+| **EMA Cross (13/34)** | ±10 | Confirmation + Direction vote (weight 2) | 🔧 Period naik (was 8/21), gap 0.04% |
+| RSI (14) | ±8 | Confirmation + Direction vote (weight 1) | ✅ Best confirmation (r=+0.587) |
 
 ### Disabled
 
 | Komponen | Alasan | Audit |
 |---|---|---|
-| **CVD** | r=-0.21 INVERSE. Fire 74% = lagging constant bias. DVI replaces. | #10 |
-| DVI (old) | Was disabled for 0% fire — root cause was side bug ('A' not in sell list) | #7-9 |
+| **DVI** | r=-0.126 inverse, 60% fire = noise, redundant dgn momentum gate, measures exhaustion bukan initiation | #11 |
+| **CVD** | r=-0.21 INVERSE. Fire 74% = lagging constant bias. | #10 |
 | OB Absorption | Reversal signal, not trend-following | #4 |
 | MTF 15m | r=-0.68 inverse predictor | #6 |
 | Bybit L/S | Blocked 403 | #1 |
@@ -175,7 +173,7 @@ Railway IP mendapat 403 dari Bybit/Binance/OKX REST. L/S ratio = dead code. Bina
 ```
 bull_setup = OI_bull + OB_bull + Liq_bull + XAM_bull + EMA_boost + RSI_momentum
 bear_setup = OI_bear + OB_bear + Liq_bear + XAM_bear + EMA_boost + RSI_momentum
-confirm_pts = EMA_freshness + RSI_neutral + DVI_confirms (range -15 to +25)
+confirm_pts = EMA_freshness + RSI_neutral (range -15 to +18)
 
 # Score = conviction in CHOSEN direction only
 aligned_setup = bull_setup if direction == LONG else bear_setup
@@ -190,42 +188,63 @@ score + session_bonus (30% to score, 70% to threshold)
 score + learning_engine adjustment (−20 to +12)
 ```
 
-### 5.3 Regime Detection (Post-Audit #10 Fix)
+### 5.3 Regime Detection (Post-Audit #11 Fix)
 
 | Regime | Volatilitas/hari | Scalper Effect |
 |---|---|---|
-| LOW_VOL | < 1.5% | ×0.90 |
-| NORMAL | 1.5–**6%** | ×1.00 |
-| HIGH_VOL | **6–12%** | ×0.90 (volatile category) |
-| EXTREME | > **12%** | **Threshold +15** (hanya score 71+ lolos) |
+| LOW_VOL | < 2% | ×0.90 |
+| NORMAL | 2–**10%** | ×1.00 |
+| HIGH_VOL | **10–18%** | ×0.90 (volatile category) |
+| EXTREME | > **18%** | **Threshold +15** (hanya score 71+ lolos) |
 
-**[AUDIT #10 FIX]** Threshold dinaikkan dari 4%/8% → 6%/12%. Alasan: altcoins standar = 5-8% daily vol. Threshold lama (4%) = SEMUA altcoin di-label HIGH_VOL = permanent ×0.9 penalty yang tidak discriminate.
+**[AUDIT #11 FIX]** Threshold dinaikkan dari 6%/12% → 10%/18%. Data: realized vol altcoin (GRASS 14.4%, GMT 12.8%, NEAR 9.4%, JTO 6.3%) = semua kena HIGH_VOL di threshold lama. Crypto altcoin 6-10% daily vol = NORMAL. Hanya true spike >10% yang patut di-penalti.
 
-### 5.4 DVI - Delta Volume Imbalance (Post-Audit #10 — Replaces CVD)
+### 5.4 Liq Cluster Score (Post-Audit #11 — Replaces OI Proxy)
 
 ```python
-# Window: 2 menit terakhir (leading, bukan lagging)
-# Metric: dollar-weighted buy/sell imbalance
-recent = trades in last 120 seconds
-buy_dollar = sum(px × sz for trades where side='B')
-sell_dollar = sum(px × sz for trades where side='A')
-imbalance = (buy_dollar - sell_dollar) / (buy_dollar + sell_dollar)
+# Scan liquidation events (Binance + HL) for this asset, last 10 minutes
+recent = [e for e in cache.liquidations if e.coin == asset and e.time > now - 10min]
 
-# Threshold: 45% (was 60% — too strict)
-# Only scores when ALIGNED with trade direction
-if imbalance > 0.45 and side == LONG: confirm_pts += pts
-if imbalance < -0.45 and side == SHORT: confirm_pts += pts
-pts = min(10, int(abs(imbalance) × 12))
+# Split by direction
+long_liqs  = events where side="long"/"SELL"   # longs rekt → bearish
+short_liqs = events where side="short"/"BUY"   # shorts squeezed → bullish
+
+# Score by total notional (sum px × sz for each cluster)
+$2k+  → 4 pts
+$8k+  → 8 pts
+$20k+ → 12 pts
+
+# Only fires if ≥2 events in 10 min window
+# Falls back to OI proxy if no cluster detected
 ```
 
-**Kenapa DVI > CVD:**
-- CVD: last 80 trades (no time window) = LAGGING, fire 74%
-- DVI: last 2 minutes, dollar-weighted = LEADING, expected fire 20-40%
-- CVD r=-0.21 (inverse). DVI expected neutral-to-positive.
+**Kenapa Liq Cluster > OI Proxy:**
+- OI proxy = tebakan (OI besar + funding → "mungkin ada liquidation")
+- Liq Cluster = **real forced orders** dari Binance stream (actual cascade happening)
+- Forced liquidation = momentum continuation (bukan voluntary, jadi predictive)
+- Min 2 events + $2k notional = filter noise tanpa terlalu ketat untuk altcoin
 
-**Root cause DVI 0% fire sebelumnya:** HL kirim `side='A'` untuk sell, tapi DVI cek `('S', 'sell', 'Bid')` — 'A' tidak match → sell volume = 0 → imbalance broken.
+### 5.5 EMA Cross 13/34 (Post-Audit #11 Fix)
 
-### 5.5 4H HTF Regime (Post-Audit #8 Fix)
+```python
+ema13 = ema(closes[-34:], 13)
+ema34 = ema(closes[-34:], 34)
+
+# Gap 0.04% — period sudah jadi filter, gap hanya cegah flicker
+ema_bullish = ema13 > ema34 × 1.0004
+ema_bearish = ema13 < ema34 × 0.9996
+
+# Fresh cross (≤3 candles ago) → +10 pts
+# Medium (4-7 candles) → +4 pts
+# Stale (≥8 candles) → penalty
+```
+
+**Kenapa 13/34 > 8/21:**
+- EMA 8/21 di 1m candle = cross setiap 2-3 menit (noise) → 93% fire rate = constant = not signal
+- EMA 13/34 = cross setiap ~15-20 menit → hanya fire pada real trend formation
+- Period sendiri sudah jadi filter, jadi gap bisa kecil (0.04% vs 0.08% sebelumnya)
+
+### 5.6 4H HTF Regime (Post-Audit #8 Fix)
 
 ```
 ema10 = _ema(closes, 10)  # full 20 candles
@@ -245,7 +264,7 @@ CHOPPY:        otherwise (threshold penalty = 0, detector unreliable)
 | # | Voter | Weight | Kondisi |
 |---|---|---|---|
 | 1 | OI/Funding | 3 | `oi_signed > 3` → bull, `< -3` → bear |
-| 2 | EMA8/21 | 2 | EMA8 > EMA21×1.0006 → bull |
+| 2 | EMA13/34 | 2 | EMA13 > EMA34×1.0004 → bull |
 | 3 | Price momentum 5m | 1 | net_move > 0.1% → bull |
 | 4 | RSI momentum | 1 | RSI accelerating + price direction |
 | 5 | 4H HTF regime | 2 | TRENDING_UP → bull, DOWN → bear |
@@ -394,44 +413,44 @@ FastAPI + Tailwind + WebSocket real-time.
 | #8 | 23 Mei AM | 35 | 40% | +$1.56 | 1.587 | 40% | -0.18 |
 | #9 | 23 Mei PM | 134 | 44.8% | +$1.70 | 1.027 | 33% | -0.11 |
 | **#10** | **24 Mei AM** | **19** | **52.6%** | **+$3.92** | **1.430** | **47%** | **-0.177** |
+| **#11** | **24 Mei PM** | **15 (post-deploy)** | **46.7%** | **+$3.98** | **1.697** | **47%** | **-0.012** |
 
-### Audit #10 Findings (24 Mei 2026 Pagi)
+### Audit #11 Findings (24 Mei 2026 Malam)
 
-**Data:** 19 trades, 8.4 jam, 2.3/hr (post-pump-gate deploy)
+**Data:** 15 trades post-deploy (06:25–15:48 UTC, 9.4 jam), 1.6/hr
 
 **Wins:**
-- Pump gate BEKERJA: trailing 33% → 47%, time_exit 62% → 42%
-- WR naik 44.8% → 52.6%, PF naik 1.027 → 1.430
-- LONG dominant: 12t, WR 58%, trailing 7/12 (58%)
-- RR positif: avg win $1.30, avg loss $1.01
+- PF naik ke 1.697 (dari 1.430)
+- Score↔PnL r membaik: -0.177 → -0.012 (hampir netral, CVD disable bekerja)
+- Trailing tetap konsisten 47%, 100% WR, avg +$1.38/trade
+- LONG solid: 10 trades, WR 60%, PnL +$4.39
 
 **Problems Found + Fixes:**
 
 | # | Problem | Root Cause | Fix |
 |---|---|---|---|
-| 1 | Score↔PnL r=-0.177 (still inverse) | **CVD r=-0.21** (fire 74%, lagging) | CVD disabled, DVI enabled |
-| 2 | Bot berhenti trade (0 trades/hr) | **EMA gap 0.1% = impossible** on 1m candle | EMA gap → 0.06% |
-| 3 | Bot berhenti trade | **Regime 4% = all altcoins "volatile"** → permanent ×0.9 | Threshold → 6%/12% |
-| 4 | LIQ barely fires (8%) | HL liq data sparse | Binance forceOrder WS added |
-| 5 | DVI was 0% fire (3 audits) | Side bug: HL sends 'A', DVI checked 'S'/'Bid' | Side fixed + threshold 60%→45% |
+| 1 | EMA fire 93% + r=-0.33 inverse | Period 8/21 terlalu pendek untuk 1m → constant | EMA 13/34, gap 0.04% |
+| 2 | DVI fire 60% + r=-0.126 inverse | Measures exhaustion (siapa agresif SEKARANG), bukan continuation. Redundant dengan momentum gate. | **Disabled** |
+| 3 | Regime masih ×0.9 ALL coins | Threshold 6% terlalu rendah — altcoin normal 6-10% vol | Threshold → 10%/18% |
+| 4 | LIQ proxy = tebakan, 13% fire | OI proxy tidak punya real cascade data | **Liq Cluster** dari Binance+HL events |
 
-**Per-Component Correlation (n=19):**
+**Per-Component Correlation (n=15, post-deploy):**
 
-| Komponen | r | Verdict |
-|---|---|---|
-| EMA | +0.226 | ✅ Best confirmation |
-| OB | +0.205 | ✅ Best predictor |
-| RSI | +0.191 | ✅ Working |
-| FUND | +0.145 | ✅ Neutral-positive |
-| XAM | -0.019 | Neutral |
-| CVD | **-0.210** | ❌ INVERSE → disabled |
-| LIQ | -0.350 | ⚠️ n=2, monitor |
+| Komponen | r | Fire% | Verdict |
+|---|---|---|---|
+| RSI | +0.587 | 73% | ✅ Best confirmation |
+| OB | +0.293 | 100% | ✅ Best predictor |
+| FUND | -0.013 | 53% | ✅ Netral |
+| EMA | -0.330 | 93% | ❌ Over-firing → FIXED (13/34) |
+| DVI | -0.126 | 60% | ❌ Inverse → DISABLED |
+| LIQ | -0.315 | 13% | ⚠️ n=2 → Liq Cluster replaces |
 
-### Current Edge
-- **Trailing stop** = sole profit source. 100% WR, 47% fire rate post-pump-gate.
-- **Pump gate** = quality filter. Reduces time_exit from 62% → 42%.
-- **OB + EMA** = best predictors (r > +0.20).
+### Current Edge (Post-Audit #11)
+- **Trailing stop** = sole profit source. 100% WR, 47% fire rate.
+- **OB + RSI** = best predictors (r=+0.29, r=+0.59).
+- **Regime fix** = expected frequency boost (×0.9 removed for most coins).
+- **Liq Cluster** = untested but theoretically sound (real cascade > proxy).
 
 ---
 
-*Dokumen ini sinkron dengan Audit #10 (24 Mei 2026 pagi). Next audit: 24 Mei 2026 23:00 WIB (16:00 UTC).*
+*Dokumen ini sinkron dengan Audit #11 (24 Mei 2026 malam). Next audit: 25 Mei 2026 23:00 WIB (16:00 UTC).*

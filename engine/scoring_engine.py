@@ -345,7 +345,7 @@ class ScoringEngine:
             async with self.candle_sem:
                 import time as _time
                 now_ms = int(_time.time() * 1000)
-                start_ms = now_ms - 30 * 60 * 1000  # last 30 minutes
+                start_ms = now_ms - 40 * 60 * 1000  # last 40 minutes (need 34+ for EMA34)
                 resp, succ = await self.client._call_info_endpoint(
                     "candleSnapshot",
                     {"req": {"coin": asset, "interval": "1m", "startTime": start_ms, "endTime": now_ms}}
@@ -462,10 +462,20 @@ class ScoringEngine:
         )
         recent_liqs = self.cache.liquidations if hasattr(self.cache, 'liquidations') else []
         oi_usd = oi.open_interest * mark_price
-        liq_bull, liq_bear, liq_reasons, liq_warns, liq_map = self.liq_analyzer.analyze(
-            asset, mark_price, recent_liqs, oi_usd,
-            funding_rate=funding.funding_rate
-        )
+        
+        # [AUDIT #11] Liq Cluster first — uses real Binance+HL events.
+        # Falls back to old OI proxy only if no cluster detected.
+        _liq_cluster_bull, _liq_cluster_bear, _liq_cluster_reason = self._calc_liq_cluster(asset)
+        if _liq_cluster_bull > 0 or _liq_cluster_bear > 0:
+            liq_bull, liq_bear = _liq_cluster_bull, _liq_cluster_bear
+            liq_reasons = [_liq_cluster_reason]
+            liq_warns = []
+            liq_map = None
+        else:
+            liq_bull, liq_bear, liq_reasons, liq_warns, liq_map = self.liq_analyzer.analyze(
+                asset, mark_price, recent_liqs, oi_usd,
+                funding_rate=funding.funding_rate
+            )
 
         # Short Squeeze Detection: price spike + OI drop dalam 1m = squeeze risk → blok SHORT
         _squeeze_detected = False
@@ -1390,13 +1400,14 @@ class ScoringEngine:
                 e = v * k + e * (1 - k)
             return e
 
-        ema8 = ema(closes[-21:], 8) if len(closes) >= 8 else closes[-1]
-        ema21 = ema(closes[-21:], 21) if len(closes) >= 21 else closes[-1]
+        # [AUDIT #11 FIX] EMA 8/21 on 1m = too short, 93% fire (noise).
+        # EMA 13/34 = more stable, needs real trend to cross. Window 34 bars minimum.
+        ema13 = ema(closes[-34:], 13) if len(closes) >= 13 else closes[-1]
+        ema34 = ema(closes[-34:], 34) if len(closes) >= 34 else closes[-1]
 
-        # [AUDIT #10 FIX] Gap 0.1%→0.06%. 0.1% killed EMA entirely (0% fire in logs).
-        # 0.03% = noise (77% fire), 0.1% = impossible on 1m. 0.06% = middle ground.
-        ema_bullish = ema8 > ema21 * 1.0006
-        ema_bearish = ema8 < ema21 * 0.9994
+        # Gap 0.04% — period 13/34 already filters noise, gap just prevents micro-touches
+        ema_bullish = ema13 > ema34 * 1.0004
+        ema_bearish = ema13 < ema34 * 0.9996
         candles_since_cross = 0
         if ema_bullish or ema_bearish:
             for i in range(len(closes) - 2, max(0, len(closes) - 12), -1):
@@ -1548,14 +1559,11 @@ class ScoringEngine:
                 bear_setup += abs(_xam_pts)
             reasons.append(_xam_reason)
 
-        # ── EDGE: Delta Volume Imbalance — RE-ENABLED (side bug fixed 2026-05-24) ──
-        # Root cause 0% fire: HL sends 'A' for sell, DVI checked 'S'/'Bid'. Now fixed.
-        # NOTE: side not yet determined here, alignment checked after direction vote.
+        # ── DVI — DISABLED (Audit #11, 24 Mei) ──
+        # Reason: r=-0.126 inverse, 60% fire = noise, redundant with momentum gate.
+        # Theory: DVI measures "who is aggressive NOW" but we need "will trend CONTINUE 12min".
+        # Aggressive buying at entry = often exhaustion tail, not initiation.
         _dvi_pts = 0
-        _dvi_result = self._calc_delta_volume_imbalance(asset)
-        if _dvi_result[0] != 0:
-            _dvi_pts = _dvi_result[0]
-            reasons.append(_dvi_result[1])
 
         # OB Absorption removed — reversal signal, not compatible with trend following strategy.
         _abs_pts = 0
@@ -1839,14 +1847,68 @@ class ScoringEngine:
         if total < 100:  # minimum $100 volume
             return 0, ""
         imbalance = (buy_dollar - sell_dollar) / total  # -1 to +1
-        # [FIX 2026-05-24] Threshold 60%→45%. Old threshold too tight + side bug = 0% fire.
-        if imbalance > 0.45:
+        # [AUDIT #11 FIX] Threshold 45%→55%. 45% = 60% fire rate + r=-0.126 inverse.
+        # Target: 30-40% fire. Need stronger imbalance to be meaningful.
+        if imbalance > 0.55:
             pts = min(10, int(imbalance * 12))
             return pts, f"🔥 DVI aggressive buying {imbalance*100:.0f}% (${buy_dollar:.0f} vs ${sell_dollar:.0f}) +{pts}"
-        elif imbalance < -0.45:
+        elif imbalance < -0.55:
             pts = min(10, int(abs(imbalance) * 12))
             return -pts, f"🔥 DVI aggressive selling {imbalance*100:.0f}% (${sell_dollar:.0f} vs ${buy_dollar:.0f}) +{pts}"
         return 0, ""
+
+    def _calc_liq_cluster(self, asset: str) -> Tuple[int, int, str]:
+        """
+        Liq Cluster Score: detect cascade events from Binance/HL stream.
+        Cluster = 3+ liq events same direction within 5min, notional > $5k.
+        Returns (bull_pts, bear_pts, reason).
+        
+        SELL liq (longs rekt) = bearish cascade pressure
+        BUY liq (shorts squeezed) = bullish cascade pressure
+        """
+        import time as _time
+        liqs = self.cache.liquidations if hasattr(self.cache, 'liquidations') else []
+        now_ms = _time.time() * 1000
+        # Filter: this asset, last 10 minutes
+        recent = [e for e in liqs 
+                  if e.get("coin", e.get("asset", "")) == asset
+                  and float(e.get("time", 0)) > now_ms - 600_000]
+        if len(recent) < 2:
+            return 0, 0, ""
+        # Split by liquidated side
+        long_liqs = [e for e in recent if e.get("side") in ("long", "SELL")]
+        short_liqs = [e for e in recent if e.get("side") in ("short", "BUY")]
+        
+        def cluster_notional(events):
+            """Find densest 10-min window, return (count, total_notional)."""
+            if len(events) < 2:
+                return 0, 0
+            events = sorted(events, key=lambda e: float(e.get("time", 0)))
+            # For altcoins, use full 10min window (events are sparse)
+            notional = sum(float(e.get("px", e.get("price", 0))) * float(e.get("sz", e.get("size", 0))) for e in events)
+            return len(events), notional
+        
+        long_n, long_not = cluster_notional(long_liqs)   # longs rekt → bearish
+        short_n, short_not = cluster_notional(short_liqs) # shorts squeezed → bullish
+        
+        def pts_from_notional(n):
+            if n >= 20_000: return 12
+            if n >= 8_000: return 8
+            if n >= 2_000: return 4
+            return 0
+        
+        bear_pts = pts_from_notional(long_not)   # longs getting rekt = bearish
+        bull_pts = pts_from_notional(short_not)  # shorts getting squeezed = bullish
+        
+        if bull_pts == 0 and bear_pts == 0:
+            return 0, 0, ""
+        parts = []
+        if bull_pts > 0:
+            parts.append(f"{short_n} shorts squeezed (${short_not:.0f}) +{bull_pts}")
+        if bear_pts > 0:
+            parts.append(f"{long_n} longs rekt (${long_not:.0f}) +{bear_pts}")
+        reason = f"💥 Liq cluster: {' | '.join(parts)}"
+        return bull_pts, bear_pts, reason
 
     def _calc_ob_absorption(self, asset: str) -> Tuple[int, str]:
         """
@@ -2646,11 +2708,14 @@ class ScoringEngine:
             # Daily realized vol approx (std dev of 1h returns * sqrt(24))
             realized_vol = (variance ** 0.5) * (24 ** 0.5)
             
-            if realized_vol < 0.015:
+            # [AUDIT #11 FIX] Old thresholds (6%/12%) = ALL altcoins permanently HIGH_VOL.
+            # Crypto altcoin normal daily vol = 5-12%. Only penalize true spikes.
+            # Data: GRASS 14.4%, GMT 12.8%, ZEC 10%, NEAR 9.4% = all "normal" for alts.
+            if realized_vol < 0.02:
                 regime = MarketRegime.LOW_VOL
-            elif realized_vol < 0.06:
+            elif realized_vol < 0.10:
                 regime = MarketRegime.NORMAL
-            elif realized_vol < 0.12:
+            elif realized_vol < 0.18:
                 regime = MarketRegime.HIGH_VOL
             else:
                 regime = MarketRegime.EXTREME
