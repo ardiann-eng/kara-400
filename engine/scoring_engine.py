@@ -564,14 +564,17 @@ class ScoringEngine:
         if vol_regime in (MarketRegime.HIGH_VOL, MarketRegime.EXTREME):
             _regime_cat = "volatile"
             _regime_mult = 0.90
-        elif abs(trend_pct) >= 0.030:
+        elif abs(trend_pct) >= 0.070:
+            # [FIX 2026-05-25] Was 3% — too aggressive for crypto (3%/24h is NORMAL).
+            # 7%/24h = actual parabolic move where exhaustion is real.
             _regime_cat = "late_trend"
-            _regime_mult = 0.70  # heavy penalty — 3%+ move already happened
+            _regime_mult = 0.85  # [FIX] was 0.70 — 30% penalty killed ALL signals
             late_trend = True
-            reasons.append(f"⚠️ Late trend {trend_pct*100:.2f}%/1h — score penalized (×0.70)")
-        elif abs(trend_pct) >= 0.015:
+            reasons.append(f"⚠️ Late trend {trend_pct*100:.2f}%/24h — score penalized (×0.85)")
+        elif abs(trend_pct) >= 0.035:
+            # [FIX 2026-05-25] Was 1.5% — 1.5%/24h is noise, not trend.
             _regime_cat = "trending"
-            _regime_mult = 0.85  # mild penalty — trend underway
+            _regime_mult = 0.92  # [FIX] was 0.85
         else:
             _regime_cat = "ranging"
             _regime_mult = 1.0   # neutral — fresh move potential
@@ -727,19 +730,25 @@ class ScoringEngine:
             overlap_threshold_adj = 0
 
         # [AUDIT #6 FIX 2026-05-22] EXTREME regime: don't block, raise threshold.
+        # [FIX 2026-05-25] Reduced from +15 to +5. Score already gets ×0.9 penalty
+        # for volatile — double penalty (×0.9 score AND +15 threshold) made it impossible.
         # Data: EXTREME score<60 = WR 33.3% (-$4.83), score 71+ = WR 44.4% (+$0.91).
         # Raise threshold +15 so only high-conviction signals pass in extreme vol.
-        _vol_threshold_adj = 15 if vol_regime == MarketRegime.EXTREME else 0
+        _vol_threshold_adj = 5 if vol_regime == MarketRegime.EXTREME else 0
 
         # [AUDIT #7] Vote margin gate: low consensus = raise threshold
         # Data: margin<4 WR 50% PnL -$1.70, margin 8+ WR 66.7% PnL +$11.87
+        # [FIX 2026-05-25] Reduced from +5 to +3. Combined with regime penalty, +5 was too harsh.
         _vote_margin = _scalper_components.get("vote_margin", 99)
-        _vote_margin_adj = 5 if _vote_margin < 4 else 0
+        _vote_margin_adj = 3 if _vote_margin < 4 else 0
 
         # [AUDIT #7] OI score gate: low OI = no fundamental conviction
         # Data: OI<6 = WR 41.2% PnL -$7.05. OI>=6 = WR 69.6% PnL +$15.28
+        # [FIX 2026-05-25] Reduced from +3 to +0. OI data from HL is often 0 (not
+        # because there's no conviction, but because HL doesn't always return OI change).
+        # This was penalizing ALL trades unconditionally.
         _oi_abs = abs(_scalper_components.get("oi_signed", 0))
-        _oi_gate_adj = 3 if _oi_abs < 6 else 0
+        _oi_gate_adj = 0  # disabled — was always firing due to HL data gaps
 
         # [AUDIT #7] Funding negative bonus: contrarian LONG when shorts crowded
         # Data: funding<0 = WR 88.9% PnL +$11.09 (9 trades, 8 wins)

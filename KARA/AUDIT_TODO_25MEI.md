@@ -149,6 +149,40 @@ Deploy malam ini (24 Mei ~23:45 WIB / 16:45 UTC) berisi 5 perubahan:
 
 ---
 
+## ⚡ HOTFIX 25 Mei 06:52 WIB — Regime Multiplier & Threshold Stack
+
+**Problem:** 1 trade dalam 6 jam. Log menunjukkan 100% SKIP `score_below_threshold`.
+Root cause: regime multiplier terlalu agresif + threshold adjustments stack.
+
+| # | Fix | Before | After |
+|---|---|---|---|
+| 6 | late_trend threshold | ≥3%/24h | ≥7%/24h |
+| 7 | late_trend multiplier | ×0.70 | ×0.85 |
+| 8 | trending threshold | ≥1.5%/24h | ≥3.5%/24h |
+| 9 | trending multiplier | ×0.85 | ×0.92 |
+| 10 | EXTREME vol threshold adj | +15 | +5 |
+| 11 | vote_margin penalty | +5 | +3 |
+| 12 | oi_gate penalty | +3 | 0 (disabled) |
+
+**Rationale:** 3%/24h = normal crypto. Bot menganggap SEMUA asset "late trend" → score ×0.70 → max achievable 34 vs threshold 53-65. Impossible.
+
+### Tambahan Checklist Audit #12
+
+- [ ] **Frequency post-hotfix** — target ≥ 3/hr. Kalau masih <1/hr → ada gate lain yang blocking.
+- [ ] **Regime labels** — target: majority `ranging` (bukan `late_trend`/`trending`)
+- [ ] **Score distribution** — cek apakah scores sekarang 45-65 range (bukan 0-30)
+- [ ] **False positive check** — kalau frequency >10/hr + PF <0.8 → revert ke trending ×0.88, late_trend 5%
+
+### Red Flag Tambahan
+
+| Kondisi | Action |
+|---|---|
+| Frequency >10/hr + PF < 1.0 | Regime fix terlalu longgar, revert partial (trending ×0.88) |
+| OI gate adj removal → score↔PnL turun | Re-enable oi_gate +2 |
+| Late trend assets (7%+) WR >50% | Confirm fix correct — late trend = momentum = good |
+
+---
+
 ## Catatan
 
 ### Kenapa Deploy 5 Fix Sekaligus (Lagi)
