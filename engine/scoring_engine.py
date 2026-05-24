@@ -1030,12 +1030,10 @@ class ScoringEngine:
                 "OB":   _scalper_components.get("ob_signed", 0),
                 "EMA":  _scalper_components.get("ema_pts", 0),
                 "RSI":  _scalper_components.get("rsi_pts", 0),
-                "CVD":  _scalper_components.get("cvd_pts", 0),
+                "DVI":  _scalper_components.get("dvi_pts", 0),
                 "FUND": _scalper_components.get("oi_signed", 0),
                 "LIQ":  _scalper_components.get("liq_signed", 0),
-                "MTF":  _scalper_components.get("mtf_pts", 0),
                 "XAM":  _scalper_components.get("xam_pts", 0),
-                "DVI":  _scalper_components.get("dvi_pts", 0),
             },
             momentum_gate_passed=_mgp,
             momentum_move_pct=_mmove,
@@ -1395,11 +1393,10 @@ class ScoringEngine:
         ema8 = ema(closes[-21:], 8) if len(closes) >= 8 else closes[-1]
         ema21 = ema(closes[-21:], 21) if len(closes) >= 21 else closes[-1]
 
-        # [AUDIT #9 FIX] Gap raised 0.03%→0.1%. On 1m candles, EMA8/21 cross
-        # too frequently at 0.03% gap = 77% fire rate = constant bias (not signal).
-        # Data: EMA=10 WR 39.6% PnL -$7.05 vs EMA≤0 WR 65% PnL +$6.50.
-        ema_bullish = ema8 > ema21 * 1.001
-        ema_bearish = ema8 < ema21 * 0.999
+        # [AUDIT #10 FIX] Gap 0.1%→0.06%. 0.1% killed EMA entirely (0% fire in logs).
+        # 0.03% = noise (77% fire), 0.1% = impossible on 1m. 0.06% = middle ground.
+        ema_bullish = ema8 > ema21 * 1.0006
+        ema_bearish = ema8 < ema21 * 0.9994
         candles_since_cross = 0
         if ema_bullish or ema_bearish:
             for i in range(len(closes) - 2, max(0, len(closes) - 12), -1):
@@ -1503,31 +1500,10 @@ class ScoringEngine:
                     bear_setup += 8; _c_div = 8
                     reasons.append(f"📉 RSI momentum: RSI 1m({rsi:.0f})<5m({rsi_5m:.0f}) + price falling +8")
 
-        # ── CONFIRMATION LAYER: CVD (confirms trend direction) ──
-        # [FIX 2026-05-21] Pure trend following: CVD only scores when ALIGNED with price.
-        # [AUDIT FIX 2026-05-21 P0] CVD was constant bias (+8.48 mean, 100% firing).
-        # Raised thresholds: strong=0.35+price, mild removed. Only meaningful divergence scores.
-        recent_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
-        if len(recent_trades) >= 20:
-            sample = recent_trades[-80:]
-            buy_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('B', 'buy'))
-            sell_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('A', 'S', 'sell'))
-            cvd_total = buy_vol + sell_vol
-            if cvd_total > 0:
-                cvd_ratio = (buy_vol - sell_vol) / cvd_total
-                price_chg_3m = 0.0
-                if len(closes) >= 4:
-                    price_chg_3m = (closes[-1] - closes[-4]) / closes[-4]
-
-                # [AUDIT #9 FIX] CVD threshold raised: 25%→40%, price 0.1%→0.2%.
-                # Data: CVD fired 81% at old threshold = constant bias, not signal.
-                # CVD=0 WR 52% vs CVD=10 WR 43% = CVD was HURTING performance.
-                if cvd_ratio > 0.40 and price_chg_3m > 0.002:
-                    confirm_pts += 10; _c_cvd = 10
-                    reasons.append(f"💚 CVD confirms ({cvd_ratio*100:.0f}%) + price moving → trend")
-                elif cvd_ratio < -0.40 and price_chg_3m < -0.002:
-                    confirm_pts += 10; _c_cvd = 10
-                    reasons.append(f"❤️ CVD confirms ({cvd_ratio*100:.0f}%) + price moving → trend")
+        # ── CONFIRMATION LAYER: CVD — DISABLED (r=-0.21 inverse, replaced by DVI 2026-05-24) ──
+        # CVD fires 74% = still constant bias. When it fires, WR DROPS (36% vs 100% without).
+        # Root cause: CVD uses last 80 trades (lagging). DVI uses last 2min dollar-weighted (leading).
+        _c_cvd = 0
 
         # ── SETUP LAYER 4: Bybit Long/Short Ratio (CONTRARIAN — fade the crowd) ──
         # Ratio > 1.5 = crowd heavily long → contrarian SHORT setup
@@ -1572,8 +1548,15 @@ class ScoringEngine:
                 bear_setup += abs(_xam_pts)
             reasons.append(_xam_reason)
 
-        # ── EDGE: Delta Volume Imbalance — DISABLED (0% firing rate, 3 audits) ──
+        # ── EDGE: Delta Volume Imbalance — RE-ENABLED (side bug fixed 2026-05-24) ──
+        # Root cause 0% fire: HL sends 'A' for sell, DVI checked 'S'/'Bid'. Now fixed.
         _dvi_pts = 0
+        _dvi_result = self._calc_delta_volume_imbalance(asset)
+        if _dvi_result[0] != 0:
+            _dvi_pts = _dvi_result[0]
+            if (side == "long" and _dvi_pts > 0) or (side == "short" and _dvi_pts < 0):
+                confirm_pts += abs(_dvi_pts)
+            reasons.append(_dvi_result[1])
 
         # OB Absorption removed — reversal signal, not compatible with trend following strategy.
         _abs_pts = 0
@@ -1844,21 +1827,21 @@ class ScoringEngine:
             sz = float(t.get("sz", 0))
             dollar = px * sz
             side = t.get("side", "")
-            if side in ("B", "buy", "Ask"):
+            if side in ("B", "buy"):
                 buy_dollar += dollar
-            elif side in ("S", "sell", "Bid"):
+            elif side in ("A", "S", "sell"):
                 sell_dollar += dollar
         total = buy_dollar + sell_dollar
         if total < 100:  # minimum $100 volume
             return 0, ""
         imbalance = (buy_dollar - sell_dollar) / total  # -1 to +1
-        # Strong imbalance = aggressive positioning
-        if imbalance > 0.6:
+        # [FIX 2026-05-24] Threshold 60%→45%. Old threshold too tight + side bug = 0% fire.
+        if imbalance > 0.45:
             pts = min(10, int(imbalance * 12))
-            return pts, f"🔥 Aggressive buying {imbalance*100:.0f}% (${buy_dollar:.0f} vs ${sell_dollar:.0f}) +{pts}"
-        elif imbalance < -0.6:
+            return pts, f"🔥 DVI aggressive buying {imbalance*100:.0f}% (${buy_dollar:.0f} vs ${sell_dollar:.0f}) +{pts}"
+        elif imbalance < -0.45:
             pts = min(10, int(abs(imbalance) * 12))
-            return -pts, f"🔥 Aggressive selling {imbalance*100:.0f}% (${sell_dollar:.0f} vs ${buy_dollar:.0f}) +{pts}"
+            return -pts, f"🔥 DVI aggressive selling {imbalance*100:.0f}% (${sell_dollar:.0f} vs ${buy_dollar:.0f}) +{pts}"
         return 0, ""
 
     def _calc_ob_absorption(self, asset: str) -> Tuple[int, str]:
@@ -2661,9 +2644,9 @@ class ScoringEngine:
             
             if realized_vol < 0.015:
                 regime = MarketRegime.LOW_VOL
-            elif realized_vol < 0.04:
+            elif realized_vol < 0.06:
                 regime = MarketRegime.NORMAL
-            elif realized_vol < 0.08:
+            elif realized_vol < 0.12:
                 regime = MarketRegime.HIGH_VOL
             else:
                 regime = MarketRegime.EXTREME

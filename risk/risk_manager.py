@@ -1437,6 +1437,18 @@ class RiskManager:
                 }
 
             # ── L3: Hard time limit ──────────────────────────────────────────
+            # [AUDIT #10 FIX] Grace period for high-conviction flat trades.
+            # AR SHORT sc=80: direction benar, tapi dump delayed 5-10min setelah time_exit.
+            # Grace = +10min HANYA jika: score≥70 + loss<0.3% + belum grace sebelumnya.
+            _grace_extended = getattr(position, '_grace_extended', False)
+            if (not _grace_extended
+                    and entry_score >= 70
+                    and hold_minutes >= effective_max
+                    and floating > -0.003
+                    and not position.tp1_hit):
+                position._grace_extended = True
+                effective_max += 10.0  # extend 10 menit
+
             if hold_minutes >= effective_max:
                 if floating > 0:
                     # Profit saat time limit → exit, ambil sisa

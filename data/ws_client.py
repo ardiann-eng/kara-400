@@ -302,3 +302,101 @@ class MarketDataCache:
 
 # Global cache singleton
 market_cache = MarketDataCache()
+
+
+# ──────────────────────────────────────────────
+# BINANCE LIQUIDATION STREAM (free, no API key)
+# ──────────────────────────────────────────────
+# Binance futures forceOrder WS provides ALL liquidation events across all pairs.
+# Volume 10-50x higher than Hyperliquid → much better liquidation detection.
+# REST API is 403 blocked from Railway, but WebSocket WORKS.
+
+BINANCE_LIQ_URL = "wss://fstream.binance.com/ws/!forceOrder@arr"
+
+# Map Binance symbols to KARA asset names (strip "USDT"/"USDC" suffix)
+def _binance_symbol_to_coin(symbol: str) -> str:
+    for suffix in ("USDT", "USDC", "BUSD"):
+        if symbol.endswith(suffix):
+            return symbol[: -len(suffix)]
+    return symbol
+
+
+class BinanceLiquidationStream:
+    """
+    Connects to Binance Futures forceOrder stream and feeds liquidation events
+    into the shared MarketDataCache. Runs as background task alongside HL WS.
+    """
+
+    def __init__(self, cache: MarketDataCache):
+        self._cache = cache
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._connected = False
+
+    async def start(self):
+        self._running = True
+        self._task = asyncio.create_task(self._run_loop())
+        log.info("[BinanceLiq] Starting Binance liquidation stream...")
+
+    async def stop(self):
+        self._running = False
+        if self._task:
+            self._task.cancel()
+
+    async def _run_loop(self):
+        while self._running:
+            try:
+                await self._connect_and_listen()
+            except Exception as e:
+                if not self._running:
+                    break
+                log.warning(f"[BinanceLiq] Disconnected: {e}. Reconnecting in 5s...")
+                await asyncio.sleep(5)
+
+    async def _connect_and_listen(self):
+        async with websockets.connect(
+            BINANCE_LIQ_URL, ping_interval=20, ping_timeout=10, close_timeout=5
+        ) as ws:
+            self._connected = True
+            log.info("[BinanceLiq] Connected to Binance forceOrder stream")
+            async for raw in ws:
+                if not self._running:
+                    break
+                try:
+                    msg = json.loads(raw)
+                    self._process(msg)
+                except Exception:
+                    pass
+            self._connected = False
+
+    def _process(self, msg: dict):
+        """
+        Binance forceOrder format:
+        {"e":"forceOrder","E":ts,"o":{"s":"BTCUSDT","S":"SELL","p":"9910","q":"0.014",...}}
+
+        S="SELL" means a LONG position was liquidated (forced sell) → bearish pressure
+        S="BUY"  means a SHORT position was liquidated (forced buy) → bullish pressure
+        """
+        order = msg.get("o", {})
+        if not order:
+            return
+        symbol = order.get("s", "")
+        coin = _binance_symbol_to_coin(symbol)
+        price = float(order.get("p", 0))
+        qty = float(order.get("q", 0))
+        liq_side = order.get("S", "")  # BUY or SELL
+
+        if not coin or price == 0:
+            return
+
+        # Normalize to KARA format: side = the position that got liquidated
+        # Binance S="SELL" → long got liquidated, S="BUY" → short got liquidated
+        normalized = {
+            "coin": coin,
+            "px": price,
+            "sz": qty,
+            "side": "long" if liq_side == "SELL" else "short",
+            "source": "binance",
+            "time": msg.get("E", int(time.time() * 1000)),
+        }
+        self._cache.on_liquidations([normalized])

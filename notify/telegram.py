@@ -3172,12 +3172,17 @@ class KaraTelegram:
             # ── Categorize reasons ────────────────────────────────────
             tech_list, fund_list, liq_list, pattern_list = [], [], [], []
             for r in (bd.reasons or []):
+                low = r.lower()
+                # Skip disabled/verbose items
+                if "cvd" in low:
+                    continue
+                if any(x in low for x in ["flat/noise funding", "funding trend:", "very low oi", "neutral funding, oi tension"]):
+                    continue
                 safe_r = html.escape(r.strip('• '))
                 row = f"• {safe_r}"
-                low = r.lower()
                 if any(x in low for x in ["rejection wick", "rsi divergence", "bearish rsi", "bullish rsi", "squeeze", "divergence"]):
                     pattern_list.append(row)
-                elif any(x in low for x in ["ema", "rsi", "regime", "mtf", "volume surge", "cvd", "momentum", "session", "trending", "ranging", "volatile", "mean-reversion"]):
+                elif any(x in low for x in ["ema", "rsi", "regime", "mtf", "volume surge", "dvi", "momentum", "session", "trending", "ranging", "volatile", "mean-reversion"]):
                     tech_list.append(row)
                 elif any(x in low for x in ["funding", "basis", "oi/funding", "pred", "flow"]):
                     fund_list.append(row)
@@ -3215,23 +3220,6 @@ class KaraTelegram:
 
             # ── SHORT-specific risk panel ─────────────────────────────
             short_risk_text = ""
-            if is_short:
-                fr = getattr(signal, 'funding_rate', None)
-                fr_line = ""
-                if fr is not None:
-                    fr_pct = fr * 100
-                    if fr > 0.00005:
-                        fr_line = f"• 💸 Funding rate <b>{fr_pct:.4f}%/8h</b> — longs crowded, SHORT favorable."
-                    elif fr > 0:
-                        fr_line = f"• 💸 Funding rate <b>{fr_pct:.4f}%/8h</b> — normal, risiko rendah."
-                    else:
-                        fr_line = f"• 💸 Funding rate <b>{fr_pct:.4f}%/8h</b> — negatif, SHORT <i>menerima</i> pembayaran."
-                short_risk_lines = [
-                    fr_line,
-                    "• ⚠️ SHORT threshold lebih ketat: skor ≥ <b>62</b>.",
-                    "• 🔥 Squeeze guard aktif — entry diblok jika price spike &gt;1% + OI drop &gt;5% dalam 1m.",
-                ]
-                short_risk_text = "\n\n🔴 <b>Risiko SHORT:</b>\n" + "\n".join(x for x in short_risk_lines if x)
 
             side_label = "SHORT 🔴" if is_short else "LONG 🟢"
 
@@ -3242,8 +3230,8 @@ class KaraTelegram:
                 def _fmt(v):
                     return f"+{v}" if v > 0 else str(v)
                 parts = []
-                for k in ["OB", "EMA", "RSI", "CVD", "FUND", "LIQ", "MTF"]:
-                    if k in comps:
+                for k in ["OB", "EMA", "RSI", "DVI", "FUND", "LIQ"]:
+                    if k in comps and comps[k] != 0:
                         parts.append(f"{k}:<b>{_fmt(comps[k])}</b>")
                 if parts:
                     comp_line = "\n\n🔬 <b>Komponen Skor:</b>\n" + "  ".join(parts)
