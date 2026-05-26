@@ -2479,16 +2479,33 @@ class KaraTelegram:
         elif action_type == "stop_loss":
             total_pnl  = pos.pnl_realized + pnl
             loss_pct   = abs(pnl_pct)
-            text = (
-                "🛑 <b>STOP LOSS — {asset}</b>\n"
-                "Entry   : <code>${entry:,.4f}</code>\n"
-                "SL hit  : <code>${sl:,.4f}</code>\n"
-                "Loss    : <b>-{loss_idr} (-{lpct:.2f}%)</b>\n"
-                "Modal   : Dilindungi 🛡️"
-            ).format(
-                asset=pos.asset, entry=entry,
-                sl=pos.stop_loss, loss_idr=format_idr(abs(total_pnl)), lpct=loss_pct
-            )
+            
+            # [AUDIT #12 FIX] Differentiate between REAL stop loss (actual loss)
+            # vs BREAKEVEN stop loss (SL moved to entry after TP1/TP2 hit).
+            # User was confused: seeing "STOP LOSS" after TP1+TP2 profit = misleading.
+            if getattr(pos, 'tp1_hit', False):
+                # This is a breakeven/profit-lock exit, NOT a real loss
+                total_sign = "+" if total_pnl >= 0 else ""
+                text = (
+                    f"🛡️ <b>BREAKEVEN EXIT — {pos.asset}</b>\n\n"
+                    f"<i>Sisa posisi ditutup di breakeven. Profit sudah diamankan di TP1"
+                    f"{'/TP2' if getattr(pos, 'tp2_hit', False) else ''}.</i>\n\n"
+                    f"  • Entry    : <code>${format_price(entry)}</code>\n"
+                    f"  • Exit     : <code>${format_price(current)}</code>\n"
+                    f"  • Sisa PnL : <b>{total_sign}{format_idr(total_pnl)}</b>\n"
+                    f"  • Status   : Profit sudah aman ✅\n\n"
+                    f"<i>Total trade ini net profit dari partial close sebelumnya.</i>"
+                )
+            else:
+                # Real stop loss — actual loss
+                text = (
+                    f"🛑 <b>STOP LOSS — {pos.asset}</b>\n\n"
+                    f"<i>SL terpicu. Modal dilindungi dari kerugian lebih besar.</i>\n\n"
+                    f"  • Entry   : <code>${format_price(entry)}</code>\n"
+                    f"  • SL hit  : <code>${format_price(pos.stop_loss)}</code>\n"
+                    f"  • Loss    : <b>-{format_idr(abs(total_pnl))} (-{loss_pct:.2f}%)</b>\n"
+                    f"  • Modal   : Dilindungi 🛡️"
+                )
 
         else:
             msg = action.get("message", "")

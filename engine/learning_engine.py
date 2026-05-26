@@ -103,7 +103,7 @@ class LearningEngine:
         pattern_key = f"{asset}_{side}_{regime}"
         pattern = self._patterns.get(pattern_key)
 
-        if pattern and pattern.n >= 5:
+        if pattern and pattern.n >= 3:
             wr = pattern.ema_wr
 
             if wr < 0.25:
@@ -112,7 +112,7 @@ class LearningEngine:
                 opp_key = f"{asset}_{opposite_side}_{regime}"
                 opp_pattern = self._patterns.get(opp_key)
 
-                if opp_pattern and opp_pattern.n >= 3 and opp_pattern.ema_wr > 0.50:
+                if opp_pattern and opp_pattern.n >= 2 and opp_pattern.ema_wr > 0.50:
                     # Opposite side is profitable → FLIP
                     decision.flip_side = True
                     decision.score_adj = 5  # small bonus for flipped trade
@@ -132,8 +132,8 @@ class LearningEngine:
                 decision.score_adj = -10
                 decision.reason = f"[LEARN] {pattern_key} WR={wr:.0%} n={pattern.n} → -10 pts"
 
-            elif wr > 0.80 and pattern.n >= 8:
-                # Excellent pattern — strong bonus
+            elif wr > 0.80 and pattern.n >= 5:
+                # Excellent pattern — strong bonus (need 5 for high confidence boost)
                 decision.score_adj = 12
                 decision.size_mult = 1.2
                 decision.reason = f"[LEARN-BOOST] {pattern_key} WR={wr:.0%} n={pattern.n} → +12 pts, size×1.2"

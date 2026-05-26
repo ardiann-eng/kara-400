@@ -463,8 +463,17 @@ class ScoringEngine:
         recent_liqs = self.cache.liquidations if hasattr(self.cache, 'liquidations') else []
         oi_usd = oi.open_interest * mark_price
         
-        # [AUDIT #11] Liq Cluster first — uses real Binance+HL events.
-        # Falls back to old OI proxy only if no cluster detected.
+        # [AUDIT #11] Liq Cluster — uses real Binance+HL events.
+        # [AUDIT #12 FIX] OI proxy fallback DISABLED. Root cause:
+        # 1. Binance forceOrder stream connects but sends 0 events (geo-blocked data)
+        # 2. _calc_liq_cluster ALWAYS returns 0 (no real events ever arrive)
+        # 3. OI proxy fallback fires on EVERY signal with funding-based direction
+        # 4. Direction often CONTRADICTS trade direction (e.g. SHORT + bullish liq tilt)
+        # 5. Result: 8 trades with liq, 7 LOSS, WR 12.5%, PnL -$7.37
+        # 6. 100% of liq-tagged trades had INTERNAL CONTRADICTION (liq vs trade direction)
+        #
+        # Fix: Only use real liq cluster events. If none → liq_bull = liq_bear = 0.
+        # OI proxy was a theoretical model that ACTIVELY HARMED performance.
         _liq_cluster_bull, _liq_cluster_bear, _liq_cluster_reason = self._calc_liq_cluster(asset)
         if _liq_cluster_bull > 0 or _liq_cluster_bear > 0:
             liq_bull, liq_bear = _liq_cluster_bull, _liq_cluster_bear
@@ -472,10 +481,11 @@ class ScoringEngine:
             liq_warns = []
             liq_map = None
         else:
-            liq_bull, liq_bear, liq_reasons, liq_warns, liq_map = self.liq_analyzer.analyze(
-                asset, mark_price, recent_liqs, oi_usd,
-                funding_rate=funding.funding_rate
-            )
+            # No real liq events → zero contribution. Don't guess with OI proxy.
+            liq_bull, liq_bear = 0, 0
+            liq_reasons = []
+            liq_warns = []
+            liq_map = None
 
         # Short Squeeze Detection: price spike + OI drop dalam 1m = squeeze risk → blok SHORT
         _squeeze_detected = False
@@ -777,6 +787,22 @@ class ScoringEngine:
 
         # SHORT-specific filters: higher threshold + funding rate confirmation + squeeze guard
         if side == Side.SHORT:
+            # [AUDIT #12 FIX] Block SHORT if OB is bullish (bid wall = support below).
+            # Data: 3 SHORT trades with OB=+10 (bullish) → ALL LOSS.
+            # Root cause: OB excluded from direction voting, so bot can SHORT
+            # even when orderbook shows strong bid support. This is internal
+            # contradiction — shorting into support = catching a bounce.
+            _ob_score = _scalper_components.get("ob_signed", 0)
+            if _ob_score > 0:
+                log.info(
+                    f"[SKIP] {asset} | score={score} | side=SHORT | "
+                    f"reason=ob_bullish_contradiction | context=ob_signed={_ob_score} "
+                    f"(bid wall = support, contradicts SHORT)"
+                )
+                self.skip_counters["ob_bullish_contradiction"] = self.skip_counters.get("ob_bullish_contradiction", 0) + 1
+                self._skip_count_since_summary += 1
+                return None, score
+
             short_min = getattr(config.SIGNAL, 'min_score_short_signal', 62)
             if score < short_min:
                 log.info(
@@ -1419,12 +1445,17 @@ class ScoringEngine:
         ema_bearish = ema13 < ema34 * 0.9996
         candles_since_cross = 0
         if ema_bullish or ema_bearish:
+            # [AUDIT #12 FIX] Was using EMA 8/21 for freshness detection while
+            # cross detection uses 13/34. This MISMATCH caused candles_since_cross
+            # to always be >=8 (because 8/21 crosses much earlier than 13/34),
+            # resulting in permanent -5 stale penalty on ALL signals.
+            # Fix: use same periods (13/34) for freshness check.
             for i in range(len(closes) - 2, max(0, len(closes) - 12), -1):
-                if i < 8:
+                if i < 34:
                     break
-                e8 = ema(closes[:i + 1], 8)
-                e21 = ema(closes[:i + 1], 21) if i >= 21 else closes[i]
-                same_dir = (e8 > e21) if ema_bullish else (e8 < e21)
+                e13_hist = ema(closes[:i + 1], 13)
+                e34_hist = ema(closes[:i + 1], 34)
+                same_dir = (e13_hist > e34_hist) if ema_bullish else (e13_hist < e34_hist)
                 if same_dir:
                     candles_since_cross += 1
                 else:
@@ -1571,6 +1602,12 @@ class ScoringEngine:
         # ── CONFIRMATION: MFI (Money Flow Index) — replaces DVI (Audit #11) ──
         # MFI = volume-weighted RSI. Measures conviction (money) behind price move.
         # Unlike DVI (snapshot aggression), MFI uses 14-bar lookback = smoother, less noise.
+        # [AUDIT #12 FIX] MFI bearish DISABLED for SHORT signals.
+        # Data: 15 SHORT trades with MFI bearish → WR 40%, PnL -$5.67.
+        # Root cause: MFI on 1m altcoin candles is STRUCTURALLY always low (1-36)
+        # because volume is small/lumpy and typical price drifts down.
+        # MFI "bearish" is not a real signal — it's a timeframe artifact.
+        # MFI bullish (>60) for LONG remains useful (WR 50%, PnL +$2.10).
         _mfi_pts = 0
         if len(closes) >= 15 and len(volumes) >= 15 and len(highs_c) >= 15 and len(lows_c) >= 15:
             # Typical price = (H + L + C) / 3
@@ -1585,11 +1622,10 @@ class ScoringEngine:
             mfi = 100 - (100 / (1 + pos_mf / neg_mf)) if neg_mf > 0 else 100
             
             if mfi > 60:
+                # Bullish MFI — useful for LONG confirmation
                 _mfi_pts = min(8, int((mfi - 50) / 5))
                 reasons.append(f"💰 MFI {mfi:.0f} — money flowing in (+{_mfi_pts})")
-            elif mfi < 40:
-                _mfi_pts = -min(8, int((50 - mfi) / 5))
-                reasons.append(f"💰 MFI {mfi:.0f} — money flowing out ({_mfi_pts})")
+            # Bearish MFI disabled — structural bias on 1m altcoin, not a real signal
         
 
         # OB Absorption removed — reversal signal, not compatible with trend following strategy.
@@ -1822,10 +1858,11 @@ class ScoringEngine:
             if len(history) < 2:
                 continue
             now_mono = time.monotonic()
-            # 2-minute return of leader
-            pts_2m = [(t, p) for t, p in history if t > now_mono - 120]
-            if len(pts_2m) >= 2:
-                move = (pts_2m[-1][1] - pts_2m[0][1]) / pts_2m[0][1]
+            # [AUDIT #12 FIX] Window 2min → 5min. BTC rarely moves 0.15% in 2min
+            # during low-vol periods. 5min gives more time to detect real moves.
+            pts_5m = [(t, p) for t, p in history if t > now_mono - 300]
+            if len(pts_5m) >= 2:
+                move = (pts_5m[-1][1] - pts_5m[0][1]) / pts_5m[0][1]
                 leader_moves.append(move)
         if not leader_moves:
             return 0, ""
@@ -1835,13 +1872,15 @@ class ScoringEngine:
         my_move = 0.0
         if len(my_history) >= 2:
             now_mono = time.monotonic()
-            pts_2m = [(t, p) for t, p in my_history if t > now_mono - 120]
-            if len(pts_2m) >= 2:
-                my_move = (pts_2m[-1][1] - pts_2m[0][1]) / pts_2m[0][1]
+            pts_5m = [(t, p) for t, p in my_history if t > now_mono - 300]
+            if len(pts_5m) >= 2:
+                my_move = (pts_5m[-1][1] - pts_5m[0][1]) / pts_5m[0][1]
         # Edge: leader moved significantly but alt hasn't followed proportionally
-        leader_threshold = 0.0015  # 0.15% move in 2min (lowered from 0.2%)
+        # [AUDIT #12 FIX] Threshold 0.15% → 0.10%. Combined with 5min window,
+        # this should fire during normal BTC moves (not just spikes).
+        leader_threshold = 0.0010  # 0.10% move in 5min
         if avg_leader > leader_threshold and my_move < avg_leader * 0.5:
-            pts = min(12, int(avg_leader * 4000))  # scale: 0.15%=6, 0.3%=12
+            pts = min(12, int(avg_leader * 4000))  # scale: 0.10%=4, 0.25%=10, 0.3%=12
             return pts, f"🔗 BTC/ETH leading +{avg_leader*100:.2f}%, {asset} lagging → LONG +{pts}"
         elif avg_leader < -leader_threshold and my_move > avg_leader * 0.5:
             pts = min(12, int(abs(avg_leader) * 4000))
@@ -2154,6 +2193,19 @@ class ScoringEngine:
             time_exit_min = max(time_exit_min - 5, 8)
             tp2_pct = tp2_pct * 1.3
             reasons.append("Late-trend: -5min time, +30% TP2")
+
+        # [AUDIT #12 FIX] SHORT-specific exit adjustments.
+        # Data: SHORT avg favorable move = 0.39% (vs LONG 0.74%).
+        # SHORT winners hold avg 13.2min (vs LONG 13.8min — similar).
+        # Problem: TP1 same as LONG but SHORT moves are smaller/slower.
+        # Fix: Lower TP1 for SHORT (easier to reach) + slightly more hold time.
+        if side == Side.SHORT:
+            # TP1 reduction: SHORT needs lower target to activate trailing
+            # Data: 0/22 failed SHORT trades even got close to 0.3% move
+            tp1_pct = tp1_pct * 0.70  # e.g. 0.6% → 0.42%, 0.8% → 0.56%
+            # Hold time extension: SHORT winners need 13.2min avg
+            time_exit_min = time_exit_min + 3  # give 3 extra minutes
+            reasons.append(f"📉 SHORT exit adj: TP1×0.70={tp1_pct*100:.2f}%, hold+3={time_exit_min}m")
 
         # Fade mode override: contrarian entry = tighter SL, wider TP (asymmetric RR)
         if fade_mode:
