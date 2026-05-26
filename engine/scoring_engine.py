@@ -1027,29 +1027,56 @@ class ScoringEngine:
                     _total_disp = (_high_30 - _closes[-1]) / _closes[-1] if _closes[-1] > 0 else 0
                 _not_overextended = _total_disp < _max_displacement
 
-                # Thresholds: SHORT more strict (crypto upward bias)
-                _vol_surge_min = 2.0 if side == Side.SHORT else 1.5
-                _price_accel_min = 1.2
+                # Thresholds differ by side:
+                # LONG: need momentum starting (vol surge + acceleration)
+                # SHORT: need momentum FADING (vol surge OR deceleration — crypto upward bias means shorts work when momentum dies)
                 _max_move = 0.007  # 0.7%
 
-                _pump_starting = (
-                    _vol_surge >= _vol_surge_min and
-                    _last_candle >= _avg_candle * _price_accel_min and
-                    _move_5m < _max_move and
-                    _direction_match and
-                    _coin_alive and
-                    _not_overextended
-                )
+                if side == Side.LONG:
+                    # LONG: vol_surge OR accel (not AND — either confirms momentum starting)
+                    _vol_surge_min = 1.5
+                    _price_accel_min = 1.2
+                    _pump_starting = (
+                        (_vol_surge >= _vol_surge_min or _last_candle >= _avg_candle * _price_accel_min) and
+                        _move_5m < _max_move and
+                        _direction_match and
+                        _coin_alive and
+                        _not_overextended
+                    )
+                else:
+                    # SHORT: vol confirms selling pressure, but accel should be LOW (momentum fading)
+                    # Good short entry = high volume + decelerating price (exhaustion)
+                    _vol_surge_min = 1.5  # lowered from 2.0 — shorts don't need extreme vol
+                    _pump_starting = (
+                        _vol_surge >= _vol_surge_min and
+                        _move_5m < _max_move and
+                        _direction_match and
+                        _coin_alive and
+                        _not_overextended
+                    )
+                    # Note: accel requirement REMOVED for shorts — shorts profit from
+                    # momentum exhaustion, not acceleration
 
                 if not _pump_starting:
-                    _reason = (
-                        f"vol_surge={_vol_surge:.1f}x(need {_vol_surge_min}x) "
-                        f"accel={_last_candle/_avg_candle:.1f}x(need {_price_accel_min}x) "
-                        f"move={_move_5m*100:.2f}%(max {_max_move*100:.1f}%) "
-                        f"dir={'ok' if _direction_match else 'wrong'} "
-                        f"alive={'ok' if _coin_alive else 'dead'} "
-                        f"disp={_total_disp*100:.1f}%(max {_max_displacement*100:.0f}%)"
-                    )
+                    _accel_ratio = _last_candle / _avg_candle if _avg_candle > 0 else 0
+                    if side == Side.LONG:
+                        _reason = (
+                            f"vol_surge={_vol_surge:.1f}x(need {_vol_surge_min}x) "
+                            f"accel={_accel_ratio:.1f}x(need {_price_accel_min}x) "
+                            f"[need vol OR accel] "
+                            f"move={_move_5m*100:.2f}%(max {_max_move*100:.1f}%) "
+                            f"dir={'ok' if _direction_match else 'wrong'} "
+                            f"alive={'ok' if _coin_alive else 'dead'} "
+                            f"disp={_total_disp*100:.1f}%(max {_max_displacement*100:.0f}%)"
+                        )
+                    else:
+                        _reason = (
+                            f"vol_surge={_vol_surge:.1f}x(need {_vol_surge_min}x) "
+                            f"move={_move_5m*100:.2f}%(max {_max_move*100:.1f}%) "
+                            f"dir={'ok' if _direction_match else 'wrong'} "
+                            f"alive={'ok' if _coin_alive else 'dead'} "
+                            f"disp={_total_disp*100:.1f}%(max {_max_displacement*100:.0f}%)"
+                        )
                     log.info(
                         f"[SKIP] {asset} | score={score} | side={side.value} | "
                         f"reason=pump_not_starting | context={_reason}"

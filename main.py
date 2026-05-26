@@ -1317,6 +1317,34 @@ class KaraBot:
                     continue
 
                 # If approved, proceed to auto-execution
+                # ── FIX 3: Entry confirmation — wait 5s, re-check price direction ──
+                # Prevents entering right at a micro-reversal point (4-min SL hits)
+                _entry_price_before = user_signal.entry_price
+                await asyncio.sleep(5)  # 5 second confirmation delay
+                
+                # Re-fetch current price
+                try:
+                    _confirm_price = await self.hl_client.get_mark_price(user_signal.asset)
+                    if _confirm_price and _confirm_price > 0:
+                        _price_delta_pct = (_confirm_price - _entry_price_before) / _entry_price_before
+                        # LONG: price should not have dropped >0.15% in 5s (reversal signal)
+                        # SHORT: price should not have risen >0.15% in 5s
+                        _reversal_threshold = -0.0015 if user_signal.side.value == 'long' else 0.0015
+                        _is_reversing = (
+                            (_price_delta_pct < _reversal_threshold) if user_signal.side.value == 'long'
+                            else (_price_delta_pct > _reversal_threshold)
+                        )
+                        if _is_reversing:
+                            log.info(
+                                f"[SKIP-CONFIRM] {user_signal.asset} {user_signal.side.value.upper()} | "
+                                f"Price moved {_price_delta_pct*100:.3f}% in 5s — reversal detected, skipping entry"
+                            )
+                            continue
+                        # Update entry price to current (more accurate fill)
+                        user_signal.entry_price = _confirm_price
+                except Exception as _e:
+                    log.debug(f"[CONFIRM] Price re-check failed for {user_signal.asset}: {_e}, proceeding anyway")
+
                 user_signal.auto_executed = True
                 user_db.save_signal(user_signal) # v17 Sync
                 await self.telegram.send_signal(user_signal, is_auto=True, target_chat_id=chat_id)
