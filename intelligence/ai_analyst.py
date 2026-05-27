@@ -355,12 +355,18 @@ def _ensure_ai_table():
                 fake_breakout_risk REAL,
                 momentum_quality TEXT,
                 market_state TEXT,
+                risk_note TEXT,
                 reasoning TEXT,
                 latency_ms REAL,
                 pnl REAL,
                 created_at REAL DEFAULT (strftime('%s', 'now'))
             )
         """)
+        # Migrate: add risk_note column if not exists (for existing DBs)
+        try:
+            conn.execute("ALTER TABLE ai_verdicts ADD COLUMN risk_note TEXT")
+        except Exception:
+            pass  # column already exists
         conn.commit()
     except Exception as e:
         log.debug(f"[AI] Table creation: {e}")
@@ -376,14 +382,14 @@ def save_ai_verdict(asset: str, side: str, score_before: int, verdict: AIVerdict
             """INSERT INTO ai_verdicts 
                (trade_id, asset, side, score_before, score_after, confidence, 
                 score_adj, fake_breakout_risk, momentum_quality, market_state, 
-                reasoning, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                risk_note, reasoning, latency_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 trade_id, asset, side, score_before,
                 score_before + verdict.score_adj,
                 verdict.confidence, verdict.score_adj,
                 verdict.fake_breakout_risk, verdict.momentum_quality,
-                verdict.market_state, verdict.reasoning, verdict.latency_ms,
+                verdict.market_state, verdict.risk_note, verdict.reasoning, verdict.latency_ms,
             )
         )
         conn.commit()

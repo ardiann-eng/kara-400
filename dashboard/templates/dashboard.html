@@ -1235,6 +1235,85 @@
     </div>
   </div>
 
+  <!-- AI VERDICT DETAIL CARD -->
+  <div id="ai-card-overlay" onclick="closeAICard()" style="display:none;position:fixed;inset:0;z-index:150;background:rgba(8,8,16,.75);backdrop-filter:blur(8px);align-items:center;justify-content:center">
+    <div id="ai-card-box" onclick="event.stopPropagation()" style="width:100%;max-width:520px;margin:16px;border-radius:20px;background:rgba(18,18,32,.97);border:1px solid rgba(196,181,253,.18);box-shadow:0 24px 80px rgba(0,0,0,.6),0 0 40px rgba(139,92,246,.12);overflow:hidden">
+      <!-- Header -->
+      <div style="padding:20px 24px 16px;border-bottom:1px solid rgba(196,181,253,.08);display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+        <div style="display:flex;align-items:center;gap:12px">
+          <div style="width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,rgba(139,92,246,.4),rgba(196,181,253,.15));border:1px solid rgba(196,181,253,.2);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#c4b5fd" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+          </div>
+          <div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span id="acd-asset" style="font-family:'JetBrains Mono',monospace;font-size:1.1rem;font-weight:700;color:#fff">--</span>
+              <span id="acd-side" style="font-family:'JetBrains Mono',monospace;font-size:.75rem;font-weight:600;padding:2px 10px;border-radius:999px">--</span>
+            </div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:.7rem;color:rgba(196,181,253,.4);margin-top:3px">AI VERDICT BREAKDOWN</div>
+          </div>
+        </div>
+        <button onclick="closeAICard()" style="background:rgba(255,255,255,.05);border:1px solid rgba(196,181,253,.12);color:rgba(196,181,253,.5);border-radius:8px;padding:6px 12px;font-size:.75rem;cursor:pointer;font-family:'JetBrains Mono',monospace">✕ CLOSE</button>
+      </div>
+      <!-- Metrics Row -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:rgba(196,181,253,.06)">
+        <div style="background:rgba(18,18,32,.97);padding:14px 16px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.4);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Score</div>
+          <div id="acd-score" style="font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:600;color:#fff">--</div>
+        </div>
+        <div style="background:rgba(18,18,32,.97);padding:14px 16px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.4);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Confidence</div>
+          <div id="acd-conf" style="font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:600">--</div>
+        </div>
+        <div style="background:rgba(18,18,32,.97);padding:14px 16px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.4);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Score Adj</div>
+          <div id="acd-adj" style="font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:600">--</div>
+        </div>
+      </div>
+      <!-- State + PnL Row -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:rgba(196,181,253,.06)">
+        <div style="background:rgba(18,18,32,.97);padding:14px 16px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.4);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Market State</div>
+          <div id="acd-state" style="font-family:'JetBrains Mono',monospace;font-size:.85rem;font-weight:600;color:#c4b5fd">--</div>
+        </div>
+        <div style="background:rgba(18,18,32,.97);padding:14px 16px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.4);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Fake BO Risk</div>
+          <div id="acd-fbo" style="font-family:'JetBrains Mono',monospace;font-size:.85rem;font-weight:600;color:#fbbf24">--</div>
+        </div>
+        <div style="background:rgba(18,18,32,.97);padding:14px 16px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.4);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">PnL</div>
+          <div id="acd-pnl" style="font-family:'JetBrains Mono',monospace;font-size:.85rem;font-weight:600">--</div>
+        </div>
+      </div>
+      <!-- Confidence Bar -->
+      <div style="padding:16px 24px;border-top:1px solid rgba(196,181,253,.06)">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.4);text-transform:uppercase;letter-spacing:.08em">Confidence Level</span>
+          <span id="acd-conf-label" style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.5)">--</span>
+        </div>
+        <div style="height:4px;border-radius:999px;background:rgba(196,181,253,.1);overflow:hidden">
+          <div id="acd-conf-bar" style="height:100%;border-radius:999px;background:linear-gradient(90deg,#8b5cf6,#c4b5fd);transition:width .4s ease;width:0%"></div>
+        </div>
+      </div>
+      <!-- Risk Note -->
+      <div id="acd-risk-wrap" style="padding:0 24px 16px;display:none">
+        <div style="background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.15);border-radius:10px;padding:12px 14px;display:flex;gap:10px;align-items:flex-start">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" style="flex-shrink:0;margin-top:1px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span id="acd-risk" style="font-family:'JetBrains Mono',monospace;font-size:.75rem;color:rgba(251,191,36,.8);line-height:1.5">--</span>
+        </div>
+      </div>
+      <!-- Reasoning -->
+      <div style="padding:0 24px 24px">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.4);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">AI Reasoning</div>
+        <div id="acd-reasoning" style="font-family:'DM Sans',sans-serif;font-size:.82rem;color:rgba(226,226,240,.75);line-height:1.65;background:rgba(255,255,255,.03);border:1px solid rgba(196,181,253,.08);border-radius:10px;padding:14px 16px;min-height:60px">--</div>
+      </div>
+      <!-- Latency Footer -->
+      <div style="padding:10px 24px;border-top:1px solid rgba(196,181,253,.06);display:flex;justify-content:space-between;align-items:center">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.25)">MIMO v2.5 PRO</span>
+        <span id="acd-latency" style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:rgba(196,181,253,.3)">--</span>
+      </div>
+    </div>
+  </div>
+
   <!-- TOAST -->
   <div id="toast">
     <div class="glass-sm px-4 py-3 flex items-center gap-3">
@@ -1987,7 +2066,7 @@
             const pnlStr = v.pnl != null ? (v.pnl >= 0 ? '+' : '') + v.pnl.toFixed(3) : '--';
             const adjColor = v.score_adj > 0 ? '#00e5b0' : v.score_adj < 0 ? '#f87171' : 'rgba(196,181,253,.4)';
             const adjStr = v.score_adj >= 0 ? '+' + v.score_adj : v.score_adj;
-            return `<tr style="border-bottom:1px solid rgba(196,181,253,.04)">
+            return `<tr style="border-bottom:1px solid rgba(196,181,253,.04)" onclick="openAICard(${JSON.stringify(v).replace(/"/g,'&quot;')})" title="Click for full breakdown">
               <td class="px-4 py-2 text-white">${v.asset}</td>
               <td class="px-2 py-2" style="color:${v.side==='LONG'||v.side==='long'?'#00e5b0':'#f87171'}">${(v.side||'').toUpperCase()}</td>
               <td class="px-2 py-2 text-right text-white">${v.score_before||'--'} > ${v.score_after||'--'}</td>
@@ -2005,6 +2084,56 @@
         document.getElementById('ai-verdicts-tbody').innerHTML = `<tr><td colspan="8" class="text-center py-8" style="color:#f87171">Error: ${e.message}</td></tr>`;
       }
     }
+
+    function openAICard(v) {
+      const isLong = (v.side||'').toUpperCase() === 'LONG';
+      const sideColor = isLong ? '#00e5b0' : '#f87171';
+      const conf = v.confidence || 0;
+      const confPct = Math.round(conf * 100);
+      const confLabel = conf >= 0.7 ? 'HIGH — Strong Edge' : conf >= 0.5 ? 'MEDIUM — Moderate Edge' : conf >= 0.3 ? 'LOW — Weak Edge' : 'VERY LOW — No Edge';
+      const confColor = conf >= 0.7 ? '#00e5b0' : conf >= 0.5 ? '#c4b5fd' : conf >= 0.3 ? '#fbbf24' : '#f87171';
+      const adjColor = v.score_adj > 0 ? '#00e5b0' : v.score_adj < 0 ? '#f87171' : 'rgba(196,181,253,.5)';
+      const adjStr = (v.score_adj >= 0 ? '+' : '') + (v.score_adj || 0);
+      const pnlColor = v.pnl > 0 ? '#00e5b0' : v.pnl < 0 ? '#f87171' : 'rgba(196,181,253,.4)';
+      const pnlStr = v.pnl != null ? (v.pnl >= 0 ? '+' : '') + v.pnl.toFixed(3) : '--';
+      const fboRisk = v.fake_breakout_risk != null ? (v.fake_breakout_risk * 100).toFixed(0) + '%' : '--';
+
+      document.getElementById('acd-asset').textContent = v.asset || '--';
+      const sideEl = document.getElementById('acd-side');
+      sideEl.textContent = (v.side||'').toUpperCase();
+      sideEl.style.cssText = `font-family:'JetBrains Mono',monospace;font-size:.75rem;font-weight:600;padding:2px 10px;border-radius:999px;background:${isLong?'rgba(0,229,176,.12)':'rgba(248,113,113,.12)'};color:${sideColor};border:1px solid ${isLong?'rgba(0,229,176,.25)':'rgba(248,113,113,.25)'}`;
+      document.getElementById('acd-score').textContent = `${v.score_before||'--'} → ${v.score_after||'--'}`;
+      document.getElementById('acd-conf').style.color = confColor;
+      document.getElementById('acd-conf').textContent = conf.toFixed(2);
+      document.getElementById('acd-adj').style.color = adjColor;
+      document.getElementById('acd-adj').textContent = adjStr + ' pts';
+      document.getElementById('acd-state').textContent = v.market_state || '--';
+      document.getElementById('acd-fbo').textContent = fboRisk;
+      document.getElementById('acd-pnl').style.color = pnlColor;
+      document.getElementById('acd-pnl').textContent = pnlStr;
+      document.getElementById('acd-conf-bar').style.width = confPct + '%';
+      document.getElementById('acd-conf-bar').style.background = conf >= 0.7 ? 'linear-gradient(90deg,#059669,#00e5b0)' : conf >= 0.5 ? 'linear-gradient(90deg,#8b5cf6,#c4b5fd)' : conf >= 0.3 ? 'linear-gradient(90deg,#d97706,#fbbf24)' : 'linear-gradient(90deg,#dc2626,#f87171)';
+      document.getElementById('acd-conf-label').textContent = confLabel;
+      document.getElementById('acd-reasoning').textContent = v.reasoning || 'No reasoning available.';
+      document.getElementById('acd-latency').textContent = v.latency_ms ? `Latency: ${Math.round(v.latency_ms)}ms` : '';
+
+      const riskWrap = document.getElementById('acd-risk-wrap');
+      if (v.risk_note && v.risk_note.trim()) {
+        document.getElementById('acd-risk').textContent = v.risk_note;
+        riskWrap.style.display = 'block';
+      } else {
+        riskWrap.style.display = 'none';
+      }
+
+      document.getElementById('ai-card-overlay').style.display = 'flex';
+    }
+
+    function closeAICard() {
+      document.getElementById('ai-card-overlay').style.display = 'none';
+    }
+
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAICard(); });
+
   </script>
 </body>
 
