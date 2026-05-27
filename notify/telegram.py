@@ -2633,6 +2633,13 @@ class KaraTelegram:
             sign = "+" if pnl_usd >= 0 else ""
             reason = close_data.get("reason", "")
 
+            # Hook AI verdict PnL for accuracy tracking
+            try:
+                from intelligence.ai_analyst import update_verdict_pnl
+                update_verdict_pnl(position.asset, position.side.value, pnl_usd)
+            except Exception:
+                pass
+
             from utils.helpers import format_idr
             from config import USD_TO_IDR
 
