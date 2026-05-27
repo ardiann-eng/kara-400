@@ -1194,17 +1194,23 @@ async def ws_admin_reasoning(websocket: WebSocket):
 
 @app.get("/api/ai/verdicts")
 async def ai_verdicts(_admin: dict = Depends(get_admin_user), limit: int = 50):
-    """Return recent AI verdicts for dashboard display."""
+    """Return recent AI verdicts for dashboard display — deduplicated by asset+side (latest only)."""
     try:
         from intelligence.ai_analyst import ai_analyst
         from core.db import user_db
         conn = user_db._get_conn()
         conn.row_factory = __import__("sqlite3").Row
         cur = conn.cursor()
-        cur.execute(
-            "SELECT * FROM ai_verdicts ORDER BY created_at DESC LIMIT ?",
-            (limit,)
-        )
+        # Deduplicate: keep only the most recent verdict per asset+side combo
+        cur.execute("""
+            SELECT * FROM ai_verdicts
+            WHERE id IN (
+                SELECT MAX(id) FROM ai_verdicts
+                GROUP BY asset, side
+            )
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,))
         rows = cur.fetchall()
         verdicts = [dict(r) for r in rows] if rows else []
         return {
