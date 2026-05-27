@@ -726,13 +726,23 @@ class ScoringEngine:
 
         # ── [AI INTELLIGENCE] Mimo v2.5 Pro — confidence-based score adjustment ──
         # AI evaluates setup quality and adds bounded pts (+8 to -5).
-        # Non-blocking: timeout 2s, fallback = neutral (score_adj=0).
+        # Non-blocking: timeout 4s, fallback = neutral (score_adj=0).
         # AI = evaluator only, never single-handedly blocks/approves trade.
+        #
+        # [COST OPT] Only call AI if score is within striking distance of threshold.
+        # Pre-compute effective_threshold estimate using base + HTF adj (fast, no session math).
+        # Max AI boost = +8. If score < (threshold_estimate - 8), AI can't help → skip.
+        _ai_min_threshold_est = (
+            config.SCALPER.min_score_to_enter
+            + htf_threshold_adj
+            + session_threshold_delta
+        )
         _ai_score_adj = 0
         _ai_verdict = None
+        _ai_worth_calling = score >= (_ai_min_threshold_est - 8)  # within AI boost range
         try:
             from intelligence.ai_analyst import ai_analyst
-            if ai_analyst.enabled:
+            if ai_analyst.enabled and _ai_worth_calling:
                 _ai_context = {
                     "asset": asset,
                     "side": side.value.upper(),
