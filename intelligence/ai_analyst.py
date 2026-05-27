@@ -96,6 +96,25 @@ class AIMarketAnalyst:
         except Exception as e:
             err_type = type(e).__name__
             if "429" in str(e) or "RateLimit" in err_type:
+                # Primary rate limited → try fallback key immediately
+                if self.api_key_fallback and self._client_fallback:
+                    try:
+                        resp2 = await self._client_fallback.chat.completions.create(
+                            model=self.model,
+                            messages=[{"role": "user", "content": "ping"}],
+                            temperature=0.1, max_tokens=5,
+                        )
+                        if resp2 and resp2.choices:
+                            self._using_fallback = True
+                            self._primary_rate_limited = True
+                            self._connected = True
+                            log.info(
+                                f"[AI-CONNECT] MIMO AI: CONNECTED via FALLBACK KEY "
+                                f"(primary rate limited, fallback OK)"
+                            )
+                            return True
+                    except Exception:
+                        pass
                 log.warning(
                     f"[AI-CONNECT] MIMO AI: RATE LIMITED (key valid, but throttled). "
                     f"Will retry on next signal."
@@ -127,12 +146,14 @@ class AIMarketAnalyst:
                 api_key=self.api_key,
                 base_url=self.base_url,
                 timeout=self.timeout,
+                max_retries=0,  # disable SDK auto-retry — we handle fallback ourselves
             )
         if self._client_fallback is None and self.api_key_fallback:
             self._client_fallback = AsyncOpenAI(
                 api_key=self.api_key_fallback,
                 base_url=self.base_url,
                 timeout=self.timeout,
+                max_retries=0,  # same — no auto-retry
             )
         return self._client
 
@@ -190,34 +211,46 @@ class AIMarketAnalyst:
             return AIVerdict(error=str(e), reasoning=f"AI error: {e}")
 
     async def _call_mimo(self, context: dict) -> AIVerdict:
-        """Call Mimo via OpenAI-compatible SDK."""
+        """Call Mimo via OpenAI-compatible SDK. Auto-fallback to key 2 on rate limit."""
         client = self._get_client()
         if not client:
             return AIVerdict(reasoning="Client not available")
 
         prompt = self._build_prompt(context)
-        response = await client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an institutional crypto scalping microstructure analyst. "
-                        "Evaluate trade setups and return confidence scores. "
-                        "Be precise, data-driven, no speculation. "
-                        "Confidence calibration: 0.50=neutral, 0.60=moderate edge, "
-                        "0.70+=strong confluence, above 0.85=extremely rare. "
-                        "Always respond in valid JSON only."
-                    )
-                },
-                {"role": "user", "content": prompt}
-            ],
-            temperature=self.temperature,
-            max_tokens=300,
+        _system = (
+            "You are an institutional crypto scalping microstructure analyst. "
+            "Evaluate trade setups and return confidence scores. "
+            "Be precise, data-driven, no speculation. "
+            "Confidence calibration: 0.50=neutral, 0.60=moderate edge, "
+            "0.70+=strong confluence, above 0.85=extremely rare. "
+            "Always respond in valid JSON only."
         )
+        _messages = [{"role": "system", "content": _system}, {"role": "user", "content": prompt}]
 
-        raw = response.choices[0].message.content.strip()
-        return self._parse_response(raw)
+        try:
+            response = await client.chat.completions.create(
+                model=self.model, messages=_messages,
+                temperature=self.temperature, max_tokens=300,
+            )
+            raw = response.choices[0].message.content.strip()
+            return self._parse_response(raw)
+
+        except Exception as e:
+            # Rate limit on primary → auto-switch to fallback key
+            if ("429" in str(e) or "RateLimit" in type(e).__name__) and not self._using_fallback and self._client_fallback:
+                self._using_fallback = True
+                self._primary_rate_limited = True
+                log.info("[AI] Primary key rate limited → switching to fallback key automatically")
+                try:
+                    response = await self._client_fallback.chat.completions.create(
+                        model=self.model, messages=_messages,
+                        temperature=self.temperature, max_tokens=300,
+                    )
+                    raw = response.choices[0].message.content.strip()
+                    return self._parse_response(raw)
+                except Exception as e2:
+                    return AIVerdict(error=str(e2), reasoning=f"Both keys failed: {e2}")
+            raise  # re-raise for caller to handle
 
     def _build_prompt(self, ctx: dict) -> str:
         """Build structured prompt from signal context."""
