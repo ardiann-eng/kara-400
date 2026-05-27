@@ -581,7 +581,16 @@ class KaraBot:
             except Exception:
                 pass  # Telegram may not be ready yet
         else:
-            log.info("[SELFTEST] ✅ All checks passed. Ready to scan.")
+            log.info("[SELFTEST] All checks passed. Ready to scan.")
+
+        # Test 5: AI Intelligence connection
+        try:
+            from intelligence.ai_analyst import ai_analyst
+            await ai_analyst.health_check()
+        except ImportError:
+            log.info("[SELFTEST] AI Intelligence module not available (openai not installed)")
+        except Exception as e:
+            log.warning(f"[SELFTEST] AI health check failed: {e}")
 
     # ──────────────────────────────────────────
     # WEBSOCKET SETUP
@@ -1560,9 +1569,9 @@ class KaraBot:
                 exec_prices = hl_prices
 
             actions = await session.executor.update_positions(exec_prices)
-            early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "momentum_exit", "early_trail")]
+            early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "momentum_exit", "momentum_death", "early_trail")]
             # Exclude semua early_exit dari other_actions agar tidak dikirim dua kali
-            other_actions = [a for a in actions if a.get("action") not in ("time_exit", "momentum_exit", "early_trail")]
+            other_actions = [a for a in actions if a.get("action") not in ("time_exit", "momentum_exit", "momentum_death", "early_trail")]
 
             # Kirim notifikasi personal per posisi (KARA style)
             if early_exit_actions:

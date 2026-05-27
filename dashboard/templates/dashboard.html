@@ -663,6 +663,13 @@
         </svg>
         Bot Brain
       </div>
+      <div class="nav-item" onclick="navigate('ai-intel')" data-page="ai-intel">
+        <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+          <path d="M4 6h16M4 12h10M4 18h14"/>
+          <circle cx="19" cy="12" r="3"/>
+        </svg>
+        AI Intel
+      </div>
     </nav>
     <div class="glow-line my-4 mx-2"></div>
     <div class="px-3 mt-auto">
@@ -1092,6 +1099,70 @@
         </div>
       </div>
 
+      <!-- PAGE: AI Intelligence -->
+      <div id="page-ai-intel" class="page">
+        <!-- Status Bar -->
+        <div class="glass p-4 mb-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <div class="w-2 h-2 rounded-full" id="ai-status-dot" style="background:#555"></div>
+              <span class="font-mono text-sm" style="color:rgba(196,181,253,.7)">MIMO v2.5 PRO</span>
+              <span class="font-mono text-xs px-2 py-0.5 rounded" id="ai-status-label" style="background:rgba(255,255,255,.05);color:rgba(196,181,253,.5)">LOADING</span>
+            </div>
+            <div class="flex items-center gap-4 font-mono text-xs" style="color:rgba(196,181,253,.4)">
+              <span>CALLS: <span id="ai-daily-calls">0</span>/<span id="ai-max-daily">200</span></span>
+              <span>TEMP: 0.2</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Accuracy Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+          <div class="glass p-4">
+            <div class="font-mono text-xs uppercase tracking-wider mb-2" style="color:rgba(196,181,253,.4)">HIGH CONF (&gt;0.7)</div>
+            <div class="text-2xl font-mono font-semibold text-white" id="ai-high-wr">--</div>
+            <div class="text-xs font-mono mt-1" style="color:rgba(196,181,253,.4)">n=<span id="ai-high-n">0</span></div>
+          </div>
+          <div class="glass p-4">
+            <div class="font-mono text-xs uppercase tracking-wider mb-2" style="color:rgba(196,181,253,.4)">MED CONF (0.4-0.7)</div>
+            <div class="text-2xl font-mono font-semibold text-white" id="ai-med-wr">--</div>
+            <div class="text-xs font-mono mt-1" style="color:rgba(196,181,253,.4)">n=<span id="ai-med-n">0</span></div>
+          </div>
+          <div class="glass p-4">
+            <div class="font-mono text-xs uppercase tracking-wider mb-2" style="color:rgba(196,181,253,.4)">LOW CONF (&lt;0.4)</div>
+            <div class="text-2xl font-mono font-semibold text-white" id="ai-low-wr">--</div>
+            <div class="text-xs font-mono mt-1" style="color:rgba(196,181,253,.4)">n=<span id="ai-low-n">0</span></div>
+          </div>
+        </div>
+
+        <!-- Recent Verdicts Table -->
+        <div class="glass overflow-hidden">
+          <div class="px-4 py-3 flex items-center justify-between" style="border-bottom:1px solid rgba(196,181,253,.08)">
+            <h2 class="font-mono text-sm font-semibold" style="color:rgba(196,181,253,.7)">RECENT AI VERDICTS</h2>
+            <span class="font-mono text-xs" style="color:rgba(196,181,253,.3)">PIPELINE OUTPUT</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs font-mono">
+              <thead>
+                <tr style="color:rgba(196,181,253,.4);border-bottom:1px solid rgba(196,181,253,.06)">
+                  <th class="text-left px-4 py-2">ASSET</th>
+                  <th class="text-left px-2 py-2">SIDE</th>
+                  <th class="text-right px-2 py-2">SCORE</th>
+                  <th class="text-right px-2 py-2">CONF</th>
+                  <th class="text-right px-2 py-2">ADJ</th>
+                  <th class="text-left px-2 py-2">STATE</th>
+                  <th class="text-right px-2 py-2">PNL</th>
+                  <th class="text-left px-4 py-2">REASONING</th>
+                </tr>
+              </thead>
+              <tbody id="ai-verdicts-tbody">
+                <tr><td colspan="8" class="text-center py-8" style="color:rgba(196,181,253,.3)">Waiting for AI data...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
     </div><!-- /p-4 -->
   </main>
 
@@ -1174,7 +1245,7 @@
 
   <script>
     const S = { page: 'overview', userId: null, tab: 'standard' };
-    const META = { 'overview': { t: 'Overview', s: 'Overview' }, 'all-users': { t: 'All Users', s: 'Registered agents in the system' }, 'user-settings': { t: 'User Settings', s: 'Configure per-user trading parameters' }, 'recent-trades': { t: 'Recent Trades', s: 'Latest signal executions' } };
+    const META = { 'overview': { t: 'Overview', s: 'Overview' }, 'all-users': { t: 'All Users', s: 'Registered agents in the system' }, 'user-settings': { t: 'User Settings', s: 'Configure per-user trading parameters' }, 'recent-trades': { t: 'Recent Trades', s: 'Latest signal executions' }, 'ai-intel': { t: 'AI Intelligence', s: 'Mimo v2.5 Pro pipeline analysis' } };
 
     function navigate(page) {
       S.page = page;
@@ -1196,6 +1267,7 @@
       else if (p === 'all-users') loadUsers();
       else if (p === 'recent-trades') loadTrades();
       else if (p === 'user-settings') populateUserSelect();
+      else if (p === 'ai-intel') loadAIIntel();
     }
 
     // --- Overview Charts Logic ---
@@ -1871,7 +1943,68 @@
         loadBrainDecisions();
         if (!brainWs || brainWs.readyState > 1) connectBrainWs();
       }
+      if (page === 'ai-intel') {
+        loadAIIntel();
+      }
     };
+
+    // ── AI INTELLIGENCE PAGE ──────────────────────────────────────────────
+    async function loadAIIntel() {
+      try {
+        // Status
+        const st = await api('/api/ai/status');
+        const dot = document.getElementById('ai-status-dot');
+        const label = document.getElementById('ai-status-label');
+        if (st.enabled) {
+          dot.style.background = '#00e5b0';
+          label.textContent = 'ONLINE';
+          label.style.color = '#00e5b0';
+        } else {
+          dot.style.background = '#f87171';
+          label.textContent = 'OFFLINE';
+          label.style.color = '#f87171';
+        }
+        document.getElementById('ai-daily-calls').textContent = st.daily_calls || 0;
+        document.getElementById('ai-max-daily').textContent = st.max_daily || 200;
+      } catch(e) {}
+
+      try {
+        // Accuracy
+        const acc = await api('/api/ai/accuracy');
+        const b = acc.accuracy || {};
+        if (b.high) { document.getElementById('ai-high-wr').textContent = b.high.wr + '%'; document.getElementById('ai-high-n').textContent = b.high.n; }
+        if (b.medium) { document.getElementById('ai-med-wr').textContent = b.medium.wr + '%'; document.getElementById('ai-med-n').textContent = b.medium.n; }
+        if (b.low) { document.getElementById('ai-low-wr').textContent = b.low.wr + '%'; document.getElementById('ai-low-n').textContent = b.low.n; }
+      } catch(e) {}
+
+      try {
+        // Verdicts
+        const vd = await api('/api/ai/verdicts');
+        const tbody = document.getElementById('ai-verdicts-tbody');
+        if (vd.verdicts && vd.verdicts.length > 0) {
+          tbody.innerHTML = vd.verdicts.slice(0, 30).map(v => {
+            const pnlColor = v.pnl > 0 ? '#00e5b0' : v.pnl < 0 ? '#f87171' : 'rgba(196,181,253,.4)';
+            const pnlStr = v.pnl != null ? (v.pnl >= 0 ? '+' : '') + v.pnl.toFixed(3) : '--';
+            const adjColor = v.score_adj > 0 ? '#00e5b0' : v.score_adj < 0 ? '#f87171' : 'rgba(196,181,253,.4)';
+            const adjStr = v.score_adj >= 0 ? '+' + v.score_adj : v.score_adj;
+            return `<tr style="border-bottom:1px solid rgba(196,181,253,.04)">
+              <td class="px-4 py-2 text-white">${v.asset}</td>
+              <td class="px-2 py-2" style="color:${v.side==='LONG'||v.side==='long'?'#00e5b0':'#f87171'}">${(v.side||'').toUpperCase()}</td>
+              <td class="px-2 py-2 text-right text-white">${v.score_before||'--'} > ${v.score_after||'--'}</td>
+              <td class="px-2 py-2 text-right text-white">${(v.confidence||0).toFixed(2)}</td>
+              <td class="px-2 py-2 text-right" style="color:${adjColor}">${adjStr}</td>
+              <td class="px-2 py-2" style="color:rgba(196,181,253,.5)">${v.market_state||'--'}</td>
+              <td class="px-2 py-2 text-right" style="color:${pnlColor}">${pnlStr}</td>
+              <td class="px-4 py-2" style="color:rgba(196,181,253,.4);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v.reasoning||'--'}</td>
+            </tr>`;
+          }).join('');
+        } else {
+          tbody.innerHTML = '<tr><td colspan="8" class="text-center py-8" style="color:rgba(196,181,253,.3)">No AI verdicts yet. Waiting for signals...</td></tr>';
+        }
+      } catch(e) {
+        document.getElementById('ai-verdicts-tbody').innerHTML = `<tr><td colspan="8" class="text-center py-8" style="color:#f87171">Error: ${e.message}</td></tr>`;
+      }
+    }
   </script>
 </body>
 

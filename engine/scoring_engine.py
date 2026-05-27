@@ -559,13 +559,13 @@ class ScoringEngine:
                 htf_leverage_adj  = -3
                 reasons.append(f"⚠️ 4H TRENDING_DOWN — LONG counter-trend (+8 threshold)")
         else:  # CHOPPY
-            # [AUDIT #9 FIX 2026-05-23] Was +8. But HTF detector returns CHOPPY 91.9%
-            # of the time — detection is broken (EMA10≈EMA20 on 4H for most alts).
-            # +8 penalty applied to ALL trades = meaningless filter (doesn't discriminate).
-            # Set to 0 until detector is fixed or replaced.
-            htf_threshold_adj = 0
+            # [AUDIT #13 FIX] Re-enable moderate penalty. Was 0 (disabled in Audit #9
+            # because detector returns CHOPPY 98% of time). But data shows CHOPPY = death
+            # zone for trend-following (trailing 31.5%, time_exit 61%). +3 is gentle enough
+            # to not kill frequency but raises bar slightly for entry quality.
+            htf_threshold_adj = +3
             htf_leverage_adj  = -2
-            reasons.append(f"〰️ 4H CHOPPY — leverage reduced (threshold penalty disabled, detector unreliable)")
+            reasons.append(f"〰️ 4H CHOPPY — threshold +3, leverage reduced")
 
         # 4c. [OPPORTUNITY SCORING] Regime multiplier — ranging = opportunity, trending = stale
         # Data audit: trending ×1.2 caused score inflation at exhaustion points.
@@ -723,6 +723,55 @@ class ScoringEngine:
                 "size_mult": _learn_decision.size_mult,
                 "reason": _learn_decision.reason,
             })
+
+        # ── [AI INTELLIGENCE] Mimo v2.5 Pro — confidence-based score adjustment ──
+        # AI evaluates setup quality and adds bounded pts (+8 to -5).
+        # Non-blocking: timeout 2s, fallback = neutral (score_adj=0).
+        # AI = evaluator only, never single-handedly blocks/approves trade.
+        _ai_score_adj = 0
+        _ai_verdict = None
+        try:
+            from intelligence.ai_analyst import ai_analyst
+            if ai_analyst.enabled:
+                _ai_context = {
+                    "asset": asset,
+                    "side": side.value.upper(),
+                    "score": score,
+                    "components": {
+                        "OB": _scalper_components.get("ob_signed", 0),
+                        "EMA": _scalper_components.get("ema_pts", 0),
+                        "RSI": _scalper_components.get("rsi_pts", 0),
+                        "FUND": _scalper_components.get("oi_signed", 0),
+                        "XAM": _scalper_components.get("xam_pts", 0),
+                    },
+                    "regime": _regime_cat,
+                    "htf_regime": htf_regime,
+                    "momentum_move_pct": trend_pct,
+                    "atr_pct": realized_vol or 0.01,
+                    "funding_rate": funding.funding_rate if funding else 0.0,
+                    "ob_imbalance": _scalper_components.get("ob_signed", 0) / 18.0,
+                    "btc_move": 0.0,  # populated from XAM data if available
+                    "volume_trend": "unknown",
+                }
+                _ai_verdict = await ai_analyst.evaluate_signal(_ai_context)
+                _ai_score_adj = _ai_verdict.score_adj
+                if _ai_score_adj != 0:
+                    score += _ai_score_adj
+                    score = max(0, min(100, score))
+                    reasons.append(
+                        f"🧠 AI: conf={_ai_verdict.confidence:.2f} ({_ai_verdict.market_state}) "
+                        f"→ {_ai_score_adj:+d}pts"
+                    )
+                # Save to DB for dashboard (non-blocking, fire-and-forget)
+                try:
+                    from intelligence.ai_analyst import save_ai_verdict
+                    save_ai_verdict(asset, side.value, score - _ai_score_adj, _ai_verdict)
+                except Exception:
+                    pass
+        except ImportError:
+            pass  # openai not installed — AI disabled silently
+        except Exception as _ai_err:
+            pass  # AI error — neutral, don't affect trade
 
         # Effective threshold: overlap = market efisien, butuh sinyal LEBIH kuat
         # [P0-1 FIX 2026-05-18] Data: overlap WR=6.1% karena threshold terlalu rendah.
@@ -1368,17 +1417,25 @@ class ScoringEngine:
                 imb = 0.0
 
             # OB imbalance = pressure building (LEADING — wall hasn't broken yet)
+            # [AUDIT #13 FIX] OB reduced in ranging/low-trend regime.
+            # Data: OB r=-0.148 (INVERSE in choppy). Wall = liquidity trap, not support.
+            # Only reduce, don't zero — OB still valid when combined with other signals.
+            _ob_regime_mult = 1.0
+            if abs(trend_pct) < 0.035:  # ranging regime (same threshold as regime_cat)
+                _ob_regime_mult = 0.6  # 40% reduction — not too aggressive for crypto
             if abs(imb) > 0.45:
-                pts = 18
+                pts = int(18 * _ob_regime_mult)
                 if imb > 0:
                     bull_setup += pts; _ob_signed = pts
                     reasons.append(f"📗 Strong bid wall ({imb:.2f}) — pressure building")
                 else:
                     bear_setup += pts; _ob_signed = -pts
                     reasons.append(f"📕 Strong ask wall ({imb:.2f}) — pressure building")
+                if _ob_regime_mult < 1.0:
+                    reasons.append(f"⚠️ OB reduced ×{_ob_regime_mult} (ranging — wall less reliable)")
                 _c_ob = pts
             elif abs(imb) > 0.20:
-                pts = 10
+                pts = int(10 * _ob_regime_mult)
                 if imb > 0:
                     bull_setup += pts; _ob_signed = pts
                     reasons.append(f"🟢 Bid pressure ({imb:.2f})")
@@ -1488,15 +1545,19 @@ class ScoringEngine:
                 else:
                     break
 
-            if candles_since_cross <= 3:
-                # Fresh cross = early in move = GOOD confirmation
-                pts = 10
+            # [AUDIT #13 FIX] Tightened: ≤2 = fresh (was ≤3), bonus +8 (was +10).
+            # Data: EMA +10 fired 57% signals, r=-0.185 (INVERSE). Too many
+            # "fresh" crosses that were actually 3min old = price already moved.
+            # Crypto moves fast — 3 candles (3min) is NOT fresh for 1m scalping.
+            if candles_since_cross <= 2:
+                # Truly fresh cross = just happened = GOOD confirmation
+                pts = 8  # [AUDIT #13] was 10 — reduced to prevent score inflation
                 confirm_pts += pts; _c_ema = pts
                 if ema_bullish:
-                    bull_setup += 5  # small setup boost for direction
+                    bull_setup += 4  # [AUDIT #13] was 5
                     reasons.append(f"📈 Fresh EMA cross ({candles_since_cross}m ago) +{pts}")
                 else:
-                    bear_setup += 5
+                    bear_setup += 4
                     reasons.append(f"📉 Fresh EMA cross ({candles_since_cross}m ago) +{pts}")
             elif candles_since_cross >= 8:
                 # Stale cross = move already well underway = PENALTY
@@ -1504,7 +1565,7 @@ class ScoringEngine:
                 confirm_pts -= penalty; _c_ema = -penalty
                 reasons.append(f"⚠️ Stale EMA ({candles_since_cross}m) — move old (-{penalty})")
             else:
-                # Medium freshness — small confirmation
+                # Medium freshness (3-7 candles) — small confirmation
                 confirm_pts += 4; _c_ema = 4
                 if ema_bullish:
                     bull_setup += 2
@@ -1885,11 +1946,12 @@ class ScoringEngine:
             if len(history) < 2:
                 continue
             now_mono = time.monotonic()
-            # [AUDIT #12 FIX] Window 2min → 5min. BTC rarely moves 0.15% in 2min
-            # during low-vol periods. 5min gives more time to detect real moves.
-            pts_5m = [(t, p) for t, p in history if t > now_mono - 300]
-            if len(pts_5m) >= 2:
-                move = (pts_5m[-1][1] - pts_5m[0][1]) / pts_5m[0][1]
+            # [AUDIT #13 FIX] Window 5min → 7min. Catches slightly slower BTC
+            # rotations without being too lagging. 5min missed moves that take
+            # 5-7min to develop (common in low-vol sessions).
+            pts_window = [(t, p) for t, p in history if t > now_mono - 420]  # 7min
+            if len(pts_window) >= 2:
+                move = (pts_window[-1][1] - pts_window[0][1]) / pts_window[0][1]
                 leader_moves.append(move)
         if not leader_moves:
             return 0, ""
@@ -1899,18 +1961,20 @@ class ScoringEngine:
         my_move = 0.0
         if len(my_history) >= 2:
             now_mono = time.monotonic()
-            pts_5m = [(t, p) for t, p in my_history if t > now_mono - 300]
-            if len(pts_5m) >= 2:
-                my_move = (pts_5m[-1][1] - pts_5m[0][1]) / pts_5m[0][1]
+            pts_window = [(t, p) for t, p in my_history if t > now_mono - 420]
+            if len(pts_window) >= 2:
+                my_move = (pts_window[-1][1] - pts_window[0][1]) / pts_window[0][1]
         # Edge: leader moved significantly but alt hasn't followed proportionally
-        # [AUDIT #12 FIX] Threshold 0.15% → 0.10%. Combined with 5min window,
-        # this should fire during normal BTC moves (not just spikes).
-        leader_threshold = 0.0010  # 0.10% move in 5min
-        if avg_leader > leader_threshold and my_move < avg_leader * 0.5:
-            pts = min(12, int(avg_leader * 4000))  # scale: 0.10%=4, 0.25%=10, 0.3%=12
+        # [AUDIT #13 FIX] Threshold 0.10% → 0.08%. Data: XAM=12 (BTC +0.50%) = WIN.
+        # Lower threshold fires more often with smaller but still meaningful moves.
+        # Lag threshold 50% → 60%: alt can have moved slightly, just not caught up.
+        # Pts multiplier 4000 → 5000: more weight when XAM fires (proven edge).
+        leader_threshold = 0.0008  # 0.08% move in 7min
+        if avg_leader > leader_threshold and my_move < avg_leader * 0.6:
+            pts = min(12, int(avg_leader * 5000))  # scale: 0.08%=4, 0.20%=10, 0.24%=12
             return pts, f"🔗 BTC/ETH leading +{avg_leader*100:.2f}%, {asset} lagging → LONG +{pts}"
-        elif avg_leader < -leader_threshold and my_move > avg_leader * 0.5:
-            pts = min(12, int(abs(avg_leader) * 4000))
+        elif avg_leader < -leader_threshold and my_move > avg_leader * 0.6:
+            pts = min(12, int(abs(avg_leader) * 5000))
             return -pts, f"🔗 BTC/ETH dumping {avg_leader*100:.2f}%, {asset} lagging → SHORT +{pts}"
         return 0, ""
 
@@ -2233,6 +2297,14 @@ class ScoringEngine:
             # Hold time extension: SHORT winners need 13.2min avg
             time_exit_min = time_exit_min + 3  # give 3 extra minutes
             reasons.append(f"📉 SHORT exit adj: TP1×0.70={tp1_pct*100:.2f}%, hold+3={time_exit_min}m")
+
+        # [AUDIT #13 FIX] LONG TP1 reduction in ranging/choppy regime.
+        # Data: LONG trailing dropped 53.8% → 30.0%. TP1=0.85% unreachable in choppy.
+        # SHORT fix (×0.70) worked brilliantly — apply similar logic to LONG but gentler.
+        # ×0.80 (not ×0.70) because LONG moves are naturally larger than SHORT in crypto.
+        if side == Side.LONG and htf_regime == "CHOPPY":
+            tp1_pct = tp1_pct * 0.80  # e.g. 0.6% → 0.48%, 0.8% → 0.64%
+            reasons.append(f"📈 LONG choppy adj: TP1×0.80={tp1_pct*100:.2f}% (easier trailing activation)")
 
         # Fade mode override: contrarian entry = tighter SL, wider TP (asymmetric RR)
         if fade_mode:

@@ -2408,7 +2408,7 @@ class KaraTelegram:
         _close_pct = int(action.get("close_ratio", 0.25) * 100)
 
         # Action types yang merupakan full/final close (posisi benar-benar selesai)
-        FINAL_EXIT_TYPES = ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "early_trail")
+        FINAL_EXIT_TYPES = ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "momentum_death", "early_trail")
 
         if action_type == "tp1":
             _remaining = 100 - _close_pct
@@ -2464,7 +2464,11 @@ class KaraTelegram:
         elif action_type == "trailing_stop":
             trail_px   = action.get("trail_price", current)
             trail_pct  = action.get("trail_pct", 0.0)
-            total_pnl  = pos.pnl_realized + pnl
+            # [AUDIT #13 FIX] Was: pos.pnl_realized + pnl → DOUBLE COUNT.
+            # action["pnl"] from close_position already = pos.pnl_realized (cumulative).
+            # Adding pos.pnl_realized again = 2× actual profit.
+            # Fix: use pnl directly (it's already the cumulative total).
+            total_pnl  = pnl
             total_sign = "+" if total_pnl >= 0 else ""
             trail_pct_str = f" ({trail_pct*100:.1f}%)" if trail_pct else ""
             text = (
@@ -2476,8 +2480,24 @@ class KaraTelegram:
                 f"  • Posisi   : Ditutup 100% ✅"
             )
 
+        elif action_type == "momentum_death":
+            # [AUDIT #13] Momentum Death — price flat, no edge, exit early
+            total_pnl  = pnl
+            total_sign = "+" if total_pnl >= 0 else ""
+            text = (
+                f"💀 <b>MOMENTUM DEATH — {pos.asset}</b>\n\n"
+                f"<i>Price flat setelah entry. Momentum hilang — keluar sebelum jadi loss besar.</i>\n\n"
+                f"  • Entry   : <code>${format_price(entry)}</code>\n"
+                f"  • Exit    : <code>${format_price(current)}</code>\n"
+                f"  • PnL     : <b>{total_sign}{format_idr(total_pnl)}</b>\n"
+                f"  • Alasan  : Price move &lt;0.05% dalam 3+ menit\n\n"
+                f"<i>Tidak ada momentum = tidak ada edge. Cut minimal. 🎯</i>"
+            )
+
         elif action_type == "stop_loss":
-            total_pnl  = pos.pnl_realized + pnl
+            # [AUDIT #13 FIX] Same double-count fix as trailing_stop.
+            # action["pnl"] from close_position = pos.pnl_realized (cumulative).
+            total_pnl  = pnl
             loss_pct   = abs(pnl_pct)
             
             # [AUDIT #12 FIX] Differentiate between REAL stop loss (actual loss)

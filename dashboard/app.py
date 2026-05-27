@@ -1190,6 +1190,85 @@ async def ws_admin_reasoning(websocket: WebSocket):
         reasoning_logger.unregister_ws(on_decision)
 
 
+# ── API: AI Intelligence ──────────────────────────────────────────────────────
+
+@app.get("/api/ai/verdicts")
+async def ai_verdicts(_admin: dict = Depends(get_admin_user), limit: int = 50):
+    """Return recent AI verdicts for dashboard display."""
+    try:
+        from intelligence.ai_analyst import ai_analyst
+        from core.db import user_db
+        conn = user_db._get_conn()
+        conn.row_factory = __import__("sqlite3").Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM ai_verdicts ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        )
+        rows = cur.fetchall()
+        verdicts = [dict(r) for r in rows] if rows else []
+        return {
+            "verdicts": verdicts,
+            "ai_enabled": ai_analyst.enabled,
+            "daily_calls": ai_analyst._daily_calls,
+            "max_daily": ai_analyst._max_daily,
+        }
+    except Exception as e:
+        return {"verdicts": [], "ai_enabled": False, "error": str(e)}
+
+
+@app.get("/api/ai/accuracy")
+async def ai_accuracy(_admin: dict = Depends(get_admin_user)):
+    """Return AI confidence accuracy breakdown (confidence bucket vs actual WR)."""
+    try:
+        from core.db import user_db
+        conn = user_db._get_conn()
+        conn.row_factory = __import__("sqlite3").Row
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT 
+                CASE 
+                    WHEN confidence >= 0.7 THEN 'high'
+                    WHEN confidence >= 0.4 THEN 'medium'
+                    ELSE 'low'
+                END as bucket,
+                COUNT(*) as n,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                AVG(pnl) as avg_pnl
+            FROM ai_verdicts 
+            WHERE pnl IS NOT NULL
+            GROUP BY bucket
+        """)
+        rows = cur.fetchall()
+        buckets = {}
+        for r in rows:
+            buckets[r["bucket"]] = {
+                "n": r["n"],
+                "wins": r["wins"],
+                "wr": round(r["wins"] / r["n"] * 100, 1) if r["n"] > 0 else 0,
+                "avg_pnl": round(r["avg_pnl"], 4) if r["avg_pnl"] else 0,
+            }
+        return {"accuracy": buckets}
+    except Exception as e:
+        return {"accuracy": {}, "error": str(e)}
+
+
+@app.get("/api/ai/status")
+async def ai_status():
+    """Quick AI system status check."""
+    try:
+        from intelligence.ai_analyst import ai_analyst
+        return {
+            "enabled": ai_analyst.enabled,
+            "model": ai_analyst.model,
+            "daily_calls": ai_analyst._daily_calls,
+            "max_daily": ai_analyst._max_daily,
+            "temperature": ai_analyst.temperature,
+        }
+    except Exception:
+        return {"enabled": False}
+
+
 # ── Dashboard Server ──────────────────────────────────────────────────────────
 
 async def run_dashboard():

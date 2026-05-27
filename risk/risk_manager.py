@@ -1414,6 +1414,33 @@ class RiskManager:
                 # Tidak return — biarkan trailing stop check di atas yang handle exit
                 # (trailing_active sudah True, scan berikutnya akan cek)
 
+            # ── L1.5: MOMENTUM DEATH — price flat = no edge = exit early ────
+            # [AUDIT #13 FIX] Data: 61% trades = time_exit. Most are flat trades
+            # that slowly drift to loss. If price hasn't moved after 3min, the
+            # momentum that triggered entry is GONE. Exit now at minimal loss
+            # instead of waiting 15min for guaranteed bigger loss.
+            #
+            # Conditions: hold >= 3min, NOT already trailing, NOT TP1 hit,
+            # absolute price move < 0.05% (= dead flat for crypto).
+            _momentum_death_mins = 3.0
+            _momentum_death_threshold = 0.0005  # 0.05% — anything less = no momentum
+            if (hold_minutes >= _momentum_death_mins
+                    and not position.tp1_hit
+                    and not getattr(position, 'trailing_active', False)
+                    and abs(floating) < _momentum_death_threshold):
+                return {
+                    "action":      "momentum_death",
+                    "close_ratio": 1.0,
+                    "price":       current_price,
+                    "pnl":         position.pnl_unrealized,
+                    "position_id": position.position_id,
+                    "message":     (
+                        f"💀 Momentum death {hold_minutes:.0f}m: "
+                        f"price flat ({floating*100:.3f}% < ±0.05%). "
+                        f"No edge — exit sekarang."
+                    )
+                }
+
             # ── L2: Early loss cut ───────────────────────────────────────────
             # Posisi yang langsung turun -0.5% dalam 8m = sinyal salah, bukan noise.
             # Jangan tunggu max_hold — cut sekarang.
