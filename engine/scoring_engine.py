@@ -772,6 +772,8 @@ class ScoringEngine:
                         f"🧠 AI: conf={_ai_verdict.confidence:.2f} ({_ai_verdict.market_state}) "
                         f"→ {_ai_score_adj:+d}pts"
                     )
+                elif _ai_verdict.error:
+                    log.debug(f"[AI] {asset}: {_ai_verdict.error} (latency={_ai_verdict.latency_ms:.0f}ms)")
                 # Save to DB for dashboard (non-blocking, fire-and-forget)
                 try:
                     from intelligence.ai_analyst import save_ai_verdict
