@@ -43,6 +43,9 @@ python-dateutil>=2.8.2
 httpx>=0.25.0
 requests>=2.31.0
 
+# === AI Intelligence (Mimo v2.5 Pro — OpenAI-compatible) ===
+openai>=1.30.0
+
 # === Development & Testing ===
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
