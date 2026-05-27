@@ -54,7 +54,7 @@ class AIMarketAnalyst:
         self._using_fallback = False
         self._primary_rate_limited = False
         self._cache: dict = {}
-        self._cache_ttl = 60  # cache per asset for 60s
+        self._cache_ttl = 300  # cache per asset for 300s (5min) — was 60s, saves ~80% calls
         self._daily_calls = 0
         self._daily_reset = 0
         self._max_daily = 200
