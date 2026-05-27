@@ -46,8 +46,8 @@ class AIMarketAnalyst:
         self.base_url = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
         self.model = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
         self.temperature = 0.2
-        self.timeout = 8.0      # health_check timeout — api.xiaomimimo.com ~2-6s from Railway
-        self.eval_timeout = 7.0  # per-signal evaluation timeout
+        self.timeout = 12.0     # health_check timeout — api.xiaomimimo.com ~6-10s from Railway SG
+        self.eval_timeout = 10.0  # per-signal evaluation timeout
         self.enabled = bool(self.api_key)
         self._client = None
         self._client_fallback = None
@@ -232,6 +232,7 @@ class AIMarketAnalyst:
             response = await client.chat.completions.create(
                 model=self.model, messages=_messages,
                 temperature=self.temperature, max_tokens=300,
+                extra_body={"thinking": {"type": "disabled"}},  # disable CoT — saves latency
             )
             raw = response.choices[0].message.content.strip()
             return self._parse_response(raw)
@@ -246,6 +247,7 @@ class AIMarketAnalyst:
                     response = await self._client_fallback.chat.completions.create(
                         model=self.model, messages=_messages,
                         temperature=self.temperature, max_tokens=300,
+                        extra_body={"thinking": {"type": "disabled"}},
                     )
                     raw = response.choices[0].message.content.strip()
                     return self._parse_response(raw)
@@ -297,12 +299,24 @@ Return JSON only:
     def _parse_response(self, raw: str) -> AIVerdict:
         """Parse AI JSON response into AIVerdict."""
         try:
-            # Handle markdown code blocks
-            if "```" in raw:
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            data = json.loads(raw.strip())
+            # Method 1: strip markdown code blocks
+            cleaned = raw.strip()
+            if "```" in cleaned:
+                parts = cleaned.split("```")
+                # take the part after first ```
+                cleaned = parts[1]
+                if cleaned.startswith("json"):
+                    cleaned = cleaned[4:]
+                cleaned = cleaned.strip()
+
+            # Method 2: if still not valid JSON, extract first {...} block via regex
+            if not cleaned.startswith("{"):
+                import re
+                match = re.search(r'\{[^{}]*\}', cleaned, re.DOTALL)
+                if match:
+                    cleaned = match.group(0)
+
+            data = json.loads(cleaned)
             confidence = float(data.get("confidence", 0.5))
             confidence = max(0.0, min(1.0, confidence))
 
