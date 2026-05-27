@@ -46,7 +46,8 @@ class AIMarketAnalyst:
         self.base_url = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
         self.model = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
         self.temperature = 0.2
-        self.timeout = 2.0
+        self.timeout = 5.0      # health_check timeout — api.xiaomimimo.com ~2-4s from Railway
+        self.eval_timeout = 4.0  # per-signal evaluation timeout
         self.enabled = bool(self.api_key)
         self._client = None
         self._client_fallback = None
@@ -199,7 +200,7 @@ class AIMarketAnalyst:
         try:
             verdict = await asyncio.wait_for(
                 self._call_mimo(context),
-                timeout=self.timeout
+                timeout=self.eval_timeout
             )
             verdict.latency_ms = (time.time() - start) * 1000
             self._daily_calls += 1
