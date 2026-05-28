@@ -25,7 +25,7 @@ import config
 from config import MODE, WATCHED_ASSETS, SIGNAL
 from models.schemas import ExecutionMode
 from data.hyperliquid_client import HyperliquidClient
-from data.ws_client import KaraWebSocketClient, MarketDataCache, market_cache, BinanceLiquidationStream
+from data.ws_client import KaraWebSocketClient, MarketDataCache, market_cache, BinanceLiquidationStream, OKXLiquidationStream
 from data.bitget_client import BitgetClient
 from data.bitget_ws_client import BitgetWSClient
 from data.bybit_client import BybitClient
@@ -652,6 +652,10 @@ class KaraBot:
         # Start Binance liquidation stream (supplements sparse HL liq data)
         self._binance_liq = BinanceLiquidationStream(self.cache)
         await self._binance_liq.start()
+
+        # Start OKX liquidation stream (not geo-blocked, supplements HL + Binance)
+        self._okx_liq = OKXLiquidationStream(self.cache)
+        await self._okx_liq.start()
 
         # Diagnostic warmup check — runs 15s after subscription completes
         # Tells us if Hyperliquid is actually streaming data back

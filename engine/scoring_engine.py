@@ -1645,12 +1645,16 @@ class ScoringEngine:
                 price_falling = closes[-1] < closes_5m[-2] if len(closes_5m) >= 2 else False
 
                 if price_rising and rsi > rsi_5m + 5:
-                    # RSI accelerating + price rising = strong momentum
-                    bull_setup += 8; _c_div = 8
+                    # [AUDIT #15 FIX] RSI momentum moved from setup → confirm_pts.
+                    # Was: bull_setup += 8 → inflated aligned_setup → score 65+ = LOSS.
+                    # Root cause: RSI momentum = LAGGING (price already moved, RSI confirms after).
+                    # Data: score 65+ trades (where RSI momentum fires) = 0% WR, -$5.11.
+                    # Fix: +8 to confirm_pts (not setup). Still contributes to raw score,
+                    # but doesn't inflate aligned_setup which drives direction + setup strength.
+                    confirm_pts += 8; _c_div = 8
                     reasons.append(f"📈 RSI momentum: RSI 1m({rsi:.0f})>5m({rsi_5m:.0f}) + price rising +8")
                 elif price_falling and rsi < rsi_5m - 5:
-                    # RSI weakening + price falling = strong downtrend
-                    bear_setup += 8; _c_div = 8
+                    confirm_pts += 8; _c_div = 8
                     reasons.append(f"📉 RSI momentum: RSI 1m({rsi:.0f})<5m({rsi_5m:.0f}) + price falling +8")
 
         # ── CONFIRMATION LAYER: CVD — DISABLED (r=-0.21 inverse, replaced by DVI 2026-05-24) ──
@@ -1700,6 +1704,80 @@ class ScoringEngine:
             else:
                 bear_setup += abs(_xam_pts)
             reasons.append(_xam_reason)
+
+        # ── SETUP LAYER 5: Large Order Clustering (LEADING — institutional accumulation) ──
+        # [AUDIT #15] Detect clusters of large taker orders in 2-min window.
+        # Institutional players split large orders into medium-sized trades (TWAP/iceberg).
+        # Clustering = accumulation BEFORE breakout. Genuinely leading.
+        # Data source: cache.trades (HL WS trades stream, already subscribed).
+        # Threshold: ≥3 large orders (≥3× median) same direction in 2 min, dominance >60%.
+        # Max contribution: ±10 pts to setup layer.
+        _loc_pts = 0  # large order clustering
+        _loc_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
+        if len(_loc_trades) >= 30:
+            import time as _t_loc
+            _now_ms = _t_loc.time() * 1000
+            _window_ms = 120_000  # 2 minutes
+
+            # Calculate median notional from recent trades
+            _all_notionals = []
+            for _tr in _loc_trades[-200:]:
+                try:
+                    _n = float(_tr.get('sz', 0)) * float(_tr.get('px', 0))
+                    if _n > 0:
+                        _all_notionals.append(_n)
+                except (ValueError, TypeError):
+                    pass
+
+            if len(_all_notionals) >= 20:
+                _all_notionals.sort()
+                _median_not = _all_notionals[len(_all_notionals) // 2]
+                _large_threshold = max(_median_not * 3, 1000.0)  # 3× median OR $1K minimum (whichever higher)
+
+                # Filter large orders in last 2 minutes
+                _large_buys = 0.0
+                _large_sells = 0.0
+                _large_buy_count = 0
+                _large_sell_count = 0
+
+                for _tr in _loc_trades[-200:]:
+                    try:
+                        _tr_time = float(_tr.get('time', _tr.get('T', 0)))
+                        if _tr_time < _now_ms - _window_ms:
+                            continue
+                        _n = float(_tr.get('sz', 0)) * float(_tr.get('px', 0))
+                        if _n < _large_threshold:
+                            continue
+                        _tr_side = _tr.get('side', '')
+                        if _tr_side in ('B', 'buy'):
+                            _large_buys += _n
+                            _large_buy_count += 1
+                        elif _tr_side in ('A', 'S', 'sell'):
+                            _large_sells += _n
+                            _large_sell_count += 1
+                    except (ValueError, TypeError):
+                        pass
+
+                _large_total = _large_buys + _large_sells
+                if _large_total > 0 and (_large_buy_count >= 4 or _large_sell_count >= 4):
+                    _buy_dominance = _large_buys / _large_total
+
+                    if _buy_dominance > 0.70 and _large_buy_count >= 4:
+                        # Strong buy clustering — institutional accumulation
+                        _loc_pts = min(10, 4 + _large_buy_count)
+                        bull_setup += _loc_pts
+                        reasons.append(
+                            f"🏦 Large order cluster: {_large_buy_count} buys "
+                            f"(${_large_buys:.0f}, {_buy_dominance*100:.0f}% dom) +{_loc_pts}"
+                        )
+                    elif _buy_dominance < 0.30 and _large_sell_count >= 4:
+                        # Strong sell clustering — institutional distribution
+                        _loc_pts = min(10, 4 + _large_sell_count)
+                        bear_setup += _loc_pts
+                        reasons.append(
+                            f"🏦 Large order cluster: {_large_sell_count} sells "
+                            f"(${_large_sells:.0f}, {(1-_buy_dominance)*100:.0f}% dom) +{_loc_pts}"
+                        )
 
         # ── CONFIRMATION: MFI (Money Flow Index) — replaces DVI (Audit #11) ──
         # MFI = volume-weighted RSI. Measures conviction (money) behind price move.
@@ -1934,6 +2012,7 @@ class ScoringEngine:
             out_components["vote_margin"] = abs(_dir_bull - _dir_bear)
             out_components["cvd_pts"] = int(_c_cvd)
             out_components["xam_pts"] = int(_xam_pts)
+            out_components["loc_pts"] = int(_loc_pts)
             out_components["abs_pts"] = int(_abs_pts)
             out_components["ema_pts"] = int(_c_ema)
             out_components["rsi_pts"] = int(_c_rsi)

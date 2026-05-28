@@ -490,6 +490,13 @@ class PaperExecutor(BaseExecutor):
         except Exception as _le:
             log.debug(f"[LEARN] Record failed: {_le}")
 
+        # [AUDIT #15 FIX] Update AI verdict PnL for accuracy tracking dashboard
+        try:
+            from intelligence.ai_analyst import update_verdict_pnl
+            update_verdict_pnl(pos.asset, pos.side.value.lower(), total_pnl)
+        except Exception:
+            pass
+
         log.info(
             f" [PAPER] Closed {pos.asset} {pos.side.value.upper()} "
             f"@ {fill_price} | PnL: {format_usd(total_pnl)} ({reason})"

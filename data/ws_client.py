@@ -400,3 +400,143 @@ class BinanceLiquidationStream:
             "time": msg.get("E", int(time.time() * 1000)),
         }
         self._cache.on_liquidations([normalized])
+
+
+# ──────────────────────────────────────────────
+# OKX LIQUIDATION STREAM (free, no API key, no geo-block)
+# ──────────────────────────────────────────────
+# OKX public WS provides liquidation-orders channel for all SWAP instruments.
+# Unlike Binance (blocked from Railway), OKX is accessible globally.
+# Supplements HL sparse liquidation data with high-volume OKX data.
+
+OKX_WS_PUBLIC_URL = "wss://ws.okx.com:8443/ws/v5/public"
+
+
+def _okx_instid_to_coin(inst_id: str) -> str:
+    """Convert OKX instId like 'BTC-USDT-SWAP' to KARA coin name 'BTC'."""
+    parts = inst_id.split("-")
+    return parts[0] if parts else inst_id
+
+
+class OKXLiquidationStream:
+    """
+    Connects to OKX public WebSocket and subscribes to liquidation-orders channel.
+    Feeds normalized liquidation events into MarketDataCache.
+    No auth required. Not geo-blocked from Railway.
+    """
+
+    def __init__(self, cache: "MarketDataCache"):
+        self._cache = cache
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._connected = False
+        self._event_count = 0
+
+    async def start(self):
+        self._running = True
+        self._task = asyncio.create_task(self._run_loop())
+        log.info("[OKXLiq] Starting OKX liquidation stream...")
+
+    async def stop(self):
+        self._running = False
+        if self._task:
+            self._task.cancel()
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    async def _run_loop(self):
+        backoff = 5
+        while self._running:
+            try:
+                await self._connect_and_listen()
+                backoff = 5  # reset on clean disconnect
+            except Exception as e:
+                if not self._running:
+                    break
+                log.warning(f"[OKXLiq] Disconnected: {e}. Reconnecting in {backoff}s...")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    async def _connect_and_listen(self):
+        async with websockets.connect(
+            OKX_WS_PUBLIC_URL, ping_interval=20, ping_timeout=10, close_timeout=5
+        ) as ws:
+            self._connected = True
+            log.info("[OKXLiq] Connected to OKX public WS")
+
+            # Subscribe to liquidation-orders for SWAP (perpetual futures)
+            sub_msg = {
+                "op": "subscribe",
+                "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]
+            }
+            await ws.send(json.dumps(sub_msg))
+            log.info("[OKXLiq] Subscribed to liquidation-orders (SWAP)")
+
+            async for raw in ws:
+                if not self._running:
+                    break
+                try:
+                    msg = json.loads(raw)
+                    if msg.get("event") == "subscribe":
+                        log.info(f"[OKXLiq] Subscription confirmed: {msg}")
+                        continue
+                    if msg.get("event") == "error":
+                        log.error(f"[OKXLiq] Error: {msg}")
+                        continue
+                    if "data" in msg:
+                        self._process(msg)
+                except Exception as e:
+                    log.debug(f"[OKXLiq] Parse error: {e}")
+
+            self._connected = False
+
+    def _process(self, msg: dict):
+        """
+        OKX liquidation-orders format:
+        {
+          "arg": {"channel": "liquidation-orders", "instType": "SWAP"},
+          "data": [{
+            "details": [{
+              "side": "buy",       // buy = short liquidated (bullish)
+              "sz": "0.1",         // size in contracts
+              "px": "67000",       // price
+              "ts": "1716000000000"
+            }],
+            "instId": "BTC-USDT-SWAP"
+          }]
+        }
+
+        side="buy" → short position liquidated (forced buy to close) → BULLISH pressure
+        side="sell" → long position liquidated (forced sell to close) → BEARISH pressure
+        """
+        data_list = msg.get("data", [])
+        for item in data_list:
+            inst_id = item.get("instId", "")
+            coin = _okx_instid_to_coin(inst_id)
+            if not coin:
+                continue
+
+            details = item.get("details", [])
+            for detail in details:
+                price = float(detail.get("px", 0))
+                qty = float(detail.get("sz", 0))
+                liq_side = detail.get("side", "")
+                ts = int(detail.get("ts", int(time.time() * 1000)))
+
+                if price == 0 or qty == 0:
+                    continue
+
+                # Normalize: side = the position that got liquidated
+                # OKX side="sell" → long got liquidated, side="buy" → short got liquidated
+                normalized = {
+                    "coin": coin,
+                    "px": price,
+                    "sz": qty,
+                    "side": "long" if liq_side == "sell" else "short",
+                    "source": "okx",
+                    "time": ts,
+                }
+                self._cache.on_liquidations([normalized])
+                self._event_count += 1

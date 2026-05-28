@@ -170,16 +170,45 @@ class AIMarketAnalyst:
             return False
         return True
 
-    def _confidence_to_score_adj(self, confidence: float) -> int:
-        """Convert AI confidence to bounded score adjustment."""
-        if confidence >= 0.7:
-            return +8
-        elif confidence >= 0.5:
-            return +4
-        elif confidence >= 0.3:
-            return 0
-        else:
+    def _confidence_to_score_adj(self, confidence: float, fake_breakout_risk: float = 0.0) -> int:
+        """
+        Convert AI confidence to bounded score adjustment.
+        [AUDIT #15 FIX] Previous mapping was broken:
+        - conf 0.50 (neutral) mapped to +4 → always boosted losers
+        - conf never < 0.30 → AI could NEVER penalize
+        - fake_breakout_risk was IGNORED
+        
+        Data (27 matched trades):
+        - AI boost (adj>0): WR 18%, avg PnL -$0.46
+        - AI neutral (adj=0): WR 44%, avg PnL -$0.05
+        → AI boost = INVERSE predictor. Fix: raise thresholds, use fake_breakout.
+        
+        New mapping calibrated to Mimo's actual output range (0.42-0.72):
+        - 0.75+ = very rare, genuine strong signal → small boost
+        - 0.60-0.74 = moderate → neutral (was +4, caused losses)
+        - 0.45-0.59 = neutral → neutral
+        - 0.35-0.44 = skeptical → mild penalty
+        - <0.35 = bad setup → strong penalty
+        
+        fake_breakout_risk > 0.5 → force penalty (override confidence).
+        """
+        # Fake breakout override — if AI thinks >50% chance of fake breakout, penalize
+        if fake_breakout_risk > 0.6:
             return -5
+        elif fake_breakout_risk > 0.5:
+            return -3
+
+        # Confidence-based adjustment (recalibrated for Mimo output range)
+        if confidence >= 0.75:
+            return +6
+        elif confidence >= 0.60:
+            return 0   # was +4 → caused 18% WR. Now neutral.
+        elif confidence >= 0.45:
+            return 0
+        elif confidence >= 0.35:
+            return -3
+        else:
+            return -6
 
     async def evaluate_signal(self, context: dict) -> AIVerdict:
         """
@@ -236,11 +265,28 @@ class AIMarketAnalyst:
 
         prompt = self._build_prompt(context)
         _system = (
-            "You are an institutional crypto scalping microstructure analyst. "
-            "Evaluate trade setups and return confidence scores. "
-            "Be precise, data-driven, no speculation. "
-            "Confidence calibration: 0.50=neutral, 0.60=moderate edge, "
-            "0.70+=strong confluence, above 0.85=extremely rare. "
+            "You are a crypto SCALPER microstructure analyst for a bot that holds positions 8-12 minutes. "
+            "Your job is to identify FAKE setups that will NOT follow through, not to confirm existing signals.\n\n"
+            "CRITICAL CONTEXT about this bot:\n"
+            "- Bot profits ONLY from trailing stop (fires at minute 4-8 when price trends). "
+            "If price doesn't move significantly in 8 min, trade = loss (time_exit).\n"
+            "- 'Many signals agreeing' = BAD. It means move ALREADY happened, price exhausted, no follow-through.\n"
+            "- Low score trades (52-56) with 1-2 strong leading signals = BEST performers (fresh move ahead).\n"
+            "- High score trades (65+) with many confirming signals = WORST performers (move already done).\n"
+            "- Strong 5m momentum ALREADY happened = exhaustion risk, NOT continuation signal.\n"
+            "- High ATR + strong momentum = move is DONE, not starting.\n\n"
+            "YOUR ROLE: Be SKEPTICAL. Default confidence should be LOW (0.35-0.45). "
+            "Only boost confidence above 0.60 if you see genuine UNTAPPED potential:\n"
+            "- Fresh OB wall building (imbalance >0.4) with NO price move yet (momentum near 0)\n"
+            "- Extreme funding (crowded positioning) that hasn't unwound yet\n"
+            "- Low ATR volatility with building pressure (calm before storm)\n\n"
+            "RED FLAGS that should LOWER confidence below 0.35:\n"
+            "- 5m momentum already >0.3% in trade direction (move done)\n"
+            "- ATR volatility >5% (too chaotic for 8-min scalp)\n"
+            "- HTF regime conflicts with trade direction\n"
+            "- Multiple components all positive (lagging confirmation, not leading)\n\n"
+            "Confidence calibration: 0.30=skeptical (default for most setups), "
+            "0.45=neutral, 0.60=moderate untapped edge, 0.75+=very rare fresh setup.\n"
             "Always respond in valid JSON only."
         )
         _messages = [{"role": "system", "content": _system}, {"role": "user", "content": prompt}]
@@ -274,7 +320,7 @@ class AIMarketAnalyst:
 
     def _build_prompt(self, ctx: dict) -> str:
         """Build structured prompt from signal context."""
-        return f"""Evaluate this crypto scalping setup:
+        return f"""Evaluate this crypto scalping setup (8-12 minute hold time):
 
 TRADE SETUP
 -----------
@@ -301,14 +347,15 @@ OB Imbalance: {ctx.get('ob_imbalance', 0):.2f}
 BTC 7m Move: {ctx.get('btc_move', 0)*100:.3f}%
 Volume Trend: {ctx.get('volume_trend', 'unknown')}
 
-EVALUATION RULES
-----------------
-- Favor momentum continuation during strong trend regimes.
-- Penalize weak momentum with high ATR volatility.
-- Penalize setups likely caused by liquidity sweeps or exhaustion spikes.
-- Reduce confidence if BTC movement conflicts with trade direction.
-- High funding + overextended momentum = crowded positioning risk.
-- In CHOPPY/ranging regime, OB walls are often traps (reduce confidence).
+EVALUATION FOCUS (8-min scalper specific)
+-----------------------------------------
+- If 5m momentum > 0.3% in trade direction: move likely EXHAUSTED. Lower confidence.
+- If ATR > 5%: too volatile for 8-min hold. Lower confidence.
+- If many components are positive (OB+EMA+RSI+FUND all agree): likely LAGGING confirmation, move done. Lower confidence.
+- If OB imbalance strong (>0.4) BUT momentum near 0: FRESH setup, untapped. Higher confidence.
+- If HTF regime conflicts with direction: high fake breakout risk.
+- If funding extreme + momentum extended: crowded trade, reversal risk.
+- CHOPPY regime + OB wall = likely liquidity TRAP (wall will be eaten).
 
 Return JSON only:
 {{"confidence": 0.0, "fake_breakout_probability": 0.0, "momentum_quality": "weak|medium|strong", "market_state": "trend_continuation|exhaustion|chop|breakout|squeeze", "risk_note": "", "reasoning": ""}}"""
@@ -339,7 +386,7 @@ Return JSON only:
 
             return AIVerdict(
                 confidence=confidence,
-                score_adj=self._confidence_to_score_adj(confidence),
+                score_adj=self._confidence_to_score_adj(confidence, float(data.get("fake_breakout_probability", 0))),
                 fake_breakout_risk=float(data.get("fake_breakout_probability", 0)),
                 momentum_quality=data.get("momentum_quality", "medium"),
                 market_state=data.get("market_state", "unknown"),
