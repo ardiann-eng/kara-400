@@ -2339,6 +2339,18 @@ class KaraTelegram:
 
     async def send_position_opened(self, pos, signal, target_chat_id: str = None):
         """Premium AI Agent Notification for a successful entry."""
+
+        def _calc_rr(p) -> float:
+            """R:R dari actual Position levels (bukan Signal) — lebih akurat post-override."""
+            if p.side.value == "long":
+                reward = p.tp2 - p.entry_price
+                risk   = p.entry_price - p.stop_loss
+            else:
+                reward = p.entry_price - p.tp2
+                risk   = p.stop_loss - p.entry_price
+            if risk <= 0 or risk < p.entry_price * 0.001:
+                return 0.0
+            return round(min(reward / risk, 20.0), 2)
         # Determine labels
         # Use user_db directly for reliable mode labeling in notifications
         chat_id = target_chat_id or (list(self._authorized_chat_ids)[0] if self._authorized_chat_ids else "")
@@ -2361,7 +2373,7 @@ class KaraTelegram:
             f"  • 🛑 SL   : <code>${format_price(pos.stop_loss)}</code>\n"
             f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code>\n"
             f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code>\n"
-            f"  • 📐 R:R Ratio: <b>{signal.risk_reward_ratio:.2f}x</b>\n"
+            f"  • 📐 R:R Ratio: <b>{_calc_rr(pos):.2f}x</b>\n"
             f"  • 📊 Score: <b>{signal.score}/100</b>\n\n"
             
             f"<i>Eksekusi selesai. Memantau market untuk exit terbaik. ✨</i>"
@@ -2430,18 +2442,20 @@ class KaraTelegram:
         elif action_type == "tp2":
             # TP2 closes X% of remaining. Calculate cumulative closed.
             _tp1_pct = int(getattr(pos, '_tp1_close_pct', 50))  # fallback 50% for scalper
-            _cumulative = _tp1_pct + int((100 - _tp1_pct) * action.get("close_ratio", 0.667))
+            _tp2_abs_pct = int((100 - _tp1_pct) * action.get("close_ratio", 0.667))  # % of total closed at TP2
+            _cumulative = _tp1_pct + _tp2_abs_pct
             _remaining = 100 - _cumulative
             text = (
                 "🏁 <b>KARA UPDATE: TP2 Tercapai</b>\n\n"
-                f"<i>Target kedua hit pada <b>{pos.asset}</b>. Total {_cumulative}% posisi sudah dikunci.</i>\n\n"
+                f"<i>Target kedua hit pada <b>{pos.asset}</b>.</i>\n\n"
 
-                f"🎯🎯 <b>TP2 HIT — {_close_pct}% of remaining Closed</b>\n"
+                f"🎯🎯 <b>TP2 HIT — +{_tp2_abs_pct}% posisi ditutup</b>\n"
                 f"  • Entry   : <code>${format_price(entry)}</code>\n"
                 f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
 
-                f"🛡️ <b>Menuju ATR Trail</b>\n"
-                f"  • Sisa {_remaining}% masih berjalan\n"
+                f"📊 <b>Status Posisi</b>\n"
+                f"  • TP1 (50%) ✅ + TP2 ({_tp2_abs_pct}%) ✅ = {_cumulative}% dikunci\n"
+                f"  • Sisa {_remaining}% masih berjalan → ATR Trail\n"
                 f"  • Menunggu trail activation... 🚀"
             )
 
