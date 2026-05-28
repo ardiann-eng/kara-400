@@ -2403,12 +2403,17 @@ class KaraTelegram:
         current = prices.get(pos.asset, pos.entry_price)
         entry   = pos.entry_price
         side_str = "LONG" if pos.side.value == "long" else "SHORT"
-        
+
+        # [FIX] Use action["price"] (fill price at trigger time) for pnl_pct calculation.
+        # NOT current market price — notif may be sent after price moved further.
+        # action["price"] is set by check_tp_trail at the exact trigger moment.
+        fill_at_trigger = action.get("price", current)
+
         # Calculate ROE % (leverage-adjusted price move — NOT diluted by partial size)
         # [AUDIT FIX 2026-05-21] Was: (pnl / (size_initial * entry)) * leverage * 100
         # That showed diluted % (partial profit / total notional). Now shows actual ROE.
-        if entry and pos.size_current > 0:
-            price_move = (action.get("price", current) - entry) / entry
+        if entry and fill_at_trigger:
+            price_move = (fill_at_trigger - entry) / entry
             if pos.side.value == "short":
                 price_move = -price_move
             pnl_pct = price_move * pos.leverage * 100

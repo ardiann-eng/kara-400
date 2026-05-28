@@ -533,8 +533,20 @@ class PaperExecutor(BaseExecutor):
         close_ratio = action["close_ratio"]
         close_size  = pos.size_current * close_ratio
 
+        # [FIX] Use TP price as fill price for partial closes, not current_price.
+        # current_price may have moved past TP1/TP2 by the time scan detects it.
+        # Using current_price overstates PnL. Use the actual TP level as fill.
+        if action["action"] == "tp1":
+            tp_fill_price = pos.tp1 if pos.tp1 > 0 else fill_price
+        elif action["action"] == "tp2":
+            tp_fill_price = pos.tp2 if pos.tp2 > 0 else fill_price
+        elif action["action"] == "tp3":
+            tp_fill_price = pos.tp3 if pos.tp3 > 0 else fill_price
+        else:
+            tp_fill_price = fill_price
+
         partial_pnl = (
-            pos.floating_pct(fill_price) *
+            pos.floating_pct(tp_fill_price) *
             close_size * pos.entry_price
         )
 
