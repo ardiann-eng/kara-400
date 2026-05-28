@@ -47,17 +47,17 @@ class AIMarketAnalyst:
         self.model = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
         self.temperature = 0.2
         self.timeout = 12.0     # health_check timeout — api.xiaomimimo.com ~6-10s from Railway SG
-        self.eval_timeout = 10.0  # per-signal evaluation timeout
+        self.eval_timeout = 4.0  # [AUDIT #14] was 10s — too slow for scalper. 4s max, else skip.
         self.enabled = bool(self.api_key)
         self._client = None
         self._client_fallback = None
         self._using_fallback = False
         self._primary_rate_limited = False
         self._cache: dict = {}
-        self._cache_ttl = 300  # cache per asset for 300s (5min) — was 60s, saves ~80% calls
+        self._cache_ttl = 60  # [AUDIT #14] was 300s — too long, AI rarely called. 60s = fresh per asset
         self._daily_calls = 0
         self._daily_reset = 0
-        self._max_daily = 200
+        self._max_daily = 500  # [AUDIT #14] was 200 — now AI evaluates every signal
         self._connected = False
 
         if self.enabled:

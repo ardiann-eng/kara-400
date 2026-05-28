@@ -166,7 +166,7 @@ class ReasoningLogger:
     def log_regime_adjustment(self, asset: str, regime: str, multiplier: float,
                               score_before: int, score_after: int,
                               htf_regime: str = "", htf_threshold_adj: int = 0):
-        """Log regime multiplier + 4H HTF adjustment (2026-05-21: CHOPPY +8)."""
+        """Log regime multiplier + 1H HTF adjustment."""
         data = {
             "vol_regime": regime,
             "regime_multiplier": multiplier,

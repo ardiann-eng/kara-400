@@ -516,12 +516,13 @@ class ScoringEngine:
         # 4a. Fetch regime BEFORE scoring for regime_multiplier [AUDIT Phase 1]
         vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
 
-        # 4a2. [4H REGIME FILTER 2026-05-18] Fetch 4h market regime.
+        # 4a2. [1H REGIME FILTER — AUDIT #14 REDESIGN] Fetch 1h market regime.
+        # Was 4H but always returned CHOPPY (98%). Now 1H with lower thresholds.
         # Aligns 1m scalp direction with higher-timeframe trend.
         # TRENDING_UP:   only LONG allowed at normal threshold; SHORT needs +8 extra score
         # TRENDING_DOWN: only SHORT allowed at normal threshold; LONG needs +8 extra score
-        # CHOPPY:        both directions allowed but threshold raised +2 (lower edge)
-        htf_regime = await self._fetch_4h_regime(asset)
+        # CHOPPY:        both directions allowed but threshold raised +3 (lower edge)
+        htf_regime = await self._fetch_1h_regime(asset)
 
         # 4b. Compute scalper indicators (enriched with fundamental data)
         # [F1 FIX 2026-05-18] Capture per-analyzer signed contributions
@@ -537,35 +538,33 @@ class ScoringEngine:
             htf_regime=htf_regime,
         )
 
-        # 4b2. Apply 4h regime adjustment to score and leverage
+        # 4b2. Apply 1H regime adjustment to score and leverage
         htf_threshold_adj = 0
         htf_leverage_adj  = 0
         if htf_regime == "TRENDING_UP":
             if side == Side.LONG:
-                htf_threshold_adj = -3   # easier entry — aligned with 4h trend
+                htf_threshold_adj = -3   # easier entry — aligned with 1h trend
                 htf_leverage_adj  = +2   # slightly more conviction
-                reasons.append(f"📈 4H TRENDING_UP — LONG aligned (+lev, -threshold)")
-            else:  # SHORT against 4h trend
-                htf_threshold_adj = +8   # need much stronger signal to fade 4h trend
+                reasons.append(f"📈 1H TRENDING_UP — LONG aligned (+lev, -threshold)")
+            else:  # SHORT against 1h trend
+                htf_threshold_adj = +8   # need much stronger signal to fade 1h trend
                 htf_leverage_adj  = -3
-                reasons.append(f"⚠️ 4H TRENDING_UP — SHORT counter-trend (+8 threshold)")
+                reasons.append(f"⚠️ 1H TRENDING_UP — SHORT counter-trend (+8 threshold)")
         elif htf_regime == "TRENDING_DOWN":
             if side == Side.SHORT:
                 htf_threshold_adj = -3
                 htf_leverage_adj  = +2
-                reasons.append(f"📉 4H TRENDING_DOWN — SHORT aligned (+lev, -threshold)")
-            else:  # LONG against 4h trend
+                reasons.append(f"📉 1H TRENDING_DOWN — SHORT aligned (+lev, -threshold)")
+            else:  # LONG against 1h trend
                 htf_threshold_adj = +8
                 htf_leverage_adj  = -3
-                reasons.append(f"⚠️ 4H TRENDING_DOWN — LONG counter-trend (+8 threshold)")
+                reasons.append(f"⚠️ 1H TRENDING_DOWN — LONG counter-trend (+8 threshold)")
         else:  # CHOPPY
-            # [AUDIT #13 FIX] Re-enable moderate penalty. Was 0 (disabled in Audit #9
-            # because detector returns CHOPPY 98% of time). But data shows CHOPPY = death
-            # zone for trend-following (trailing 31.5%, time_exit 61%). +3 is gentle enough
-            # to not kill frequency but raises bar slightly for entry quality.
+            # [AUDIT #14] With 1H regime, CHOPPY now means genuinely no direction.
+            # Keep +3 threshold — but now it only fires ~40-60% of time (was 98%).
             htf_threshold_adj = +3
             htf_leverage_adj  = -2
-            reasons.append(f"〰️ 4H CHOPPY — threshold +3, leverage reduced")
+            reasons.append(f"〰️ 1H CHOPPY — threshold +3, leverage reduced")
 
         # 4c. [OPPORTUNITY SCORING] Regime multiplier — ranging = opportunity, trending = stale
         # Data audit: trending ×1.2 caused score inflation at exhaustion points.
@@ -684,7 +683,7 @@ class ScoringEngine:
 
         # ── [LEARNING ENGINE] Evaluate pattern memory + ML model ──────────
         from engine.learning_engine import learning_engine
-        _learn_regime = _regime_cat  # ranging/trending/late_trend/volatile
+        _learn_regime = vol_regime.value  # [AUDIT #14 FIX] was _regime_cat — must match signal.regime.value used in record_outcome
         _learn_decision = learning_engine.evaluate(
             asset=asset,
             side=side.value.lower(),
@@ -724,66 +723,12 @@ class ScoringEngine:
                 "reason": _learn_decision.reason,
             })
 
-        # ── [AI INTELLIGENCE] Mimo v2.5 Pro — confidence-based score adjustment ──
-        # AI evaluates setup quality and adds bounded pts (+8 to -5).
-        # Non-blocking: timeout 4s, fallback = neutral (score_adj=0).
-        # AI = evaluator only, never single-handedly blocks/approves trade.
-        #
-        # [COST OPT] Only call AI if score is within striking distance of threshold.
-        # Pre-compute effective_threshold estimate using base + HTF adj (fast, no session math).
-        # Max AI boost = +8. If score < (threshold_estimate - 8), AI can't help → skip.
-        _ai_min_threshold_est = (
-            config.SCALPER.min_score_to_enter
-            + htf_threshold_adj
-            + session_threshold_delta
-        )
+        # ── [AI INTELLIGENCE] MOVED to post-filter (Audit #14) ──
+        # AI now evaluates EVERY signal that passes all filters.
+        # Old position: before threshold → only 3% signals got AI.
+        # New position: after all filters → AI evaluates every trade.
         _ai_score_adj = 0
         _ai_verdict = None
-        _ai_worth_calling = score >= (_ai_min_threshold_est - 8)  # within AI boost range
-        try:
-            from intelligence.ai_analyst import ai_analyst
-            if ai_analyst.enabled and _ai_worth_calling:
-                _ai_context = {
-                    "asset": asset,
-                    "side": side.value.upper(),
-                    "score": score,
-                    "components": {
-                        "OB": _scalper_components.get("ob_signed", 0),
-                        "EMA": _scalper_components.get("ema_pts", 0),
-                        "RSI": _scalper_components.get("rsi_pts", 0),
-                        "FUND": _scalper_components.get("oi_signed", 0),
-                        "XAM": _scalper_components.get("xam_pts", 0),
-                    },
-                    "regime": _regime_cat,
-                    "htf_regime": htf_regime,
-                    "momentum_move_pct": trend_pct,
-                    "atr_pct": realized_vol or 0.01,
-                    "funding_rate": funding.funding_rate if funding else 0.0,
-                    "ob_imbalance": _scalper_components.get("ob_signed", 0) / 18.0,
-                    "btc_move": 0.0,  # populated from XAM data if available
-                    "volume_trend": "unknown",
-                }
-                _ai_verdict = await ai_analyst.evaluate_signal(_ai_context)
-                _ai_score_adj = _ai_verdict.score_adj
-                if _ai_score_adj != 0:
-                    score += _ai_score_adj
-                    score = max(0, min(100, score))
-                    reasons.append(
-                        f"🧠 AI: conf={_ai_verdict.confidence:.2f} ({_ai_verdict.market_state}) "
-                        f"→ {_ai_score_adj:+d}pts"
-                    )
-                elif _ai_verdict.error:
-                    log.debug(f"[AI] {asset}: {_ai_verdict.error} (latency={_ai_verdict.latency_ms:.0f}ms)")
-                # Save to DB for dashboard (non-blocking, fire-and-forget)
-                try:
-                    from intelligence.ai_analyst import save_ai_verdict
-                    save_ai_verdict(asset, side.value, score - _ai_score_adj, _ai_verdict)
-                except Exception:
-                    pass
-        except ImportError:
-            pass  # openai not installed — AI disabled silently
-        except Exception as _ai_err:
-            pass  # AI error — neutral, don't affect trade
 
         # Effective threshold: overlap = market efisien, butuh sinyal LEBIH kuat
         # [P0-1 FIX 2026-05-18] Data: overlap WR=6.1% karena threshold terlalu rendah.
@@ -829,7 +774,7 @@ class ScoringEngine:
             config.SCALPER.min_score_to_enter
             + overlap_threshold_adj         # [P0-1] overlap: +8, NY-only: +3
             + session_threshold_delta       # Asia: threshold rises
-            + htf_threshold_adj             # 4h regime: aligned=-3, counter=+8, choppy=+8
+            + htf_threshold_adj             # 1h regime: aligned=-3, counter=+8, choppy=+3
             + _vol_threshold_adj            # [AUDIT #6] EXTREME: +15 (only 71+ passes)
             + _vote_margin_adj              # [AUDIT #7] low consensus: +5
             + _oi_gate_adj                  # [AUDIT #7] low OI: +5
@@ -1149,6 +1094,62 @@ class ScoringEngine:
         # [AUDIT #9] Trend structure veto REMOVED — redundant with pump gate.
         # Pump gate already checks 3/5 candle direction + move < 0.7%.
 
+        # ── [AI INTELLIGENCE — AUDIT #14] Evaluate EVERY signal that passes filters ──
+        # Moved here from pre-threshold position. Now AI sees only qualified signals.
+        # AI can boost (+8) or penalize (-5). If penalty drops below threshold → cancel.
+        try:
+            from intelligence.ai_analyst import ai_analyst
+            if ai_analyst.enabled:
+                _ai_context = {
+                    "asset": asset,
+                    "side": side.value.upper(),
+                    "score": score,
+                    "components": {
+                        "OB": _scalper_components.get("ob_signed", 0),
+                        "EMA": _scalper_components.get("ema_pts", 0),
+                        "RSI": _scalper_components.get("rsi_pts", 0),
+                        "FUND": _scalper_components.get("oi_signed", 0),
+                        "XAM": _scalper_components.get("xam_pts", 0),
+                    },
+                    "regime": _regime_cat,
+                    "htf_regime": htf_regime,
+                    "momentum_move_pct": trend_pct,
+                    "atr_pct": realized_vol or 0.01,
+                    "funding_rate": funding.funding_rate if funding else 0.0,
+                    "ob_imbalance": _scalper_components.get("ob_signed", 0) / 18.0,
+                    "btc_move": 0.0,
+                    "volume_trend": "unknown",
+                }
+                _ai_verdict = await ai_analyst.evaluate_signal(_ai_context)
+                _ai_score_adj = _ai_verdict.score_adj
+                if _ai_score_adj != 0:
+                    score += _ai_score_adj
+                    score = max(0, min(100, score))
+                    reasons.append(
+                        f"🧠 AI: conf={_ai_verdict.confidence:.2f} ({_ai_verdict.market_state}) "
+                        f"→ {_ai_score_adj:+d}pts"
+                    )
+                    # AI penalty dropped score below threshold → cancel signal
+                    if _ai_score_adj < 0 and score < effective_threshold:
+                        log.info(
+                            f"[AI-VETO] {asset} | score={score} (was {score - _ai_score_adj}) | "
+                            f"AI penalty {_ai_score_adj} dropped below threshold {effective_threshold}"
+                        )
+                        self.skip_counters["ai_veto"] = self.skip_counters.get("ai_veto", 0) + 1
+                        return None, score
+                elif _ai_verdict.error:
+                    log.debug(f"[AI] {asset}: {_ai_verdict.error} (latency={_ai_verdict.latency_ms:.0f}ms)")
+                # Save to DB for dashboard
+                try:
+                    from intelligence.ai_analyst import save_ai_verdict
+                    save_ai_verdict(asset, side.value, score - _ai_score_adj, _ai_verdict)
+                except Exception:
+                    pass
+        except ImportError:
+            pass
+        except Exception as _ai_err:
+            log.debug(f"[AI] {asset}: error {_ai_err}")
+
         signal = self._build_scalper_signal(
             asset, side, score, mark_price, reasons, vol_regime,
             session_bonus, realized_vol, trend_pct, atr_pct=atr_pct_now,
@@ -1175,7 +1176,7 @@ class ScoringEngine:
             htf_threshold_adj=htf_threshold_adj,
         )
 
-        # Apply 4h regime leverage adjustment
+        # Apply 1H regime leverage adjustment
         if signal and htf_leverage_adj != 0:
             scfg = config.SCALPER
             new_lev = max(3, min(scfg.max_leverage, signal.suggested_leverage + htf_leverage_adj))
@@ -1429,12 +1430,13 @@ class ScoringEngine:
                 imb = 0.0
 
             # OB imbalance = pressure building (LEADING — wall hasn't broken yet)
-            # [AUDIT #13 FIX] OB reduced in ranging/low-trend regime.
+            # [AUDIT #14 FIX] OB reduced when HTF regime is CHOPPY.
+            # Was: abs(trend_pct) < 0.035 — unreliable, OB=18 still appeared 59/161 signals.
+            # Now: uses htf_regime directly (same detector that drives threshold adj).
             # Data: OB r=-0.148 (INVERSE in choppy). Wall = liquidity trap, not support.
-            # Only reduce, don't zero — OB still valid when combined with other signals.
             _ob_regime_mult = 1.0
-            if abs(trend_pct) < 0.035:  # ranging regime (same threshold as regime_cat)
-                _ob_regime_mult = 0.6  # 40% reduction — not too aggressive for crypto
+            if htf_regime == "CHOPPY":
+                _ob_regime_mult = 0.6  # 40% reduction in choppy — wall less reliable
             if abs(imb) > 0.45:
                 pts = int(18 * _ob_regime_mult)
                 if imb > 0:
@@ -1816,7 +1818,7 @@ class ScoringEngine:
             elif any("price falling" in r for r in reasons):
                 _dir_bear += 1
 
-        # Vote 5: 4H HTF regime (stable, higher-timeframe trend — data: aligned PnL +$3.74)
+        # Vote 5: 1H HTF regime (higher-timeframe trend — now actually discriminates)
         if htf_regime == "TRENDING_UP":
             _dir_bull += 2
         elif htf_regime == "TRENDING_DOWN":
@@ -2959,36 +2961,40 @@ class ScoringEngine:
         return (current - old_price) / old_price
 
     # ──────────────────────────────────────────
-    # 4H REGIME DETECTION
+    # 1H REGIME DETECTION (was 4H — Audit #14 redesign)
     # ──────────────────────────────────────────
 
-    async def _fetch_4h_regime(self, asset: str) -> str:
+    async def _fetch_1h_regime(self, asset: str) -> str:
         """
-        Classify 4h market regime for an asset.
+        Classify 1H market regime for scalper (12-min hold window).
         Returns: "TRENDING_UP" | "TRENDING_DOWN" | "CHOPPY"
-        Cached 4 hours per asset.
 
-        Logic:
-          - Fetch last 20 × 4h candles (~3.3 days)
-          - EMA10 vs EMA20 on 4h closes → direction
-          - ADX proxy (avg true range vs avg body) → trend strength
-          - TRENDING_UP:   EMA10 > EMA20 and trend strong
-          - TRENDING_DOWN: EMA10 < EMA20 and trend strong
-          - CHOPPY:        EMAs close or trend weak
+        [AUDIT #14 REDESIGN] Was 4H — always returned CHOPPY (98% of time).
+        Root cause: 4H EMA + strength 0.30 threshold too strict for crypto.
+        
+        New design (1H):
+          - Fetch last 24 × 1h candles (24 hours)
+          - EMA8 vs EMA21 on 1h closes → direction (faster response)
+          - Strength threshold 0.15 (was 0.30 — crypto is inherently volatile)
+          - EMA gap 0.1% (was 0.2% — more sensitive to trend changes)
+          - Cache 15 minutes (was 4h — scalper needs fresher regime data)
+          
+        Expected: ~40-60% CHOPPY (was 98%), rest split TRENDING_UP/DOWN.
+        This gives the threshold/leverage adjustments actual discriminating power.
         """
-        cache_key = f"4h_{asset}"
+        cache_key = f"1h_{asset}"
         cached = self._vol_cache.get(cache_key)
-        if cached and (time.monotonic() - cached[0]) < 14400:  # 4h cache
+        if cached and (time.monotonic() - cached[0]) < 900:  # 15min cache (was 4h)
             return cached[1]
 
         try:
             async with self.candle_sem:
                 await asyncio.sleep(0.2)
                 now_ms   = int(time.time() * 1000)
-                start_ms = now_ms - (20 * 4 * 3600 * 1000)  # 20 × 4h candles
+                start_ms = now_ms - (24 * 3600 * 1000)  # 24 × 1h candles
                 resp, succ = await self.client._call_info_endpoint(
                     "candleSnapshot",
-                    {"req": {"coin": asset, "interval": "4h",
+                    {"req": {"coin": asset, "interval": "1h",
                              "startTime": start_ms, "endTime": now_ms}}
                 )
 
@@ -3020,31 +3026,40 @@ class ScoringEngine:
                     e = v * k + e * (1 - k)
                 return e
 
-            ema10 = _ema(closes, 10) if len(closes) >= 10 else closes[-1]
-            ema20 = _ema(closes, 20) if len(closes) >= 20 else closes[-1]
+            # [FIX A+B] EMA8/21 (faster than 10/20) + lower gap threshold
+            ema8  = _ema(closes, 8) if len(closes) >= 8 else closes[-1]
+            ema21 = _ema(closes, 21) if len(closes) >= 21 else closes[-1]
 
-            # Trend strength: ratio of directional move vs total range
-            # High ratio = trending, low ratio = choppy
-            n = min(len(closes), 10)
+            # [FIX A] Strength threshold 0.15 (was 0.30)
+            # Crypto moves 0.5-2% per hour routinely. 30% strength = only parabolic moves.
+            # 15% = moderate directional bias, appropriate for 1H timeframe.
+            n = min(len(closes), 8)  # last 8 hours (was 10 candles of 4H = 40 hours)
             total_range = sum(highs[-n:][i] - lows[-n:][i] for i in range(n))
             net_move    = abs(closes[-1] - closes[-n])
             strength    = net_move / total_range if total_range > 0 else 0
 
-            STRENGTH_THRESHOLD = 0.30  # net move must be >30% of total range
+            STRENGTH_THRESHOLD = 0.15  # [FIX A] was 0.30
 
-            if ema10 > ema20 * 1.002 and strength >= STRENGTH_THRESHOLD:
+            # [FIX B] EMA gap 0.1% (was 0.2%)
+            # 0.2% gap on 4H = needs multi-day trend. 0.1% on 1H = few hours of direction.
+            EMA_GAP = 1.001  # was 1.002
+
+            if ema8 > ema21 * EMA_GAP and strength >= STRENGTH_THRESHOLD:
                 regime = "TRENDING_UP"
-            elif ema10 < ema20 * 0.998 and strength >= STRENGTH_THRESHOLD:
+            elif ema8 < ema21 * (2 - EMA_GAP) and strength >= STRENGTH_THRESHOLD:
                 regime = "TRENDING_DOWN"
             else:
                 regime = "CHOPPY"
 
             self._vol_cache[cache_key] = (time.monotonic(), regime)
-            log.info(f"[4H-REGIME] {asset}: {regime} | EMA10={ema10:.4f} EMA20={ema20:.4f} strength={strength:.2f}")
+            log.info(
+                f"[1H-REGIME] {asset}: {regime} | EMA8={ema8:.4f} EMA21={ema21:.4f} "
+                f"strength={strength:.3f} (thr={STRENGTH_THRESHOLD})"
+            )
             return regime
 
         except Exception as e:
-            log.debug(f"[4H-REGIME] {asset}: fetch failed ({e}), defaulting CHOPPY")
+            log.debug(f"[1H-REGIME] {asset}: fetch failed ({e}), defaulting CHOPPY")
             self._vol_cache[cache_key] = (time.monotonic(), "CHOPPY")
             return "CHOPPY"
 

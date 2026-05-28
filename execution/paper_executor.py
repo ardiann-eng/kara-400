@@ -233,6 +233,11 @@ class PaperExecutor(BaseExecutor):
             pos._ml_features['momentum_move'] = _bd.momentum_move_pct
             pos._ml_features['regime_code'] = 1 if _bd.htf_regime == 'TRENDING_UP' else (-1 if _bd.htf_regime == 'TRENDING_DOWN' else 0)
 
+        # [AUDIT #14 FIX] Store regime for pattern memory key matching
+        # evaluate() uses _regime_cat (ranging/trending/etc), record_outcome must use same.
+        # signal.regime.value = MarketRegime string (ranging/trending/high_vol/extreme)
+        pos._learn_regime = signal.regime.value if hasattr(signal, 'regime') else 'ranging'
+
         # BUG 1 FIX: Persist to SQLite
         from core.db import user_db
         cid = self.chat_id
@@ -461,7 +466,7 @@ class PaperExecutor(BaseExecutor):
             learning_engine.record_outcome(
                 asset=pos.asset,
                 side=pos.side.value.lower(),
-                regime=getattr(pos, 'trade_mode', 'ranging'),
+                regime=getattr(pos, '_learn_regime', 'ranging'),  # [AUDIT #14 FIX] was 'trade_mode' → key mismatch with evaluate()
                 score=pos.entry_score,
                 pnl_usd=total_pnl,
                 pos_id=_signal_key,

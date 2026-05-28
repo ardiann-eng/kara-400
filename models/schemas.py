@@ -150,7 +150,7 @@ class ScoreBreakdown(BaseModel):
     momentum_move_pct:     float = 0.0
     momentum_candles:      str = ""   # e.g. "3/5"
 
-    # 4H HTF regime
+    # 1H HTF regime (was 4H — Audit #14 redesign for scalper)
     htf_regime:            str = ""
     htf_threshold_adj:     int = 0
 

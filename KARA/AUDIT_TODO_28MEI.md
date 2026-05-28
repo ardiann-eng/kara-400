@@ -2,180 +2,193 @@
 
 ## Context
 
-Deploy 27 Mei malam berisi **8 fix** dari Audit #13 findings:
-
-| # | Fix | Root Cause | Expected Impact |
-|---|-----|-----------|-----------------|
-| A1 | EMA fresh ≤2 (+8pts) | 57% signals got +10 (too easy), r=-0.185 INVERSE | Reduce score inflation, fewer premature entries |
-| A2 | OB ×0.6 di ranging | OB r=-0.148 INVERSE in choppy (wall=trap) | OB tidak inflate score di wrong regime |
-| A3 | HTF CHOPPY +3 threshold | 98.3% CHOPPY, threshold was 0 (disabled) | Raise bar slightly for entry quality |
-| B | LONG TP1 ×0.80 choppy | LONG trailing 30% (was 53.8%), TP1 unreachable | Trailing activate lebih cepat untuk LONG |
-| C | XAM 7min/0.08%/×5000 | XAM 10% fire, mostly small pts (4-6) | Fire lebih sering, lebih impactful |
-| D1 | Trailing PnL double-count fix | Notification showed 2× actual profit | Correct PnL display |
-| D2 | Stop Loss PnL double-count fix | Same bug as trailing | Correct PnL display |
-| E | Momentum Death exit | 61% time_exit, flat trades bleed slowly | Exit flat trades at 3min, minimal loss |
-| F1 | AI Intelligence — Mimo v2.5 Pro | No AI layer, scoring purely rule-based | AI adds ±8/-5 pts to score as 9th component |
-| F2 | AI fallback key | Single key = rate limit = AI offline | Auto-switch ke key 2 kalau key 1 rate limited |
-| F3 | AI startup health check | No visibility on AI connection status | Log jelas CONNECTED/RATE LIMITED/FAILED saat boot |
-| F4 | AI Dashboard section | No visibility on AI verdicts | Dashboard tab "AI Intel" — verdicts, accuracy, pipeline |
-| G | Momentum Death notification | New exit type, no notification template | Notif "MOMENTUM DEATH" dengan reasoning |
+Deploy 27 Mei malam berisi **8 fix** dari Audit #13 findings.
+**HASIL: KATASTROFIK.** PF 0.368, WR 26.7%, PnL -$13.89 dalam 10 jam.
 
 ---
 
-## Pre-Audit (28 Mei siang)
+## 🔴 HASIL POST-DEPLOY (10 jam, 45 trades)
 
-- [ ] Confirm deploy sukses (Railway logs: "Connected", no crash)
-- [ ] **Cek AI connection log: `[AI-CONNECT] MIMO AI: CONNECTED` atau `RATE LIMITED`?**
-- [ ] Cek logs: ada `momentum_death` skip/exit entries?
-- [ ] Tunggu ~20 jam, kumpulkan 40+ trades
-- [ ] Pull data dengan runbook Step 1
-
----
-
-## Tier 1 — Apakah 8 Fix Bekerja?
-
-### EMA Tighten (FIX A1)
-- [ ] **EMA +8 (fresh) rate** — target **<40%** (dari 57% di Audit #13)
-- [ ] **EMA +4 (medium) rate** — target **>50%** (dari 41%)
-- [ ] **EMA correlation** — target **≥ 0** (dari -0.185)
-- [ ] Kalau EMA +8 masih >50% → tighten ke ≤1 candle
-
-### OB Reduction (FIX A2)
-- [ ] **OB avg score** — target **<4** (dari +5.2 di Audit #13)
-- [ ] **OB correlation** — target **≥ 0** (dari -0.148)
-- [ ] Cek: OB=18 masih muncul? Harusnya max 10 di ranging
-- [ ] Kalau OB masih inverse → zero OB di ranging (bukan 0.6)
-
-### HTF CHOPPY +3 (FIX A3)
-- [ ] **Effective threshold** — cek logs: threshold=48 (45+3) di CHOPPY?
-- [ ] **Frequency** — target **1.8-2.5/hr** (dari 2.56, sedikit turun OK)
-- [ ] Kalau frequency <1.0/hr → revert ke +0 (terlalu ketat)
-- [ ] Kalau frequency masih >3/hr → naikkan ke +5
-
-### LONG TP1 ×0.80 (FIX B)
-- [ ] **LONG trailing fire** — target **>40%** (dari 30%)
-- [ ] **LONG WR** — target **>48%** (dari 42.5%)
-- [ ] **LONG PnL** — target **≥ $0** (dari -$0.02)
-- [ ] Cek signal reasons: ada "LONG choppy adj" message?
-
-### XAM Enhancement (FIX C)
-- [ ] **XAM fire rate** — target **>15%** (dari 10.3%)
-- [ ] **XAM avg pts** — target **>6** (dari avg 4-6)
-- [ ] **XAM correlation** — any positive data = good
-- [ ] Kalau XAM >40% → threshold terlalu rendah, revert ke 0.10%
-
-### PnL Display Fix (FIX D1+D2)
-- [ ] **Trailing stop notification** — PnL masuk akal? (bukan 2× lipat)
-- [ ] **Stop loss notification** — PnL correct?
-- [ ] Bandingkan notification PnL vs trade_history PnL — harus match
-
-### Momentum Death (FIX E)
-- [ ] **Momentum death fire rate** — target **10-25%** of all exits
-- [ ] **Momentum death avg loss** — target **< $0.10** (minimal loss)
-- [ ] **Time exit rate** — target **<45%** (dari 61%)
-- [ ] **Time exit avg loss** — should be LARGER per trade (karena yang kecil sudah di-catch momentum death)
-- [ ] Kalau momentum death >40% → threshold 0.05% terlalu ketat, naikkan ke 0.08%
-- [ ] Kalau momentum death 0% → cek apakah logic deployed correctly
-
-### AI Intelligence (FIX F1-F4)
-- [ ] **AI connection** — cek Railway logs: `[AI-CONNECT] MIMO AI: CONNECTED` atau `RATE LIMITED`?
-- [ ] **AI score adj** — cek signal reasons: ada `AI: conf=X.XX (state) → +Xpts`?
-- [ ] **AI fire rate** — berapa % signals yang dapat AI adjustment?
-- [ ] **AI avg confidence** — target 0.45-0.65 (tidak terlalu tinggi/rendah)
-- [ ] **AI fallback** — kalau key 1 rate limited, apakah auto-switch ke key 2?
-- [ ] **Dashboard AI Intel tab** — buka `/dashboard` → tab "AI Intel" → data muncul?
-- [ ] Kalau AI selalu timeout → cek network Railway ke `token-plan-cn.xiaomimimo.com`
-- [ ] Kalau AI confidence selalu >0.8 → model terlalu optimistic, review prompt
+| Metric | Audit #13 | Post-Deploy | Delta | Status |
+|--------|-----------|-------------|-------|--------|
+| Trades/hr | 2.56 | **4.51** | +76% | 🔴 OVERTRADING |
+| Win Rate | 44.4% | **26.7%** | -17.7pp | 🔴 ANJLOK |
+| Profit Factor | 1.128 | **0.368** | -67% | 🔴 KATASTROFIK |
+| PnL | +$2.77 | **-$13.89** | -$16.66 | 🔴 BLEEDING |
+| Trailing fire | 31.5% | **15.6%** | -15.9pp | 🔴 SETENGAH |
+| Time exit | 61.1% | 51.1% | -10pp | 🟡 Sedikit turun |
+| EMA +8 rate | 57% | **21.7%** | -35pp | ✅ FIX WORKS |
+| XAM fire | 10.3% | **24.2%** | +13.9pp | ✅ FIX WORKS |
+| Momentum death | N/A | **20.0%** | NEW | ✅ FIX WORKS |
+| OB avg | 5.2 | 2.91 | -2.29 | 🟡 PARTIAL |
 
 ---
 
-## Tier 2 — Quality Metrics
+## 🔍 ROOT CAUSE ANALYSIS
 
-- [ ] **Overall WR** — target >48% (dari 44.4%)
-- [ ] **Overall PF** — target **>1.3** (dari 1.128)
-- [ ] **Total PnL** — target **>+$5** (dari +$2.77)
-- [ ] **Score↔PnL r** — target **>+0.10** (dari +0.069)
-- [ ] **Trailing stop rate** — target **>40%** (dari 31.5%)
-- [ ] **Time exit rate** — target **<40%** (dari 61.1%)
-- [ ] **Avg loss per trade** — target **<$0.50** (momentum death should reduce)
+### RC1: HTF Regime Detector RUSAK (98% CHOPPY)
+- 4H EMA10/20 + strength 0.30 = terlalu ketat untuk crypto
+- Hasilnya: SELALU CHOPPY → threshold +3 permanen, OB ×0.6 tidak konsisten
+- **Impact:** Bot tidak bisa bedakan trending vs choppy
 
-### LONG Performance (main focus — was regressing)
-- [ ] LONG WR — target >48% (dari 42.5%)
-- [ ] LONG trailing — target >40% (dari 30.0%)
-- [ ] LONG PnL — target >+$2
+### RC2: OB ×0.6 Fix TIDAK KONSISTEN
+- 59/161 signal masih punya OB=18 (tanpa reduction)
+- 30/161 signal punya OB=10 (fix jalan)
+- **Root cause:** Kondisi `abs(trend_pct) < 0.035` flip-flop tiap detik
+- OB=18 di choppy = TRAP signal (wall di-eat, harga balik)
 
-### SHORT Performance (should maintain)
-- [ ] SHORT WR — target >45% (dari 50.0%)
-- [ ] SHORT trailing — target >30% (dari 35.7%)
-- [ ] SHORT PnL — target ≥$0 (dari +$2.79)
+### RC3: Pattern Memory TIDAK PERNAH TRIGGER (Bug)
+- `evaluate()` pakai key `AR_long_ranging`
+- `record_outcome()` pakai key `AR_long_scalper`
+- **KEY MISMATCH** → pattern memory selalu n=0 → tidak pernah penalty
+- Akibat: bot masuk AR 4×, XPL 4×, LIT 4× — semua loss, tidak di-block
 
----
-
-## Tier 3 — Component Correlation
-
-- [ ] OB correlation — target **≥ 0** (dari -0.148)
-- [ ] EMA correlation — target **≥ 0** (dari -0.185)
-- [ ] RSI correlation — should stay **>+0.15** (was +0.228, BEST)
-- [ ] FUND correlation — should stay **>+0.10** (was +0.132)
-- [ ] XAM correlation — any positive data = good
+### RC4: AI Intelligence Hampir Tidak Jalan (3.1%)
+- Hanya 5/161 signal dapat AI evaluation
+- Cost optimization gate terlalu ketat
+- Cache 5 menit = AI jarang dipanggil ulang
+- Timeout 10s = terlalu lama untuk scalper
 
 ---
 
-## Tier 4 — Exit Breakdown Analysis
+## ✅ FIX YANG SUDAH DI-IMPLEMENT (28 Mei Siang)
 
-| Exit Type | Audit #13 | Target #14 | Notes |
-|-----------|-----------|------------|-------|
-| trailing_stop | 31.5% (17/54) | >40% | Fix B should help LONG |
-| time_exit | 61.1% (33/54) | <40% | Momentum death catches flat trades |
-| momentum_death | N/A (new) | 10-25% | New exit type — flat trades |
-| stop_loss | 7.4% (4/54) | <10% | Should stay low |
+### Fix 1: HTF Regime 4H → 1H (REDESIGN)
+**File:** `engine/scoring_engine.py` — `_fetch_1h_regime()`
 
-- [ ] **Exit type distribution** — verify momentum_death exists in data
-- [ ] **Momentum death WR** — should be ~50% (flat = coin flip, but loss minimal)
-- [ ] **Momentum death avg PnL** — target **> -$0.10** (near zero)
-- [ ] **Time exit avg PnL** — will be MORE negative per trade (only real losers left)
-- [ ] **Total drag from exits** — target **< -$10** (dari -$16.85)
+| Aspek | Sebelum (4H) | Sesudah (1H) |
+|-------|-------------|-------------|
+| Timeframe | 4H candles (20 candles = 3.3 hari) | 1H candles (24 candles = 24 jam) |
+| EMA | EMA10 vs EMA20 | EMA8 vs EMA21 (lebih responsif) |
+| EMA gap | 0.2% (×1.002) | 0.1% (×1.001) |
+| Strength threshold | 0.30 | **0.15** |
+| Lookback | 10 candle × 4H = 40 jam | 8 candle × 1H = 8 jam |
+| Cache | 4 jam | **15 menit** |
+| Expected CHOPPY rate | 98% (useless) | ~40-60% (discriminating) |
+
+**Expected impact:**
+- Trending detected → threshold -3 (lebih mudah entry aligned) + 2 direction votes
+- Choppy detected → OB dikurangi + threshold +3 (lebih ketat)
+- Counter-trend → threshold +8 (block bad trades)
+
+### Fix 2: OB ×0.6 Pakai htf_regime (RELIABLE)
+**File:** `engine/scoring_engine.py` — OB scoring section
+
+| Sebelum | Sesudah |
+|---------|---------|
+| `if abs(trend_pct) < 0.035` | `if htf_regime == "CHOPPY"` |
+| Flip-flop tiap detik | Stable 15 menit (cache) |
+| 30/89 signal ter-reduce | **100% signal di choppy ter-reduce** |
+
+**Expected impact:** OB=18 TIDAK MUNGKIN muncul di choppy. Max OB = 10 di choppy.
+
+### Fix 3: AI Dipanggil Setiap Signal (POST-FILTER)
+**File:** `engine/scoring_engine.py` + `intelligence/ai_analyst.py`
+
+| Aspek | Sebelum | Sesudah |
+|-------|---------|---------|
+| Kapan dipanggil | Sebelum threshold, hanya borderline | **Setelah SEMUA filter lolos** |
+| Coverage | 3% signal | **~100% signal yang jadi trade** |
+| Cache | 5 menit | **60 detik** |
+| Timeout | 10 detik | **4 detik** |
+| Daily limit | 200 calls | **500 calls** |
+| Bisa veto? | Tidak | **Ya** — penalty bikin score < threshold → cancel |
+
+**Expected impact:** AI evaluate setiap trade. Bisa boost (+8) atau veto (-5 → cancel).
+
+### Fix 4: Pattern Memory Key Mismatch (BUG FIX)
+**File:** `engine/scoring_engine.py` + `execution/paper_executor.py`
+
+| Aspek | Sebelum (BUG) | Sesudah (FIXED) |
+|-------|---------------|-----------------|
+| evaluate() key | `AR_long_ranging` | `AR_long_ranging` |
+| record_outcome() key | `AR_long_scalper` ❌ | `AR_long_ranging` ✅ |
+| Pattern memory trigger | TIDAK PERNAH | **Setelah 3 trades** |
+
+**Expected impact:**
+- 3 loss berturut → WR 0% → penalty -20 → asset BLOCKED
+- Recovery: 3-4 wins → EMA WR naik → penalty hilang
+- Repeat losers (AR 4×, XPL 4×, LIT 4×) tidak akan terjadi lagi
 
 ---
 
-## 🚨 Red Flags (Rollback)
+## 📊 DATA TEMUAN TAMBAHAN
+
+### Repeat Losers (Pattern Memory Seharusnya Block)
+| Asset | Trades | Wins | PnL | Seharusnya |
+|-------|--------|------|-----|------------|
+| AR | 4 | 0 | -$3.00 | Blocked setelah trade ke-3 |
+| XPL | 4 | 0 | -$2.54 | Blocked setelah trade ke-3 |
+| LIT | 4 | 0 | -$1.95 | Blocked setelah trade ke-3 |
+| **Total saved** | | | **~$4.50** | |
+
+### Hourly Performance
+| Jam UTC | Trades | WR | PnL | Notes |
+|---------|--------|-----|-----|-------|
+| 18:00 | 6 | 0% | -$3.75 | Death zone (post-deploy cold start) |
+| 21:00 | 3 | 67% | +$0.91 | Best hour |
+| 22:00 | 9 | 33% | -$2.50 | Overtrading |
+| 00:00-01:00 | 13 | 15% | -$4.47 | Asia session death |
+
+### Winners vs Losers
+| | Winners (12) | Losers (33) |
+|--|--|--|
+| Avg score | 57.2 | 59.7 |
+| Main exit | trailing_stop (7/12) | time_exit (22/33) |
+| Insight | Score TIDAK prediktif — losers punya score lebih tinggi! |
+
+### Momentum Death Performance
+- Fire rate: 20% ✅ (target 10-25%)
+- Avg loss: -$0.056 ✅ (target < $0.10)
+- Max loss: -$0.16 ✅ (minimal)
+- **Verdict: WORKING AS DESIGNED** — cut flat trades early
+
+### AI Performance
+- Coverage: 5/161 signal (3.1%) — **INSUFFICIENT**
+- All same signal: AR LONG score=58, conf=0.52 → +4pts
+- Result: LOSS -$1.44 (stop_loss)
+- **Verdict: Cannot evaluate — sample too small. Fix 3 will increase coverage.**
+
+---
+
+## 🎯 EXPECTED RESULTS AFTER FIX (Audit #15)
+
+| Metric | Post-Deploy (broken) | Expected After Fix |
+|--------|---------------------|-------------------|
+| HTF CHOPPY rate | 98% | ~40-60% |
+| OB=18 in choppy | 59 signals | **0 signals** |
+| Pattern memory trigger | NEVER | After 3 losses |
+| AI coverage | 3% | ~100% |
+| Frequency | 4.51/hr | 2.0-3.0/hr |
+| WR | 26.7% | >40% |
+| PF | 0.368 | >1.0 |
+| Trailing fire | 15.6% | >25% |
+
+---
+
+## 🚨 Red Flags untuk Audit #15
 
 | Kondisi | Action |
 |---|---|
-| PF < 0.8 | Rollback semua 8 fix |
-| Frequency < 0.5/hr | HTF +3 terlalu ketat → revert A3 |
-| Momentum death > 50% | Threshold 0.05% terlalu ketat → naikkan ke 0.10% |
-| LONG WR < 35% (worse than #13) | Fix A1/A2 terlalu agresif → revert |
-| SHORT WR < 35% | Regresi dari fix → bisect |
-| 0 trades dalam 6+ jam | Scoring collapse |
-| Trailing < 20% | TP1 ×0.80 masih terlalu tinggi → try ×0.70 |
+| PF masih < 0.8 | Revert semua fix hari ini, kembali ke Audit #13 state |
+| Frequency < 1.0/hr | 1H regime terlalu ketat → naikkan strength 0.15 → 0.20 |
+| AI veto > 30% signals | AI terlalu agresif → kurangi penalty dari -5 ke -3 |
+| Pattern memory block > 40% signals | Threshold n=3 terlalu kecil → naikkan ke n=5 |
+| 0 TRENDING detected dalam 24 jam | EMA gap 0.1% masih terlalu ketat → 0.05% |
+| Trailing masih < 20% | Entry quality masih jelek → investigate further |
 
 ---
 
-## 🔧 Tuning Matrix
+## 🔧 Tuning Matrix (Post-Fix)
 
 | Kondisi | Action |
 |---|---|
-| EMA +8 masih >50% | Tighten ke ≤1 candle = fresh |
-| OB masih inverse (r < -0.10) | Zero OB di ranging (bukan ×0.6) |
-| Frequency < 1.0/hr | Revert HTF +3 → +0 |
-| Momentum death > 40% | Threshold 0.05% → 0.08% |
-| Momentum death 0% | Cek deploy, mungkin logic tidak ter-trigger |
-| LONG trailing masih < 35% | TP1 ×0.80 → ×0.70 (match SHORT) |
-| XAM fire > 35% + PnL negatif | Revert threshold ke 0.10% |
-| Time exit masih > 50% | Early loss cut -0.2% → -0.15% (more aggressive) |
-
----
-
-## Decision Points (28 Mei)
-
-| Kondisi | Keputusan |
-|---|---|
-| PF > 1.3 + trailing > 40% + freq > 1.5/hr | ✅ **START LIVE EXECUTOR DEV** |
-| PF 1.1-1.3 + momentum_death working | ⚠️ Fine-tune, audit 29 Mei |
-| PF < 1.0 | ❌ Bisect: revert A1+A2 dulu (most impactful) |
-| Momentum death working + time_exit < 40% | ✅ Exit system improved |
-| LONG still regressing (WR < 40%) | Revert A1, keep A2+A3+B |
+| 1H regime 80%+ CHOPPY | Strength 0.15 → 0.12 (more sensitive) |
+| 1H regime 80%+ TRENDING | Strength 0.15 → 0.20 (too sensitive) |
+| OB correlation masih < 0 | Zero OB di choppy (bukan ×0.6) |
+| AI confidence selalu > 0.7 | Prompt terlalu optimistic → review |
+| AI confidence selalu < 0.3 | Prompt terlalu pessimistic → review |
+| Pattern memory false positive | Naikkan n threshold dari 3 → 5 |
 
 ---
 
@@ -183,62 +196,36 @@ Deploy 27 Mei malam berisi **8 fix** dari Audit #13 findings:
 
 | Waktu (WIB) | Action |
 |---|---|
-| 27 Mei malam | Push + deploy 8 fix |
-| 28 Mei 00:00-23:00 | Collect trades (~23 jam) |
-| **28 Mei 23:00** | **Audit #14** |
-| 29 Mei | If pass → live executor dev. If fail → diagnose. |
+| 28 Mei 12:00 | Diagnosis + implement 4 fix |
+| 28 Mei sore | Deploy fix ke Railway |
+| 28 Mei 18:00 - 29 Mei 18:00 | Collect trades (~24 jam) |
+| **29 Mei 18:00** | **Audit #15** |
 
 ---
 
-## Referensi (Audit #13 Baseline)
+## Files Modified (28 Mei)
 
-| Metric | Audit #13 | Target #14 |
-|---|---|---|
-| Trades | 54 (21.1 hrs) | 40-60 |
-| Trades/hr | 2.56 | 1.8-2.5 |
-| WR | 44.4% | >48% |
-| PnL | +$2.77 | >+$5 |
-| PF | 1.128 | >1.3 |
-| Score↔PnL r | +0.069 | >+0.10 |
-| Trailing fire | 31.5% | >40% |
-| Time exit | 61.1% | <40% |
-| Momentum death | N/A | 10-25% |
-| EMA +10 rate | 57% | <40% |
-| OB avg score | +5.2 | <4 |
-| OB correlation | -0.148 | ≥0 |
-| EMA correlation | -0.185 | ≥0 |
-| XAM fire | 10.3% | >15% |
-| LONG WR | 42.5% | >48% |
-| LONG trailing | 30.0% | >40% |
-| SHORT WR | 50.0% | >45% |
-| SHORT trailing | 35.7% | >30% |
-
----
-
-## Bisect Order (kalau ada regresi)
-
-1. **Revert E** (momentum death) — paling experimental, bisa exit valid trades too early
-2. **Revert A1** (EMA tighten) — mungkin terlalu ketat, reduce frequency
-3. **Revert A3** (HTF +3) — combined with A1 bisa terlalu restrictive
-4. **Revert A2** (OB ×0.6) — unlikely cause regresi tapi cek
-5. **Revert C** (XAM) — additive, worst case = no change
-6. **Revert B** (LONG TP1) — unlikely cause regresi (hanya affect exit, not entry)
-7. **D1+D2** (PnL display) — cosmetic only, NEVER revert
+| File | Changes |
+|------|---------|
+| `engine/scoring_engine.py` | 1H regime, OB htf_regime, AI post-filter, pattern memory key |
+| `intelligence/ai_analyst.py` | Cache 60s, timeout 4s, daily limit 500 |
+| `execution/paper_executor.py` | `_learn_regime` from signal.regime.value |
+| `notify/telegram.py` | "1H Regime" label |
+| `models/schemas.py` | Comment update |
+| `dashboard/reasoning_logger.py` | Comment update |
 
 ---
 
 ## Catatan
 
-### Kenapa 8 Fix Sekaligus (Lagi)
-Deadline 1 Juni = 4 hari. Semua fix address ROOT CAUSES dari data:
-- A1-A3 = **scoring quality** (reduce inverse components)
-- B = **exit improvement** (mirror SHORT success to LONG)
-- C = **additive signal** (XAM proven edge when fires)
-- D1-D2 = **bug fix** (display only, no trading impact)
-- E = **structural exit improvement** (reduce bleed from flat trades)
+### Kenapa 4 Fix Sekaligus (Lagi)
+Deadline 1 Juni = 3 hari. Semua fix address ROOT CAUSES yang teridentifikasi dari data:
+- Fix 1+2 = **HTF regime + OB** (saling terkait, harus bareng)
+- Fix 3 = **AI coverage** (independent, additive)
+- Fix 4 = **Pattern memory bug** (independent, critical safety net)
 
-### Expected Compound Effect
-- A1+A2+A3 together: fewer premature entries → time_exit turun
-- B: LONG trailing naik → more profit captured
-- E: flat trades exit early → avg loss per trade turun drastis
-- Net: PF should improve from both sides (more profit + less loss)
+### Bisect Order (kalau ada regresi)
+1. **Revert Fix 4** (pattern memory) — mungkin terlalu agresif block
+2. **Revert Fix 3** (AI post-filter) — AI veto mungkin terlalu banyak cancel
+3. **Revert Fix 1** (1H regime) — kalau frequency collapse
+4. **Fix 2 JANGAN revert** — OB di choppy = proven inverse, harus dikurangi

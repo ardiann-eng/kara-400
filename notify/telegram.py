@@ -3298,7 +3298,7 @@ class KaraTelegram:
             htf_line = ""
             if htf:
                 adj_str = f"threshold {htf_adj:+d}" if htf_adj != 0 else "no adj"
-                htf_line = f"\n📊 <b>4H Regime:</b> <code>{htf}</code> ({adj_str})"
+                htf_line = f"\n📊 <b>1H Regime:</b> <code>{htf}</code> ({adj_str})"
 
             explanation = (
                 f"<b>{signal.asset} {side_label}</b> — Skor <b>{signal.score}/100</b>\n\n"
