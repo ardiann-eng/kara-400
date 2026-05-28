@@ -29,7 +29,7 @@ MODE = TRADE_MODE  # alias for backward compatibility
 # ──────────────────────────────────────────────
 # CURRENCY & MULTI-USER PAPER DEFAULTS
 # ──────────────────────────────────────────────
-USD_TO_IDR = 16000.0  # Fixed exchange rate for Telegram display
+USD_TO_IDR = 17700.0  # Fixed exchange rate for Telegram display
 PAPER_BALANCE_IDR = 1_000_000.0  # Default wallet balance in IDR
 PAPER_BALANCE_USD = PAPER_BALANCE_IDR / USD_TO_IDR
 
