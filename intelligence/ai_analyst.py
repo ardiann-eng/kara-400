@@ -43,11 +43,11 @@ class AIMarketAnalyst:
     def __init__(self):
         self.api_key = os.getenv("MIMO_API_KEY", "")
         self.api_key_fallback = os.getenv("MIMO_API_KEY_FALLBACK", "")
-        self.base_url = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+        self.base_url = os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1")
         self.model = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
         self.temperature = 0.2
         self.timeout = 12.0     # health_check timeout — api.xiaomimimo.com ~6-10s from Railway SG
-        self.eval_timeout = 4.0  # [AUDIT #14] was 10s — too slow for scalper. 4s max, else skip.
+        self.eval_timeout = 10.0  # [AUDIT #15] was 4s — too aggressive, causes 100% timeout from Railway SG. 10s matches actual latency.
         self.enabled = bool(self.api_key)
         self._client = None
         self._client_fallback = None
@@ -59,6 +59,8 @@ class AIMarketAnalyst:
         self._daily_reset = 0
         self._max_daily = 500  # [AUDIT #14] was 200 — now AI evaluates every signal
         self._connected = False
+        self._consecutive_timeouts = 0
+        self._circuit_open_until = 0.0  # epoch timestamp — circuit breaker
 
         if self.enabled:
             log.info(f"[AI] Mimo analyst initialized (model={self.model}, url={self.base_url})")
@@ -183,13 +185,20 @@ class AIMarketAnalyst:
         """
         Evaluate signal quality. Returns AIVerdict with score_adj.
         On timeout/error → neutral verdict (score_adj=0).
-        Max latency: 2s. Never blocks trade execution.
+        Max latency: 10s. Never blocks trade execution.
+        Circuit breaker: 3 consecutive timeouts → skip AI for 5 min.
         """
         if not self.enabled:
             return AIVerdict(reasoning="AI disabled")
 
         if not self._check_rate_limit():
             return AIVerdict(reasoning="Daily limit reached")
+
+        # Circuit breaker — skip if too many consecutive timeouts
+        now = time.time()
+        if self._circuit_open_until > now:
+            remaining = int(self._circuit_open_until - now)
+            return AIVerdict(reasoning=f"AI circuit open ({remaining}s remaining)")
 
         # Cache check (same asset within 60s = same verdict)
         cache_key = f"{context.get('asset')}_{context.get('side')}_{int(time.time() // self._cache_ttl)}"
@@ -205,8 +214,16 @@ class AIMarketAnalyst:
             verdict.latency_ms = (time.time() - start) * 1000
             self._daily_calls += 1
             self._cache[cache_key] = verdict
+            self._consecutive_timeouts = 0  # reset on success
             return verdict
         except asyncio.TimeoutError:
+            self._consecutive_timeouts += 1
+            if self._consecutive_timeouts >= 3:
+                self._circuit_open_until = time.time() + 300  # 5 min cooldown
+                log.warning(
+                    f"[AI] Circuit breaker OPEN — {self._consecutive_timeouts} consecutive timeouts. "
+                    f"Skipping AI for 5 min. Check MIMO_BASE_URL and network latency."
+                )
             return AIVerdict(error="timeout", reasoning="AI timeout — neutral")
         except Exception as e:
             return AIVerdict(error=str(e), reasoning=f"AI error: {e}")
