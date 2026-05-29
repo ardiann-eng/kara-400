@@ -793,6 +793,37 @@ class ScoringEngine:
 
         # SHORT-specific filters: higher threshold + funding rate confirmation + squeeze guard
         if side == Side.SHORT:
+            # [AUDIT #16] BLOCK SHORT in TRENDING_UP regime — counter-trend disaster.
+            # POST-deploy 28 Mei sore - 29 Mei: 12 SHORTs, 1W/11L, $-12.17 (PF 0.010).
+            # ~9-11 dari trades ini di HTF=TRENDING_UP atau CHOPPY (rally market).
+            # Existing logic only RAISES threshold +8 — banyak score lolos tetap.
+            # Hard block dibutuhkan: SHORT di market rally = no follow-through, all
+            # SHORT setups (OI bear, EMA bear) di-buy-back oleh trend dominan.
+            # Re-evaluate setelah HTF flip ke TRENDING_DOWN dominan (>50%).
+            if htf_regime == "TRENDING_UP":
+                log.info(
+                    f"[SKIP] {asset} | score={score} | side=SHORT | "
+                    f"reason=short_against_uptrend | context=htf={htf_regime} "
+                    f"(audit#16: SHORT vs TRENDING_UP = $-12.17 PF 0.010)"
+                )
+                self.skip_counters["short_against_uptrend"] = self.skip_counters.get("short_against_uptrend", 0) + 1
+                self._skip_count_since_summary += 1
+                return None, score
+
+            # [AUDIT #16] SHORT in CHOPPY needs higher threshold — range market
+            # reverses fast on minor dump → setup mikro tidak survive macro.
+            # Standard threshold + 5 untuk CHOPPY SHORT only.
+            if htf_regime == "CHOPPY":
+                _choppy_short_min = (getattr(config.SIGNAL, 'min_score_short_signal', 62)) + 5
+                if score < _choppy_short_min:
+                    log.info(
+                        f"[SKIP] {asset} | score={score} | side=SHORT | "
+                        f"reason=short_choppy_low_conviction | context=min={_choppy_short_min},htf={htf_regime}"
+                    )
+                    self.skip_counters["short_choppy_low_conviction"] = self.skip_counters.get("short_choppy_low_conviction", 0) + 1
+                    self._skip_count_since_summary += 1
+                    return None, score
+
             # [AUDIT #12 FIX] Block SHORT if OB is bullish (bid wall = support below).
             # Data: 3 SHORT trades with OB=+10 (bullish) → ALL LOSS.
             # Root cause: OB excluded from direction voting, so bot can SHORT
@@ -914,9 +945,17 @@ class ScoringEngine:
             # Data: trades with pre-move >0.3% = WR 52.6%, PnL +$8.39
             #       trades with pre-move <0.15% = WR ~28%, PnL negative
             # SHORT-specific: winners entered AFTER strong downmove (avg vol 0.0958).
-            # SHORT needs 0.25% min (1.67× LONG) due to structural upward bias + bounce risk.
+            #
+            # [AUDIT #16] SHORT min raised 0.25% → 0.50%.
+            # Root cause: 22 SHORT @ TRENDING_DOWN (PRE+POST), 18 reversal (82%).
+            # Pattern: bot SHORT setelah dump kecil 0.3-0.4% → V-bottom catch → bounce.
+            # Loser avg pre-move = 0.43% (just above 0.25% threshold). Winner avg = 0.54%.
+            # 0.50% threshold filters mini-panic dumps yang langsung di-buy back.
+            # Trade-off: blocks ~70% SHORT signals. Yang lolos = dump kuat dengan
+            # follow-through probability lebih tinggi.
+            # Re-evaluate setelah 50+ SHORT trades dengan threshold baru.
             _dir_move = _net_move if side == Side.LONG else -_net_move
-            _min_momentum = 0.0025 if side == Side.SHORT else 0.0015  # 0.25% SHORT, 0.15% LONG
+            _min_momentum = 0.0050 if side == Side.SHORT else 0.0015  # 0.50% SHORT (was 0.25%), 0.15% LONG
             if _dir_move < _min_momentum:
                 log.info(
                     f"[SKIP] {asset} | score={score} | side={side.value} | "
@@ -2312,6 +2351,50 @@ class ScoringEngine:
             log.warning(
                 f"[ATR-SL] {asset} | FALLBACK to fixed sl_pct={sl_pct*100:.4f}% | reason={_fb_reason}"
             )
+
+        # ── [AUDIT #16] HOLD-AWARE SL (vol-scaled to expected swing in hold window) ──
+        # Bug fix: ATR-SL above is per-minute scaled; for 10-25 min hold window,
+        # SL distance must cover expected swing AT HOLD HORIZON, not per-minute.
+        #
+        # Data evidence:
+        #   RV bucket 0-3%   → avg SL/RV ratio 0.318 (over-protective)
+        #   RV bucket 9-15%  → avg SL/RV ratio 0.078 (severely under-protective)
+        #   At RV 8%, hold 12min → expected std swing ≈ 0.7%. Old SL 0.6-0.8% =
+        #   exactly at 1× std dev → 50% probability of getting whipsawed by
+        #   normal noise WITHOUT trend break. 5 real SL hits in POST = $-10.15.
+        #
+        # Formula: SL = SL_NOISE_MULT × realized_vol × sqrt(hold_min / minutes_per_day)
+        # Default SL_NOISE_MULT=2.5 → SL covers ~2 std dev = ~95% noise tolerance.
+        # Hold time picked here matches score-bucket time_exit_min later in this fn.
+        if realized_vol > 0:
+            # Pre-compute hold_min based on score (matches matrix below at line ~2360)
+            if score >= 66 or (fade_mode and score >= 60):
+                _hold_min_est = 25
+            elif score >= 61:
+                _hold_min_est = 20
+            elif score >= 56:
+                _hold_min_est = 15
+            else:
+                _hold_min_est = 10
+
+            SL_NOISE_MULT = getattr(scfg, 'sl_noise_mult', 2.5)
+            _expected_swing = realized_vol * (_hold_min_est / (60.0 * 24.0)) ** 0.5
+            _hold_sl_pct   = _expected_swing * SL_NOISE_MULT
+
+            _hard_min = getattr(scfg, 'sl_pct_min', 0.005)
+            _hard_max = max(getattr(scfg, 'sl_pct_max', 0.020), 0.025)  # raise ceiling for high-vol
+            _hold_sl_pct = max(_hard_min, min(_hold_sl_pct, _hard_max))
+
+            # Take MAX of (per-minute ATR-driven, hold-aware): protect against under-sized SL
+            # at high vol while keeping ATR-driven calculation for low-vol consistency.
+            _final_sl_pct = max(sl_pct, _hold_sl_pct)
+            if _final_sl_pct != sl_pct:
+                log.info(
+                    f"[HOLD-SL] {asset} | rv={realized_vol*100:.2f}% hold={_hold_min_est}m | "
+                    f"expected_swing={_expected_swing*100:.3f}% × {SL_NOISE_MULT} = {_hold_sl_pct*100:.3f}% | "
+                    f"old_sl={sl_pct*100:.3f}% → new_sl={_final_sl_pct*100:.3f}%"
+                )
+            sl_pct = _final_sl_pct
 
         # TP pakai nilai fixed dari config — level realistis untuk hold time 20 menit.
         tp1_pct = scfg.tp1_pct

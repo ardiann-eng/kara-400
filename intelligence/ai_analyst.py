@@ -173,42 +173,50 @@ class AIMarketAnalyst:
     def _confidence_to_score_adj(self, confidence: float, fake_breakout_risk: float = 0.0) -> int:
         """
         Convert AI confidence to bounded score adjustment.
-        [AUDIT #15 FIX] Previous mapping was broken:
-        - conf 0.50 (neutral) mapped to +4 → always boosted losers
-        - conf never < 0.30 → AI could NEVER penalize
-        - fake_breakout_risk was IGNORED
-        
-        Data (27 matched trades):
-        - AI boost (adj>0): WR 18%, avg PnL -$0.46
-        - AI neutral (adj=0): WR 44%, avg PnL -$0.05
-        → AI boost = INVERSE predictor. Fix: raise thresholds, use fake_breakout.
-        
-        New mapping calibrated to Mimo's actual output range (0.42-0.72):
-        - 0.75+ = very rare, genuine strong signal → small boost
-        - 0.60-0.74 = moderate → neutral (was +4, caused losses)
-        - 0.45-0.59 = neutral → neutral
-        - 0.35-0.44 = skeptical → mild penalty
-        - <0.35 = bad setup → strong penalty
-        
-        fake_breakout_risk > 0.5 → force penalty (override confidence).
+
+        [AUDIT #16 RECALIBRATION] Previous mapping had two issues:
+        - Penalti (-5/-3) fired on 105/160 real evals (66%) — over-aggressive
+        - Boost threshold 0.75 NEVER reached (mean confidence 0.374, max 0.72)
+        - Net impact: 44% of penalti'd trades were winners ($-1.23 net)
+                      80% of boosted trades were losers ($-3.12 net)
+
+        Data (160 matched trades, Audit #16):
+        - 99 of 105 real evals had confidence < 0.30 (over-skeptical)
+        - 128 of 160 had fake_risk > 0.60 (force -5 too liberal)
+        - AI Mimo's calibration: confidence range 0.25-0.72, median 0.28
+            → boost threshold 0.65 (achievable) instead of 0.75 (never)
+            → penalti only at extreme low confidence + concrete fake-risk evidence
+
+        New mapping (asymmetric, evidence-based):
+        - 0.65+: boost +6 (rare, only when AI sees specific KARA-aligned setup)
+        - 0.55-0.64: boost +3 (moderate confidence)
+        - 0.40-0.54: NEUTRAL (default — bot has own filters)
+        - 0.30-0.39: penalty -3 (mild — needs corroborating fake_risk to escalate)
+        - <0.30: penalty -5 only IF fake_risk also high (avoid double-penalty)
+
+        Fake breakout risk threshold raised: was >0.60, now >0.80 (only extreme cases).
         """
-        # Fake breakout override — if AI thinks >50% chance of fake breakout, penalize
-        if fake_breakout_risk > 0.6:
+        # === Strong fake-breakout signal: only at very high risk ===
+        if fake_breakout_risk > 0.85:
             return -5
-        elif fake_breakout_risk > 0.5:
+        elif fake_breakout_risk > 0.75:
             return -3
 
-        # Confidence-based adjustment (recalibrated for Mimo output range)
-        if confidence >= 0.75:
+        # === Confidence-based adjustment (recalibrated for actual Mimo range) ===
+        if confidence >= 0.65:
             return +6
-        elif confidence >= 0.60:
-            return 0   # was +4 → caused 18% WR. Now neutral.
-        elif confidence >= 0.45:
-            return 0
-        elif confidence >= 0.35:
-            return -3
+        elif confidence >= 0.55:
+            return +3
+        elif confidence >= 0.40:
+            return 0   # neutral default — most setups land here
+        elif confidence >= 0.30:
+            return -3  # mild skepticism
         else:
-            return -6
+            # Very low confidence (<0.30) — penalize but cap at -5
+            # Require corroborating fake_risk to avoid AI over-penalizing
+            if fake_breakout_risk >= 0.60:
+                return -5
+            return -3  # AI very skeptical but no fake-risk evidence — mild penalty
 
     async def evaluate_signal(self, context: dict) -> AIVerdict:
         """
@@ -265,28 +273,34 @@ class AIMarketAnalyst:
 
         prompt = self._build_prompt(context)
         _system = (
-            "You are a crypto SCALPER microstructure analyst for a bot that holds positions 8-12 minutes. "
-            "Your job is to identify FAKE setups that will NOT follow through, not to confirm existing signals.\n\n"
-            "CRITICAL CONTEXT about this bot:\n"
-            "- Bot profits ONLY from trailing stop (fires at minute 4-8 when price trends). "
-            "If price doesn't move significantly in 8 min, trade = loss (time_exit).\n"
-            "- 'Many signals agreeing' = BAD. It means move ALREADY happened, price exhausted, no follow-through.\n"
-            "- Low score trades (52-56) with 1-2 strong leading signals = BEST performers (fresh move ahead).\n"
-            "- High score trades (65+) with many confirming signals = WORST performers (move already done).\n"
-            "- Strong 5m momentum ALREADY happened = exhaustion risk, NOT continuation signal.\n"
-            "- High ATR + strong momentum = move is DONE, not starting.\n\n"
-            "YOUR ROLE: Be SKEPTICAL. Default confidence should be LOW (0.35-0.45). "
-            "Only boost confidence above 0.60 if you see genuine UNTAPPED potential:\n"
-            "- Fresh OB wall building (imbalance >0.4) with NO price move yet (momentum near 0)\n"
-            "- Extreme funding (crowded positioning) that hasn't unwound yet\n"
-            "- Low ATR volatility with building pressure (calm before storm)\n\n"
-            "RED FLAGS that should LOWER confidence below 0.35:\n"
-            "- 5m momentum already >0.3% in trade direction (move done)\n"
-            "- ATR volatility >5% (too chaotic for 8-min scalp)\n"
-            "- HTF regime conflicts with trade direction\n"
-            "- Multiple components all positive (lagging confirmation, not leading)\n\n"
-            "Confidence calibration: 0.30=skeptical (default for most setups), "
-            "0.45=neutral, 0.60=moderate untapped edge, 0.75+=very rare fresh setup.\n"
+            "You are a crypto SCALPER risk reviewer for KARA bot. KARA holds 8-12 minutes "
+            "and profits via TRAILING STOP firing at minute 4-8.\n\n"
+            "KARA STRATEGY GROUND TRUTH (use this as your reference, not generic crypto wisdom):\n"
+            "- This is a TREND-FOLLOWING bot. Pre-move IN trade direction is GOOD, not exhaustion.\n"
+            "- Audit data (140+ trades): pre-move >0.3% in trade direction = WR 52%, +PnL.\n"
+            "- Audit data: pre-move <0.15% = WR 24%, -PnL (flat market = no trend to ride).\n"
+            "- 'Strong momentum already happened' = trend exists. KARA wants to ride it. NOT exhaustion.\n"
+            "- High score (many components agreeing) is fine if direction matches HTF regime.\n\n"
+            "YOUR ROLE: Identify ONLY two specific high-confidence failure modes:\n"
+            "  A. EXTREME EXHAUSTION (parabolic): pre-move >2.0% in 5min in trade direction.\n"
+            "     This is real exhaustion (not normal 0.3-0.7% trend). Below 2.0% = let bot trade.\n"
+            "  B. HIGH-VOL WHIPSAW: realized ATR > 8.0% (chaotic for 8-min scalp). \n"
+            "     Below 8% = bot's SL/TP can handle. Don't penalize 5-7% as 'too volatile'.\n"
+            "  C. DIRECTION CONFLICT: HTF strongly opposes trade (e.g. SHORT in TRENDING_UP).\n\n"
+            "DEFAULT BEHAVIOR (most setups):\n"
+            "- Confidence 0.50 (neutral). fake_breakout_probability 0.30.\n"
+            "- Bot's existing filters already catch low-quality setups. Don't double-penalize.\n"
+            "- Only deviate from neutral if you see SPECIFIC evidence of A, B, or C.\n\n"
+            "WHEN TO BOOST (rare, only with specific evidence):\n"
+            "- Confidence 0.65-0.75: HTF strongly aligns + momentum 0.3-1.0% + ATR 1-4%.\n"
+            "  This is the SWEET SPOT for KARA's trailing-stop edge.\n\n"
+            "WHEN TO PENALIZE (only with concrete numbers):\n"
+            "- Confidence <0.35: A, B, or C clearly present with quantitative evidence.\n"
+            "- fake_breakout_probability >0.70: only if pre-move >2% OR ATR >8% OR HTF opposes.\n\n"
+            "DO NOT use these reasons to penalize (proven false in KARA data):\n"
+            "- 'Many components agree = lagging' — high score with HTF align = WIN setup\n"
+            "- 'Momentum > 0.3% = exhaustion' — 0.3-1.0% IS the trend KARA rides\n"
+            "- 'ATR 5-7% too volatile' — within bot's capability if direction right\n\n"
             "Always respond in valid JSON only."
         )
         _messages = [{"role": "system", "content": _system}, {"role": "user", "content": prompt}]
@@ -347,15 +361,24 @@ OB Imbalance: {ctx.get('ob_imbalance', 0):.2f}
 BTC 7m Move: {ctx.get('btc_move', 0)*100:.3f}%
 Volume Trend: {ctx.get('volume_trend', 'unknown')}
 
-EVALUATION FOCUS (8-min scalper specific)
------------------------------------------
-- If 5m momentum > 0.3% in trade direction: move likely EXHAUSTED. Lower confidence.
-- If ATR > 5%: too volatile for 8-min hold. Lower confidence.
-- If many components are positive (OB+EMA+RSI+FUND all agree): likely LAGGING confirmation, move done. Lower confidence.
-- If OB imbalance strong (>0.4) BUT momentum near 0: FRESH setup, untapped. Higher confidence.
-- If HTF regime conflicts with direction: high fake breakout risk.
-- If funding extreme + momentum extended: crowded trade, reversal risk.
-- CHOPPY regime + OB wall = likely liquidity TRAP (wall will be eaten).
+EVALUATION FOCUS (8-min scalper specific) — KARA TREND-FOLLOWING
+-----------------------------------------------------------------
+GOOD setups for KARA (boost confidence to 0.60-0.75):
+- 5m momentum 0.3-1.0% IN trade direction + HTF aligned + ATR 1-4%
+  (this is sweet spot: trend exists, not parabolic, not chaotic)
+- OB imbalance >0.4 IN trade direction with HTF aligned
+
+FAILURE MODES (penalize confidence to <0.35, fake_risk >0.70):
+- 5m momentum >2.0% in trade direction = PARABOLIC EXHAUSTION (rare, real risk)
+- ATR volatility >8.0% = TOO CHAOTIC for 8-min hold
+- HTF regime OPPOSES trade direction (SHORT in TRENDING_UP, LONG in TRENDING_DOWN)
+- Funding extreme (>0.10%/8h) AND momentum already extended in same direction
+
+DEFAULT (most setups, confidence ~0.50, fake_risk ~0.30):
+- Momentum 0.15-1.5% in trade direction = NORMAL TREND, let bot trade
+- ATR 2-7% = WITHIN BOT CAPABILITY
+- HTF aligned or CHOPPY = bot has its own filters
+- Don't double-penalize: bot already has 7 filter gates before AI
 
 Return JSON only:
 {{"confidence": 0.0, "fake_breakout_probability": 0.0, "momentum_quality": "weak|medium|strong", "market_state": "trend_continuation|exhaustion|chop|breakout|squeeze", "risk_note": "", "reasoning": ""}}"""
