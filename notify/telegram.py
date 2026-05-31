@@ -1639,9 +1639,26 @@ class KaraTelegram:
         pos_count = len(session.executor.open_positions)
         await self.send_daily_report(acc, pos_count, target_chat_id=chat_id)
 
-    async def send_daily_report(self, acc: AccountState, pos_count: int, target_chat_id: str = None):
-        """Send the premium daily summary report."""
+    async def send_daily_report(self, acc: AccountState, pos_count: int, target_chat_id: str = None, report_date=None):
+        """Send the premium daily summary report.
+
+        [AUDIT #17 FIX] `report_date` (a date/datetime) selects WHICH day's trades to
+        summarize. When called from the daily-reset hook in main.py, the UTC date has
+        ALREADY rolled over, so datetime.now() points to the NEW (empty) day → 0 trades
+        while daily_pnl still holds the finished day → contradiction ($-8.76 but 0 trades).
+        Caller passes the finished day (yesterday) here. Defaults to today for manual /daily.
+        """
         import config as _cfg
+        from datetime import timedelta as _timedelta
+
+        # Resolve the day being reported (default: today UTC)
+        if report_date is None:
+            _report_dt = datetime.now(timezone.utc)
+        elif hasattr(report_date, "strftime"):
+            _report_dt = report_date
+        else:
+            _report_dt = datetime.now(timezone.utc)
+        _report_day_str = _report_dt.strftime("%Y-%m-%d")
 
         pnl_sign = "+" if acc.daily_pnl >= 0 else ""
         pnl_emoji = "🟢" if acc.daily_pnl >= 0 else "🔴"
@@ -1686,7 +1703,7 @@ class KaraTelegram:
             from core.db import user_db
             if target_chat_id:
                 history = user_db.get_trade_history(target_chat_id, limit=500)
-                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                today_str = _report_day_str
                 today_trades = [
                     t for t in history
                     if str(t.get("timestamp", "")).startswith(today_str)
@@ -1699,7 +1716,7 @@ class KaraTelegram:
             log.warning(f"[DailyReport] Failed to load trade history: {e}")
 
         text = DAILY_REPORT_TEMPLATE.format(
-            date=datetime.now().strftime("%Y-%m-%d"),
+            date=_report_dt.strftime("%Y-%m-%d"),
             total_equity=format_idr(acc.total_equity),
             wallet_balance=format_idr(acc.wallet_balance),
             available=format_idr(acc.available),
@@ -1732,7 +1749,7 @@ class KaraTelegram:
             worst_pnl = min(all_pnls) if all_pnls else 0.0
 
             card_bytes = generate_daily_card(
-                date_str        = datetime.now().strftime("%d %B %Y"),
+                date_str        = _report_dt.strftime("%d %B %Y"),
                 daily_pnl_usd   = acc.daily_pnl,
                 daily_pnl_pct   = acc.daily_pnl_pct,
                 start_balance   = acc.wallet_balance - acc.daily_pnl,
@@ -2409,6 +2426,19 @@ class KaraTelegram:
         # action["price"] is set by check_tp_trail at the exact trigger moment.
         fill_at_trigger = action.get("price", current)
 
+        # [AUDIT #17 FIX] For TP1/TP2/TP3, the ACTUAL fill is at the TP level
+        # (pos.tp1/tp2/tp3) — same price used by _execute_partial_close for the
+        # rupiah PnL. Using current_price here decoupled % from Rp and made:
+        #   (a) TP1 == TP2 % when both fired on the same scan tick (price flat), and
+        #   (b) TP2 % < TP1 % when price retraced between ticks.
+        # Align the % reference to the TP level so % matches Rp and TP2 % > TP1 %.
+        if action_type == "tp1" and getattr(pos, "tp1", 0):
+            fill_at_trigger = pos.tp1
+        elif action_type == "tp2" and getattr(pos, "tp2", 0):
+            fill_at_trigger = pos.tp2
+        elif action_type == "tp3" and getattr(pos, "tp3", 0):
+            fill_at_trigger = pos.tp3
+
         # Calculate ROE % (leverage-adjusted price move — NOT diluted by partial size)
         # [AUDIT FIX 2026-05-21] Was: (pnl / (size_initial * entry)) * leverage * 100
         # That showed diluted % (partial profit / total notional). Now shows actual ROE.
@@ -2562,7 +2592,13 @@ class KaraTelegram:
                 if session:
                     acc_state = await session.get_account_state()
                 if acc_state:
-                    total_pnl_for_card = pos.pnl_realized + pnl
+                    # [AUDIT #17 FIX] DOUBLE-COUNT bug: was `pos.pnl_realized + pnl`.
+                    # action["pnl"] from close_position is ALREADY cumulative
+                    # (paper_executor: total_pnl = pos.pnl_realized, returned as "pnl").
+                    # Adding pnl_realized again = 2× (card showed +14% / +Rp21.179 while
+                    # DB/text showed correct +7% / +Rp10.589). Use pnl directly — matches
+                    # the text notif (line ~2520) which already had this fix.
+                    total_pnl_for_card = pnl
                     close_data_card = {
                         "exit_price": current,
                         "pnl": total_pnl_for_card,
@@ -3236,20 +3272,28 @@ class KaraTelegram:
             tech_list, fund_list, liq_list, pattern_list = [], [], [], []
             for r in (bd.reasons or []):
                 low = r.lower()
-                # Skip disabled/verbose items
-                if "cvd" in low:
-                    continue
+                # [AUDIT #17] Skip reasons dari komponen yang DISABLED / verbose noise,
+                # supaya reasoning hanya menampilkan yang BENAR-BENAR aktif.
+                if "cvd" in low and "moderate" not in low:
+                    continue  # old disabled CVD spam (keep new "CVD 5m moderate")
+                if "large order cluster" in low:
+                    continue  # LOC disabled (Audit #17)
+                if "liq cascade" in low or "liquidation" in low:
+                    continue  # liq disabled (Audit #17)
                 if any(x in low for x in ["flat/noise funding", "funding trend:", "very low oi", "neutral funding, oi tension"]):
                     continue
                 safe_r = html.escape(r.strip('• '))
                 row = f"• {safe_r}"
                 if any(x in low for x in ["rejection wick", "rsi divergence", "bearish rsi", "bullish rsi", "squeeze", "divergence"]):
                     pattern_list.append(row)
-                elif any(x in low for x in ["ema", "rsi", "regime", "mtf", "volume surge", "dvi", "momentum", "session", "trending", "ranging", "volatile", "mean-reversion"]):
+                elif any(x in low for x in ["l/s ratio", "whale", "crowd"]):
+                    # positioning/sentiment → group under OI & Funding (crowd money)
+                    fund_list.append(row)
+                elif any(x in low for x in ["ema", "rsi", "regime", "mtf", "volume surge", "momentum", "session", "trending", "ranging", "volatile", "mean-reversion", "cvd"]):
                     tech_list.append(row)
                 elif any(x in low for x in ["funding", "basis", "oi/funding", "pred", "flow"]):
                     fund_list.append(row)
-                elif any(x in low for x in ["liq", "imbalance", "wall", "bid", "ask", "oi", "cascade"]):
+                elif any(x in low for x in ["imbalance", "wall", "bid", "ask", " oi ", "pressure"]):
                     liq_list.append(row)
                 else:
                     tech_list.append(row)
@@ -3260,7 +3304,7 @@ class KaraTelegram:
             if fund_list:
                 blocks.append("💰 <b>OI &amp; Funding:</b>\n" + "\n".join(fund_list))
             if liq_list:
-                blocks.append("🏦 <b>Orderbook &amp; Likuidasi:</b>\n" + "\n".join(liq_list))
+                blocks.append("🏦 <b>Orderbook:</b>\n" + "\n".join(liq_list))
             if pattern_list:
                 blocks.append("🕯️ <b>Pattern Khusus:</b>\n" + "\n".join(pattern_list))
 
@@ -3287,15 +3331,29 @@ class KaraTelegram:
             side_label = "SHORT 🔴" if is_short else "LONG 🟢"
 
             # ── Component bar ─────────────────────────────────────────
+            # [AUDIT #17] Dinamis: tampilkan SEMUA komponen yang ada nilainya (≠0),
+            # lewati yang kosong. Daftar lama hardcoded ["OB","EMA","RSI","DVI","FUND","LIQ"]
+            # menampilkan komponen MATI (DVI dihapus, LIQ/LOC disabled) dan MELEWATKAN
+            # komponen aktif (MFI, XAM). Urutan: yang punya edge dulu (OB), lalu sisanya.
             comps = getattr(bd, 'components', {}) or {}
             comp_line = ""
             if comps:
                 def _fmt(v):
                     return f"+{v}" if v > 0 else str(v)
+                _order = ["OB", "EMA", "RSI", "MFI", "FUND", "XAM", "CVD"]
+                _label = {
+                    "OB": "OB", "EMA": "EMA", "RSI": "RSI", "MFI": "MFI",
+                    "FUND": "OI/Fund", "XAM": "XAM", "CVD": "CVD",
+                }
                 parts = []
-                for k in ["OB", "EMA", "RSI", "DVI", "FUND", "LIQ"]:
+                # known components in preferred order
+                for k in _order:
                     if k in comps and comps[k] != 0:
-                        parts.append(f"{k}:<b>{_fmt(comps[k])}</b>")
+                        parts.append(f"{_label.get(k, k)}:<b>{_fmt(comps[k])}</b>")
+                # any other non-zero component not in the known list
+                for k, v in comps.items():
+                    if k not in _order and isinstance(v, (int, float)) and v != 0:
+                        parts.append(f"{k}:<b>{_fmt(v)}</b>")
                 if parts:
                     comp_line = "\n\n🔬 <b>Komponen Skor:</b>\n" + "  ".join(parts)
 

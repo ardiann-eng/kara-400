@@ -1557,7 +1557,15 @@ class KaraBot:
             # for users who are flat (sitting in cash).
             if session.risk_mgr.reset_daily(acc.total_equity):
                 pos_count = len(getattr(session.executor, 'open_positions', []))
-                await self.telegram.send_daily_report(acc, pos_count, target_chat_id=chat_id)
+                # [AUDIT #17 FIX] reset_daily fires AFTER the UTC date rolled over, so the
+                # finished trading day is "yesterday". Pass it explicitly so the report
+                # summarizes the completed day (matches daily_pnl) instead of the new
+                # empty day (which showed 0 trades + Best/Worst $0.00 alongside a real PnL).
+                from datetime import timedelta as _td
+                _finished_day = datetime.now(timezone.utc) - _td(days=1)
+                await self.telegram.send_daily_report(
+                    acc, pos_count, target_chat_id=chat_id, report_date=_finished_day
+                )
                 log.info(f"📬 Daily report sent to {chat_id}")
 
             # Now skip position updates if they have no open positions
@@ -1619,6 +1627,14 @@ class KaraBot:
                     elif a.get("action") == "early_trail":
                         header  = f"🛡️ <b>Early Trail Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
                         subtext = "<i>Profit dikunci sebelum harga berbalik.</i>"
+                        exit_detail = ""
+                    elif a.get("action") == "momentum_death":
+                        # [AUDIT #17 FIX] Was falling into the time_exit `else` branch →
+                        # momentum_death exits were MISLABELED as "Time Exit" in Telegram
+                        # (user never saw "Momentum Death" despite it firing 10×/audit).
+                        # DB `reason` was always correct; only the chat label was wrong.
+                        header  = f"💀 <b>Momentum Death  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
+                        subtext = f"<i>Harga flat &lt;0.05% dalam {hold_min}m — tidak ada momentum, cut minimal.</i>"
                         exit_detail = ""
                     else:  # time_exit
                         header  = f"⏱ <b>Time Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"

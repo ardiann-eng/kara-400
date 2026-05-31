@@ -1191,7 +1191,13 @@ class ScoringEngine:
                     },
                     "regime": _regime_cat,
                     "htf_regime": htf_regime,
-                    "momentum_move_pct": trend_pct,
+                    # [AUDIT #17 FIX] Was: momentum_move_pct=trend_pct (24h regime trend,
+                    # cached 60min) → AI mistook long-term trend for 5m momentum and
+                    # flagged "LONG opposes -4.318% momentum" while the GATE actually uses
+                    # _net_move (real-time 5m, +ve for all executed LONGs). Send the SAME
+                    # 5m value the momentum gate uses, plus trend_pct as a SEPARATE field.
+                    "momentum_move_pct": _net_move,          # real-time 5m net move (gate value)
+                    "trend_pct_24h": trend_pct,              # long-term regime trend (context only)
                     "atr_pct": realized_vol or 0.01,
                     "funding_rate": funding.funding_rate if funding else 0.0,
                     "ob_imbalance": _scalper_components.get("ob_signed", 0) / 18.0,
@@ -1748,10 +1754,39 @@ class ScoringEngine:
                     confirm_pts += 8; _c_div = 8
                     reasons.append(f"📉 RSI momentum: RSI 1m({rsi:.0f})<5m({rsi_5m:.0f}) + price falling +8")
 
-        # ── CONFIRMATION LAYER: CVD — DISABLED (r=-0.21 inverse, replaced by DVI 2026-05-24) ──
-        # CVD fires 74% = still constant bias. When it fires, WR DROPS (36% vs 100% without).
-        # Root cause: CVD uses last 80 trades (lagging). DVI uses last 2min dollar-weighted (leading).
+        # ── CONFIRMATION LAYER: CVD — [AUDIT #17] RE-ENABLED (5m window, ZONE logic) ──
+        # Disabled 24 Mei dengan klaim r=-0.21 (pakai window 80-trade lagging).
+        # Re-test Audit #17 (candle-based proxy, directional, 56 trades):
+        #   CVD 3m window → r=+0.037 (netral)
+        #   CVD 5m window → r=+0.172 (PREDIKTIF, > +0.15 threshold)
+        # Pola NON-LINEAR (sama seperti LOC/OI — ekstrem = exhaustion):
+        #   net delta -0.3..+0.3 (flat/bingung) → WR 0%  → NO bonus
+        #   net delta +0.3..+0.7 (tekanan sedang) → WR 50% → BONUS (sweet spot)
+        #   net delta +0.7..+1.0 (ekstrem, semua sudah masuk) → WR 37% → NO bonus
+        # Implementasi: CVD = candle-based net delta 5m (sign(close-open)×volume),
+        # directional ke trade side, HANYA beri +confirm bila di zona sedang (0.3-0.7).
+        # CAVEAT: ini PROXY candle, bukan tick CVD asli. n=56, 1 rezim. Re-validate
+        # Audit #18 dengan tick CVD asli dari WS cache. Bobot kecil (confirm, bukan setup).
         _c_cvd = 0
+        _CVD_ENABLED = True
+        if _CVD_ENABLED and len(closes) >= 5 and len(opens) >= 5 and len(volumes) >= 5:
+            _cvd_delta = 0.0; _cvd_totvol = 0.0
+            for _i in range(-5, 0):
+                _o = opens[_i]; _cl = closes[_i]; _v = volumes[_i]
+                if _o > 0 and _v > 0:
+                    _cvd_delta += (1 if _cl >= _o else -1) * _v
+                    _cvd_totvol += _v
+            _cvd_norm = (_cvd_delta / _cvd_totvol) if _cvd_totvol > 0 else 0.0
+            # Direction-align: bull pressure helps LONG, sell pressure helps SHORT
+            _cvd_dir = _cvd_norm if bull_setup >= bear_setup else -_cvd_norm
+            # ZONE: only the moderate band (0.3-0.7) is predictive (sweet spot WR 50%)
+            if 0.30 <= _cvd_dir < 0.70:
+                _c_cvd = 6
+                confirm_pts += 6
+                reasons.append(f"📊 CVD 5m moderate pressure ({_cvd_dir:+.2f}) — sweet spot +6")
+            elif _cvd_dir >= 0.70:
+                reasons.append(f"⚠️ CVD 5m extreme ({_cvd_dir:+.2f}) — exhaustion zone, no bonus")
+            # flat/negative-aligned → no contribution
 
         # ── SETUP LAYER 4: Bybit Long/Short Ratio (CONTRARIAN — fade the crowd) ──
         # Ratio > 1.5 = crowd heavily long → contrarian SHORT setup
@@ -1796,16 +1831,28 @@ class ScoringEngine:
                 bear_setup += abs(_xam_pts)
             reasons.append(_xam_reason)
 
-        # ── SETUP LAYER 5: Large Order Clustering (LEADING — institutional accumulation) ──
-        # [AUDIT #15] Detect clusters of large taker orders in 2-min window.
-        # Institutional players split large orders into medium-sized trades (TWAP/iceberg).
-        # Clustering = accumulation BEFORE breakout. Genuinely leading.
-        # Data source: cache.trades (HL WS trades stream, already subscribed).
-        # Threshold: ≥3 large orders (≥3× median) same direction in 2 min, dominance >60%.
-        # Max contribution: ±10 pts to setup layer.
+        # ── SETUP LAYER 5: Large Order Clustering — [AUDIT #17] DISABLED ──
+        # Data (56 trades, 41 LOC-fired, directional):
+        #   LOC r(PnL) = -0.284 (INVERSE — worse than aggregate score -0.159)
+        #   LOC fired → WR 32% PnL -$17.17 | LOC absent → WR 40% PnL +$4.14
+        # Root cause (investigated, NOT a threshold issue — tested 3 angles):
+        #   1. By dominance: 60-75%→0% WR, 90-99%→29%, 99-100%→42% — ALL buckets lose.
+        #   2. By notional: bigger money = WORSE (>$80K → WR 25%). Inverted "follow money".
+        #   3. By pre-move: even "early" (price flat) LOC trades → WR 31%, still lose.
+        # CONCEPTUAL FLAW (not fixable via threshold): LOC reads cache.trades =
+        # EXECUTED taker market orders = LAGGING. By the time 19 large buys @100% dom
+        # are visible, the move ALREADY happened → bot enters at the top → reversal.
+        # Contrast: OB (orderbook walls = resting limit orders = LEADING) r=+0.337.
+        # Also: LOC was a same-direction amplifier (40 aligned / 1 against) = no
+        # discrimination. Persona: inverse + no-discrimination + no fixable path → disable.
+        # A real "follow the money" edge needs on-chain wallet flow (Arkham/Nansen) +
+        # longer hold — a separate feature, not this trade-tape detector.
+        # Telemetry (loc_pts) still recorded for monitoring. Re-enable only with
+        # leading data source + proof of r > +0.10.
+        _LOC_SCORING_ENABLED = False
         _loc_pts = 0  # large order clustering
         _loc_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
-        if len(_loc_trades) >= 30:
+        if _LOC_SCORING_ENABLED and len(_loc_trades) >= 30:
             import time as _t_loc
             _now_ms = _t_loc.time() * 1000
             _window_ms = 120_000  # 2 minutes
