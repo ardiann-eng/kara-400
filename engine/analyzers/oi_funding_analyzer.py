@@ -43,6 +43,7 @@ class OIFundingAnalyzer:
         price_change_1h: float,
         mark_price: float,
         spot_price: float,
+        price_change_5m: float = None,
     ) -> Tuple[int, int, List[str], List[str]]:
         bull     = 0
         bear     = 0
@@ -164,32 +165,46 @@ class OIFundingAnalyzer:
         # ── 4. OI Change Analysis (graduated scoring) ──────────────────
         # [FIX 2026-05-18] Sebelumnya all-or-nothing: 0 atau 22 poin.
         # Sekarang graduated: OI kecil = sedikit poin, OI besar = banyak poin.
+        #
+        # [AUDIT #17 FIX] Ganti price_change_1h → price_change_5m.
+        # Root cause inverse (r=-0.072): blok ini pakai momentum 1-JAM untuk
+        # konfirmasi arah, padahal hold scalper cuma 10-15 MENIT. "Harga naik 1h +
+        # OI naik → +bull" = entry di UJUNG move 1-jam → langsung reversal di window
+        # scalp. Bukti (56 trade, candle HL asli, directional):
+        #   momentum 5m  r(PnL) = +0.228  (prediktif)
+        #   momentum 60m r(PnL) = -0.064  (inverse — yang dipakai lama)
+        #   dir_60m > +2% → WR 20% (masuk di puncak). dir_5m fresh → lebih baik.
+        # Teori OI/funding contrarian tetap sound; yang salah = TIMEFRAME konfirmasi.
+        # Threshold price diturunkan 0.001 → 0.0005 karena window 5m gerakannya
+        # lebih kecil dari 1h. Fallback ke price_change_1h jika 5m tidak tersedia.
         oi_chg = oi.oi_change_pct
         oi_threshold = SIGNAL.oi_change_threshold_pct  # 0.3%
+        _px_chg = price_change_5m if price_change_5m is not None else price_change_1h
+        _px_min = 0.0005  # 0.05% net move dalam 5m = konfirmasi arah fresh
 
-        if price_change_1h > 0.001 and oi_chg > oi_threshold * 3:  # > 0.9%
+        if _px_chg > _px_min and oi_chg > oi_threshold * 3:  # > 0.9%
             bull += 22
             reasons.append(f"📊 OI/Funding bullish (+22)")
-        elif price_change_1h > 0.001 and oi_chg > oi_threshold * 1.5:  # > 0.45%
+        elif _px_chg > _px_min and oi_chg > oi_threshold * 1.5:  # > 0.45%
             bull += 14
             reasons.append(f"📊 OI/Funding bullish (+14)")
-        elif price_change_1h > 0.001 and oi_chg > oi_threshold:  # > 0.3%
+        elif _px_chg > _px_min and oi_chg > oi_threshold:  # > 0.3%
             bull += 8
             reasons.append(f"📊 OI/Funding bullish (+8)")
-        elif price_change_1h < -0.001 and oi_chg > oi_threshold * 3:
+        elif _px_chg < -_px_min and oi_chg > oi_threshold * 3:
             bear += 22
             reasons.append(f"📊 OI/Funding bearish (+22)")
-        elif price_change_1h < -0.001 and oi_chg > oi_threshold * 1.5:
+        elif _px_chg < -_px_min and oi_chg > oi_threshold * 1.5:
             bear += 14
             reasons.append(f"📊 OI/Funding bearish (+14)")
-        elif price_change_1h < -0.001 and oi_chg > oi_threshold:
+        elif _px_chg < -_px_min and oi_chg > oi_threshold:
             bear += 8
             reasons.append(f"📊 OI/Funding bearish (+8)")
-        elif price_change_1h > 0.005 and oi_chg < -0.005:
+        elif _px_chg > 0.005 and oi_chg < -0.005:
             bear += 3
             warnings.append(f"Price up but OI falling -> weak move, short covering")
         elif oi_chg < -oi_threshold:
-            if price_change_1h > 0:
+            if _px_chg > 0:
                 bull += 5
             else:
                 bear += 5

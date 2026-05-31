@@ -436,6 +436,7 @@ class ScoringEngine:
         # Price history + OI snapshot tracking (same as standard mode)
         self._update_price_history(asset, mark_price)
         price_change_1h = self._get_price_change(asset, minutes=60)
+        price_change_5m = self._get_price_change(asset, minutes=5)  # [AUDIT #17] 5m momentum for OI confirmation (scalper-aligned)
         _now_ts = time.time()
         if asset not in self._oi_snapshots:
             self._oi_snapshots[asset] = []
@@ -458,7 +459,8 @@ class ScoringEngine:
         # Run fundamental analyzers (same analyzers as standard mode)
         funding_history = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
         oi_bull, oi_bear, oi_reasons, oi_warns = self.oi_funding_analyzer.analyze(
-            asset, funding, oi, funding_history, price_change_1h, mark_price, spot_price
+            asset, funding, oi, funding_history, price_change_1h, mark_price, spot_price,
+            price_change_5m=price_change_5m,
         )
         recent_liqs = self.cache.liquidations if hasattr(self.cache, 'liquidations') else []
         oi_usd = oi.open_interest * mark_price
@@ -757,6 +759,28 @@ class ScoringEngine:
         # [FIX 2026-05-25] Reduced from +5 to +3. Combined with regime penalty, +5 was too harsh.
         _vote_margin = _scalper_components.get("vote_margin", 99)
         _vote_margin_adj = 3 if _vote_margin < 4 else 0
+
+        # [AUDIT #17] HARD VOTE-MARGIN GATE — system undecided = DON'T TRADE.
+        # Root cause (AI flagged via LIT LONG, sig 4C9130D8): direction voter tied 4-4
+        # but bot FORCED LONG via bull_setup tiebreaker (OB=18 dominates). Persona rule:
+        # "Kontradiksi internal = stop trading." Tied/near-tied votes = max uncertainty.
+        # Data (56 trades, vote margin parsed from signal):
+        #   margin 0 → WR 25% PnL -$2.93 | margin 1 → WR 25% PnL -$1.14
+        #   margin 2 → WR 100% +$2.15  | margin 3 → WR 62% +$2.46
+        # Replay margin>1 gate: PF 0.59 → 0.67, blocks 8 losers, saves +$4.07.
+        # This is NOT the soft +3 threshold above — it's a HARD skip when the 7-voter
+        # system genuinely can't decide direction. CAVEAT: tie sample n=8, bug-detection
+        # grade. Re-validate Audit #18. Threshold 1 (not 2) — margin 2 bucket is profitable.
+        _MIN_VOTE_MARGIN = 2  # require |bull-bear| >= 2 (skip margin 0 and 1)
+        if _vote_margin < _MIN_VOTE_MARGIN:
+            log.info(
+                f"[SKIP] {asset} | score={score} | side={side.value} | "
+                f"reason=low_vote_consensus | context=vote_margin={_vote_margin}<{_MIN_VOTE_MARGIN} "
+                f"(direction voters undecided — internal contradiction)"
+            )
+            self.skip_counters["low_vote_consensus"] = self.skip_counters.get("low_vote_consensus", 0) + 1
+            self._skip_count_since_summary += 1
+            return None, score
 
         # [AUDIT #7] OI score gate: low OI = no fundamental conviction
         # Data: OI<6 = WR 41.2% PnL -$7.05. OI>=6 = WR 69.6% PnL +$15.28
@@ -1133,9 +1157,24 @@ class ScoringEngine:
         # [AUDIT #9] Trend structure veto REMOVED — redundant with pump gate.
         # Pump gate already checks 3/5 candle direction + move < 0.7%.
 
-        # ── [AI INTELLIGENCE — AUDIT #14] Evaluate EVERY signal that passes filters ──
-        # Moved here from pre-threshold position. Now AI sees only qualified signals.
-        # AI can boost (+8) or penalize (-5). If penalty drops below threshold → cancel.
+        # ── [AI INTELLIGENCE — DISABLED FROM SCORING, AUDIT #17] ──
+        # AI verdict masih dievaluasi & disimpan untuk DASHBOARD (konteks manusia),
+        # TAPI tidak lagi mengubah score atau mem-veto trade.
+        #
+        # Root cause disable (data produksi, 377 verdict ber-PnL):
+        #   1. TIMEOUT 67%: 252/377 verdict = fallback default (conf=0.50,
+        #      market_state=unknown, 222 latency=0ms). Mimo API (api.xiaomimimo.com)
+        #      terlalu lambat dari Railway SG. Audit #15 sudah coba 4s→10s, tetap gagal.
+        #   2. INVERSE saat jalan (125 real evals):
+        #        confidence  r(PnL) = -0.101
+        #        score_adj   r(PnL) = -0.053
+        #      Trade yang AI HUKUM (-5) → WR 44% (di atas rata-rata bot 34%).
+        #      Trade yang AI PUJI (+4/+8) → rugi. AI persis terbalik.
+        #   3. CONSTANT BIAS: 112/125 (90%) di-label "exhaustion" = noise floor.
+        # Persona rule: komponen inverse + 100% satu output + 2 audit gagal fix → disable.
+        # Path fix tersisa (ganti provider AI) tidak realistis untuk deadline live.
+        # Re-enable HANYA jika: timeout < 20% DAN confidence r(PnL) > +0.10 di data baru.
+        _AI_SCORING_ENABLED = False
         try:
             from intelligence.ai_analyst import ai_analyst
             if ai_analyst.enabled:
@@ -1160,15 +1199,15 @@ class ScoringEngine:
                     "volume_trend": "unknown",
                 }
                 _ai_verdict = await ai_analyst.evaluate_signal(_ai_context)
-                _ai_score_adj = _ai_verdict.score_adj
-                if _ai_score_adj != 0:
+                # [AUDIT #17] score_adj NOT applied — AI is advisory-only now.
+                if _AI_SCORING_ENABLED and _ai_verdict.score_adj != 0:
+                    _ai_score_adj = _ai_verdict.score_adj
                     score += _ai_score_adj
                     score = max(0, min(100, score))
                     reasons.append(
                         f"🧠 AI: conf={_ai_verdict.confidence:.2f} ({_ai_verdict.market_state}) "
                         f"→ {_ai_score_adj:+d}pts"
                     )
-                    # AI penalty dropped score below threshold → cancel signal
                     if _ai_score_adj < 0 and score < effective_threshold:
                         log.info(
                             f"[AI-VETO] {asset} | score={score} (was {score - _ai_score_adj}) | "
@@ -1176,12 +1215,16 @@ class ScoringEngine:
                         )
                         self.skip_counters["ai_veto"] = self.skip_counters.get("ai_veto", 0) + 1
                         return None, score
-                elif _ai_verdict.error:
-                    log.debug(f"[AI] {asset}: {_ai_verdict.error} (latency={_ai_verdict.latency_ms:.0f}ms)")
-                # Save to DB for dashboard
+                else:
+                    # Advisory-only: annotate reasons without touching score
+                    reasons.append(
+                        f"🧠 AI (advisory): conf={_ai_verdict.confidence:.2f} "
+                        f"({_ai_verdict.market_state}) — not applied to score"
+                    )
+                # Save to DB for dashboard (score unchanged → score_before == score_after)
                 try:
                     from intelligence.ai_analyst import save_ai_verdict
-                    save_ai_verdict(asset, side.value, score - _ai_score_adj, _ai_verdict)
+                    save_ai_verdict(asset, side.value, score, _ai_verdict)
                 except Exception:
                     pass
         except ImportError:
@@ -1513,9 +1556,18 @@ class ScoringEngine:
             if fund_reasons:
                 reasons.extend(fund_reasons)
 
-        # ── SETUP LAYER 3: Liquidation (LEADING — cascade potential) ──
-        # Liquidation cluster nearby = potential forced buying/selling = catalyst
-        if liq_bull > 0 or liq_bear > 0:
+        # ── SETUP LAYER 3: Liquidation — [AUDIT #17] DISABLED ──
+        # Data: liquidation_score = 0 di 174/174 signal (0% firing), konsisten dengan
+        # Audit #16 (0/349). r(PnL)=0.000 — komponen mati total.
+        # Root cause (Audit #16): OKX liq events sparse per-asset (~1/min); threshold
+        # _calc_liq_cluster (≥$2K notional + ≥2 events/10min) tidak pernah tercapai untuk
+        # altcoin. Teorinya sound (cascade = katalis), implementasinya tidak punya data.
+        # Persona rule: "Component 0% firing 2+ audits → Disable."
+        # Telemetry (liq_signed) tetap dicatat untuk monitoring jika threshold OKX
+        # nanti diturunkan (Audit #17 task: lower OKX threshold). Re-enable HANYA setelah
+        # liq fire rate > 0% terbukti di data baru.
+        _LIQ_SCORING_ENABLED = False
+        if _LIQ_SCORING_ENABLED and (liq_bull > 0 or liq_bear > 0):
             liq_delta = liq_bull - liq_bear
             liq_pts = max(-12, min(12, int(liq_delta)))
             _c_liq = abs(liq_pts)
@@ -2019,8 +2071,44 @@ class ScoringEngine:
         aligned_setup = bull_setup if side == Side.LONG else bear_setup
         dominant_setup = aligned_setup  # keep var name for downstream log compatibility
 
-        # Raw score = setup (0-63) + confirmation (-15 to +31) → range 0-94 pre-scaling
-        raw = dominant_setup + confirm_pts
+        # ── [AUDIT #17] OB-DOMINANT EDGE — orderbook is the ONLY robust predictor ──
+        # Data (56 trades POST-P0, single-user, directional/sign-corrected):
+        #   orderbook  r(PnL) = +0.337 (spearman +0.286)  ← ONLY robust component
+        #   net conv.  r(PnL) = +0.076 (noise)
+        #   oi_funding r(PnL) = -0.072 (inverse)   RSI +0.035   session +0.091 (noise)
+        # Aggregate score was INVERSE (r=-0.159) because it summed 1 predictive signal
+        # (OB) with ~8 noise/inverse components — the noise drowned the edge.
+        #
+        # OB is a STEP FUNCTION, not linear (stored ob_dir ∈ {-6,0,6,10,18}):
+        #   strong aligned wall (raw ±18) → WR 70%, PF 3.46  (n=10)
+        #   mild/no wall (≤10)            → WR 24-26%, net loss (n=46)
+        #   OB contradicts trade dir       → WR 0% (n=1; Audit #12 confirmed same)
+        # No continuous re-weighting passed the replay gate (binary edge can't be
+        # smoothed). Fix = make a STRONG ALIGNED WALL dominate the score, and let an
+        # OB-contradiction sink the score below threshold (soft veto via existing gate).
+        #
+        # Replay (production scale): score↔PnL r = -0.159 → +0.24, top-quartile WR 64%.
+        # CAVEAT: strong-wall n=10, single regime (rally), 46h window. Components are
+        # NOT disabled (still contribute as confirmation) — only re-weighted toward the
+        # one measurable edge. Re-validate at Audit #18 with 50+ fresh trades.
+        _ob_dir = _ob_signed if side == Side.LONG else -_ob_signed  # OB aligned to trade side
+        _OB_STRONG_THRESHOLD = 12   # captures strong wall (18×regime_mult), excludes mild (10)
+        _OB_STRONG_BONUS     = 15
+        _OB_CONTRA_PENALTY   = -20
+        _ob_edge_adj = 0
+        if _ob_dir >= _OB_STRONG_THRESHOLD:
+            _ob_edge_adj = _OB_STRONG_BONUS
+            reasons.append(
+                f"🧱 Strong aligned orderbook wall (ob_dir={_ob_dir:+d}) — dominant edge (+{_OB_STRONG_BONUS})"
+            )
+        elif _ob_dir < 0:
+            _ob_edge_adj = _OB_CONTRA_PENALTY
+            reasons.append(
+                f"⛔ Orderbook contradicts {side.value.upper()} (ob_dir={_ob_dir:+d}) — edge inverted ({_OB_CONTRA_PENALTY})"
+            )
+
+        # Raw score = setup (0-63) + confirmation (-15 to +31) + OB edge (±) → pre-scaling
+        raw = dominant_setup + confirm_pts + _ob_edge_adj
         raw = max(0, raw)
 
         # Scale to 0-100: multiply by 1.6 so typical good setups (35-50 raw) reach 55-80
@@ -2035,8 +2123,8 @@ class ScoringEngine:
         # ── Per-coin SCORE-DEBUG log (pre-regime: before vol/regime multiplier) ──
         log.info(
             f"[SCORE-DEBUG] {asset} | {side.value.upper()} pre_regime={score} | "
-            f"setup={dominant_setup} confirm={confirm_pts} disp={disp_mult:.2f} | "
-            f"OB={_c_ob} EMA={_c_ema} RSI={_c_rsi} CVD={_c_cvd} "
+            f"setup={dominant_setup} confirm={confirm_pts} ob_edge={_ob_edge_adj:+d} disp={disp_mult:.2f} | "
+            f"OB={_c_ob} ob_dir={_ob_dir:+d} EMA={_c_ema} RSI={_c_rsi} CVD={_c_cvd} "
             f"FUND={_c_fund} LIQ={_c_liq} MTF={_c_mtf} | "
             f"bull_s={bull_setup} bear_s={bear_setup}"
         )

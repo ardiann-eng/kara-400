@@ -233,17 +233,22 @@ class ReasoningLogger:
         self._pattern_stats["total_patterns"] = len(patterns)
 
         def _action_label(wr, n):
-            """Show what the learning engine DOES with this pattern."""
-            if n < 5:
+            """Show what the learning engine DOES with this pattern.
+            [AUDIT #17 FIX] Thresholds aligned EXACTLY to learning_engine.evaluate()
+            (engine activates at n>=3; was mislabeled 'collecting' until n=5 here):
+              wr<0.25 → FLIP/-20 | wr<0.40 → -10 |
+              wr>0.80 & n>=5 → +12 | wr>0.65 → +8 | else neutral
+            """
+            if n < 3:
                 return "📊 collecting"
-            if wr >= 0.80 and n >= 8:
-                return "🚀 +12 pts"
-            if wr >= 0.65:
-                return "✅ +8 pts"
             if wr < 0.25:
                 return "🔄 FLIP or -20 pts"
             if wr < 0.40:
                 return "⚠️ -10 pts"
+            if wr > 0.80 and n >= 5:
+                return "🚀 +12 pts"
+            if wr > 0.65:
+                return "✅ +8 pts"
             return "— neutral"
 
         sorted_patterns = sorted(patterns.items(), key=lambda x: x[1].total_pnl)
