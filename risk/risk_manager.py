@@ -1200,13 +1200,39 @@ class RiskManager:
             )
             # Fall through to Rule D to apply trail immediately
 
+        # ── Rule D0: Pre-TP1 armed trailing (L1 time_exit early profit-lock) ──
+        # [AUDIT #18 P0] L1 sets trailing_active + trailing_stop_price at +0.10%;
+        # without this check those positions never exited via trail until TP1/time.
+        if (not position.tp1_hit
+                and getattr(position, 'trailing_active', False)):
+            trail_sl = getattr(position, 'trailing_stop_price', 0.0)
+            _pre_tp1_trail_w = getattr(cfg, 'time_exit_early_trail_width', 0.0012)
+            if trail_sl > 0:
+                hit = (
+                    (position.side == Side.LONG and current_price <= trail_sl)
+                    or (position.side == Side.SHORT and current_price >= trail_sl)
+                )
+                if hit:
+                    return {
+                        "action":      "trailing_stop",
+                        "close_ratio": 1.0,
+                        "price":       current_price,
+                        "trail_price": trail_sl,
+                        "trail_pct":   _pre_tp1_trail_w,
+                        "message":     (
+                            f"🛡️ Pre-TP1 trail hit at {trail_sl:.6f} "
+                            f"(peak +{max_floating*100:.2f}%)."
+                        ),
+                    }
+
         # ── Rule D: ATR-based trailing stop on last position piece ───────
         # Standard: trail aktivasi setelah TP1, gunakan ATR × 2.0 dari peak.
         # Trailing level HANYA naik (ratchet) — tidak pernah dilebarkan.
         # Fallback ke vol-fraction bila entry_atr tidak tersedia.
         if position.tp1_hit:
             tp1_diff_pct = abs(position.entry_price - position.tp1) / position.entry_price
-            activation_threshold = tp1_diff_pct + 0.003
+            _trail_extra = getattr(cfg, 'atr_trail_post_tp1_extra_pct', 0.001)
+            activation_threshold = tp1_diff_pct + _trail_extra
 
             if max_floating >= activation_threshold:
                 entry_atr = getattr(position, 'entry_atr', 0.0)
@@ -1414,20 +1440,17 @@ class RiskManager:
                 # Tidak return — biarkan trailing stop check di atas yang handle exit
                 # (trailing_active sudah True, scan berikutnya akan cek)
 
-            # ── L1.5: MOMENTUM DEATH — price flat = no edge = exit early ────
-            # [AUDIT #13 FIX] Data: 61% trades = time_exit. Most are flat trades
-            # that slowly drift to loss. If price hasn't moved after 3min, the
-            # momentum that triggered entry is GONE. Exit now at minimal loss
-            # instead of waiting 15min for guaranteed bigger loss.
-            #
-            # Conditions: hold >= 3min, NOT already trailing, NOT TP1 hit,
-            # absolute price move < 0.05% (= dead flat for crypto).
-            _momentum_death_mins = 3.0
-            _momentum_death_threshold = 0.0005  # 0.05% — anything less = no momentum
+            # ── L1.5: MOMENTUM DEATH — flat AND never developed favorable move ─
+            # [AUDIT #18 P0] Skip if peak favorable >= 0.10% — those trades should
+            # have armed early trail at +0.10%; don't cut a +0.12% tick then flat.
+            _momentum_death_mins = getattr(scfg, 'momentum_death_min_minutes', 4.0)
+            _momentum_death_threshold = getattr(scfg, 'momentum_death_flat_pct', 0.0005)
+            _momentum_death_peak = getattr(scfg, 'momentum_death_peak_max_pct', 0.0010)
             if (hold_minutes >= _momentum_death_mins
                     and not position.tp1_hit
                     and not getattr(position, 'trailing_active', False)
-                    and abs(floating) < _momentum_death_threshold):
+                    and abs(floating) < _momentum_death_threshold
+                    and max_floating < _momentum_death_peak):
                 return {
                     "action":      "momentum_death",
                     "close_ratio": 1.0,
@@ -1436,8 +1459,8 @@ class RiskManager:
                     "position_id": position.position_id,
                     "message":     (
                         f"💀 Momentum death {hold_minutes:.0f}m: "
-                        f"price flat ({floating*100:.3f}% < ±0.05%). "
-                        f"No edge — exit sekarang."
+                        f"flat {floating*100:.3f}% (peak +{max_floating*100:.2f}% < "
+                        f"{_momentum_death_peak*100:.1f}%). No edge — exit."
                     )
                 }
 

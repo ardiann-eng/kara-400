@@ -979,21 +979,42 @@ class ScoringEngine:
             # follow-through probability lebih tinggi.
             # Re-evaluate setelah 50+ SHORT trades dengan threshold baru.
             _dir_move = _net_move if side == Side.LONG else -_net_move
-            _min_momentum = 0.0050 if side == Side.SHORT else 0.0015  # 0.50% SHORT (was 0.25%), 0.15% LONG
+            _scfg_mom = config.SCALPER
+            if side == Side.SHORT:
+                _min_momentum = getattr(_scfg_mom, "short_min_dir_move_pct", 0.0050)
+                _mom_gate_reason = "low_momentum"
+            else:
+                _min_momentum = getattr(_scfg_mom, "long_min_dir_move_pct", 0.0015)
+                _mom_gate_reason = "low_momentum"
+                if htf_regime == "CHOPPY":
+                    _min_momentum = getattr(_scfg_mom, "long_choppy_min_dir_move_pct", 0.0020)
+                    _mom_gate_reason = "long_choppy_low_momentum"
+                    # [AUDIT #18] CHOPPY LONG: 0.20% filters flat entries (time_exit bucket).
+                    # Relax for leading signals — they fire BEFORE the 5m move develops.
+                    _has_leading_early = (
+                        _scalper_components.get("cvd_pts", 0) >= 6
+                        or _scalper_components.get("xam_pts", 0) != 0
+                        or _scalper_components.get("abs_pts", 0) != 0
+                    )
+                    if _has_leading_early and getattr(_scfg_mom, "long_choppy_leading_use_base", True):
+                        _min_momentum = getattr(_scfg_mom, "long_min_dir_move_pct", 0.0015)
+                        _mom_gate_reason = "low_momentum"
             if _dir_move < _min_momentum:
                 log.info(
                     f"[SKIP] {asset} | score={score} | side={side.value} | "
-                    f"reason=low_momentum | context=dir_move={_dir_move*100:.3f}% < {_min_momentum*100:.2f}% (need trend)"
+                    f"reason={_mom_gate_reason} | context=htf={htf_regime} "
+                    f"dir_move={_dir_move*100:.3f}% < {_min_momentum*100:.2f}% (need trend)"
                 )
+                self.skip_counters[_mom_gate_reason] = self.skip_counters.get(_mom_gate_reason, 0) + 1
                 self.skip_counters["low_momentum"] = self.skip_counters.get("low_momentum", 0) + 1
                 self._skip_count_since_summary += 1
                 return None, score
 
             # Leading signal detection — these expect price HASN'T moved yet
             _has_leading_signal = (
-                _scalper_components.get("cvd_pts", 0) >= 10 or
-                _scalper_components.get("xam_pts", 0) != 0 or
-                _scalper_components.get("abs_pts", 0) != 0
+                _scalper_components.get("cvd_pts", 0) >= 6
+                or _scalper_components.get("xam_pts", 0) != 0
+                or _scalper_components.get("abs_pts", 0) != 0
             )
 
             if _has_leading_signal:
@@ -2134,20 +2155,33 @@ class ScoringEngine:
         # smoothed). Fix = make a STRONG ALIGNED WALL dominate the score, and let an
         # OB-contradiction sink the score below threshold (soft veto via existing gate).
         #
-        # Replay (production scale): score↔PnL r = -0.159 → +0.24, top-quartile WR 64%.
-        # CAVEAT: strong-wall n=10, single regime (rally), 46h window. Components are
-        # NOT disabled (still contribute as confirmation) — only re-weighted toward the
-        # one measurable edge. Re-validate at Audit #18 with 50+ fresh trades.
+        # Replay (Audit #17): r=+0.34 on 56 trades. Audit #18 (149 trades): ob_dir r=-0.07,
+        # strong-wall WR 27% / -$5.64 — NOT replication; root cause = crowded confirmation:
+        # LONG + bid wall + TRENDING_UP (31/45 losers) = wall everyone sees, not fresh edge.
+        # Fix: keep +15 only when wall is NOT redundant with 1H trend; else +3 (setup pts stay).
         _ob_dir = _ob_signed if side == Side.LONG else -_ob_signed  # OB aligned to trade side
-        _OB_STRONG_THRESHOLD = 12   # captures strong wall (18×regime_mult), excludes mild (10)
-        _OB_STRONG_BONUS     = 15
-        _OB_CONTRA_PENALTY   = -20
+        _scfg_ob = config.SCALPER
+        _OB_STRONG_THRESHOLD = 12
+        _OB_STRONG_BONUS = int(getattr(_scfg_ob, "ob_strong_bonus_pts", 15))
+        _OB_CROWDED_BONUS = int(getattr(_scfg_ob, "ob_crowded_wall_bonus_pts", 3))
+        _OB_CONTRA_PENALTY = int(getattr(_scfg_ob, "ob_contra_penalty_pts", -20))
+        _ob_crowded = (
+            (side == Side.LONG and htf_regime == "TRENDING_UP" and _ob_signed > 0)
+            or (side == Side.SHORT and htf_regime == "TRENDING_DOWN" and _ob_signed < 0)
+        )
         _ob_edge_adj = 0
         if _ob_dir >= _OB_STRONG_THRESHOLD:
-            _ob_edge_adj = _OB_STRONG_BONUS
-            reasons.append(
-                f"🧱 Strong aligned orderbook wall (ob_dir={_ob_dir:+d}) — dominant edge (+{_OB_STRONG_BONUS})"
-            )
+            if _ob_crowded:
+                _ob_edge_adj = _OB_CROWDED_BONUS
+                reasons.append(
+                    f"🧱 OB wall aligned but crowded w/ HTF {htf_regime} "
+                    f"(ob_dir={_ob_dir:+d}) — reduced (+{_OB_CROWDED_BONUS} not +{_OB_STRONG_BONUS})"
+                )
+            else:
+                _ob_edge_adj = _OB_STRONG_BONUS
+                reasons.append(
+                    f"🧱 Strong aligned orderbook wall (ob_dir={_ob_dir:+d}) — edge (+{_OB_STRONG_BONUS})"
+                )
         elif _ob_dir < 0:
             _ob_edge_adj = _OB_CONTRA_PENALTY
             reasons.append(
@@ -2171,7 +2205,7 @@ class ScoringEngine:
         log.info(
             f"[SCORE-DEBUG] {asset} | {side.value.upper()} pre_regime={score} | "
             f"setup={dominant_setup} confirm={confirm_pts} ob_edge={_ob_edge_adj:+d} disp={disp_mult:.2f} | "
-            f"OB={_c_ob} ob_dir={_ob_dir:+d} EMA={_c_ema} RSI={_c_rsi} CVD={_c_cvd} "
+            f"OB={_c_ob} ob_dir={_ob_dir:+d} crowded={int(_ob_crowded)} EMA={_c_ema} RSI={_c_rsi} CVD={_c_cvd} "
             f"FUND={_c_fund} LIQ={_c_liq} MTF={_c_mtf} | "
             f"bull_s={bull_setup} bear_s={bear_setup}"
         )
@@ -2184,6 +2218,8 @@ class ScoringEngine:
             out_components["bull_setup"] = int(bull_setup)
             out_components["bear_setup"] = int(bear_setup)
             out_components["vote_margin"] = abs(_dir_bull - _dir_bear)
+            out_components["ob_crowded"] = int(_ob_crowded)
+            out_components["ob_edge_adj"] = int(_ob_edge_adj)
             out_components["cvd_pts"] = int(_c_cvd)
             out_components["xam_pts"] = int(_xam_pts)
             out_components["loc_pts"] = int(_loc_pts)

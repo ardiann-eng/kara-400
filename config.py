@@ -288,11 +288,10 @@ class ScalperConfig:
     max_hold_soft_floor_pct: float = -0.010   # cut loss jika -1% (1%×15x = -15% ROE)
 
     # ── [TIME EXIT REDESIGN 2026-05-18] ──────────────────────────────────────
-    # [PROFIT-LOCK REDESIGN 2026-05-20] Trailing aktif JAUH lebih awal.
-    # Data: trailing_stop 100% WR tapi hanya 3.5% trades. Masalah = threshold terlalu tinggi.
-    # Fix: aktifkan trailing di +0.15% (1 menit move), lock profit segera.
-    time_exit_early_trail_pct:   float = 0.0015   # [AUDIT #6 FIX] 0.10%→0.15% activation. Give trade more room before locking.
-    time_exit_early_trail_width: float = 0.0015   # [AUDIT #6 FIX] 0.08%→0.15% trail width. Was too tight — 5s monitor misses fast moves.
+    # [AUDIT #18 P0] Trail pipeline: arm pre-TP1 lock at +0.10% (was 0.15%).
+    # Data: trailing_stop 100% WR, 19% fire — race vs momentum_death @ 3m flat.
+    time_exit_early_trail_pct:   float = 0.0010   # +0.10% → set trailing_active before flat exit
+    time_exit_early_trail_width: float = 0.0012   # trail width once armed
     # Early loss cut: jangan tunggu lama jika sinyal salah
     time_exit_early_loss_pct:    float = -0.002   # [AUDIT FIX 2026-05-21] -0.2%: cut if floating below this
     time_exit_early_loss_mins:   float = 5.0      # [AUDIT FIX 2026-05-21] 5m verdict: enough time to develop, not too long to bleed
@@ -301,6 +300,11 @@ class ScalperConfig:
     # Score threshold — HARD THRESHOLD SCALPER (TIDAK BISA DIUBAH USER)
     min_score_to_enter:      int   = 45       # [OPPORTUNITY SCORING 2026-05-20] New scoring produces lower raw scores (setup-based). Threshold 45 = requires at least OI(15)+OB(10)+EMA(5) or equivalent. Effective threshold higher with regime/session adjustments.
     signal_cooldown_minutes: int   = 10       # [PROFIT-LOCK] 10m cooldown (was 5m) — kurangi overtrading 50%
+    # Momentum gate — 5m dir_move aligned to trade side (Audit #18 LONG bleed in CHOPPY)
+    long_min_dir_move_pct:         float = 0.0015   # 0.15% LONG default (TRENDING_UP/DOWN)
+    long_choppy_min_dir_move_pct:  float = 0.0020   # 0.20% LONG when 1H CHOPPY (need impulse)
+    long_choppy_leading_use_base:  bool  = True     # leading (CVD/XAM/abs) → keep 0.15% in CHOPPY
+    short_min_dir_move_pct:        float = 0.0050   # 0.50% SHORT (unchanged)
     mtf_confirm_enabled:     bool  = True     # require 15m trend confirmation
     mtf_confirm_interval:    str   = "15m"
     mtf_confirm_lookback:    int   = 32       # ~8h on 15m candles
@@ -359,8 +363,8 @@ class ScalperConfig:
 
     # ── Early trailing: lock profit sebelum TP1 ──
     early_trail_enabled:         bool  = True
-    early_trail_activation_pct:  float = 0.0025  # [AUDIT FIX 2026-05-20] 0.15%→0.25% — sweet spot antara noise dan profit lock
-    early_trail_distance_pct:    float = 0.0015  # [AUDIT FIX 2026-05-20] 0.10%→0.15% — lebih lebar agar tidak trigger noise
+    early_trail_activation_pct:  float = 0.0010  # [AUDIT #18 P0] 0.25%→0.10% — same as time_exit early trail
+    early_trail_distance_pct:    float = 0.0012  # [AUDIT #18 P0] retrace to trigger early_trail exit
 
     # ── Quick-profit exit: langsung close saat profit signifikan + harga berbalik ──
     # Di Hyperliquid banyak asset max leverage 3-5x → ROE per % move kecil.
@@ -375,13 +379,22 @@ class ScalperConfig:
     quick_profit_low_lev_retrace:   float = 0.0010  # 0.10% retrace (was 0.2%)
 
     # ── [C5 FIX] Partial profit & breakeven — turunkan threshold ──
-    # Sebelum: TP1=1.0×SL, TP2=1.5×SL, Trail=2.0×SL → hampir tidak tercapai (2/108 trade)
-    # Sesudah: TP1=0.7×SL, TP2=1.0×SL, Trail=1.3×SL → tercapai lebih sering
-    # Dengan SL ~0.8%: TP1=0.56%, TP2=0.80%, Trail=1.04% → realistis dalam 20m
-    partial_tp1_at_sl_multiple: float = 0.7    # [AUDIT] 1.0→0.7: close 40% lebih awal
-    partial_tp2_at_sl_multiple: float = 1.0    # [AUDIT] 1.5→1.0: close 30% lebih awal
-    partial_tp3_trail_at: float = 1.3          # [AUDIT] 2.0→1.3: trail aktif lebih awal
-    breakeven_trigger_at_sl_multiple: float = 0.5  # [AUDIT] 0.8→0.5: breakeven lebih cepat
+    # [AUDIT #18 P0] TP1 @ 0.5×SL → lebih banyak posisi hit TP1 → ATR trail bucket (+$49).
+    partial_tp1_at_sl_multiple: float = 0.50   # [AUDIT #18] 0.7→0.5
+    partial_tp2_at_sl_multiple: float = 1.0    # unchanged
+    partial_tp3_trail_at: float = 1.3          # unchanged
+    breakeven_trigger_at_sl_multiple: float = 0.5
+    # Post-TP1 ATR trail arms when peak >= TP1 distance + extra (was hardcoded +0.3%)
+    atr_trail_post_tp1_extra_pct: float = 0.001  # +0.1% beyond TP1 price level
+    # Momentum death: only if never reached +0.10% favorable (don't kill +0.12% tick winners)
+    momentum_death_min_minutes: float = 4.0
+    momentum_death_flat_pct: float = 0.0005      # ±0.05% right now = flat
+    momentum_death_peak_max_pct: float = 0.0010  # peak favorable must stay below 0.10%
+
+    # [AUDIT #18] OB edge bonuses — strong wall vs crowded (redundant with HTF trend)
+    ob_strong_bonus_pts: int = 15          # ob_dir>=12, wall aligns, NOT crowded
+    ob_crowded_wall_bonus_pts: int = 8     # [AUDIT #18] was 3 — too aggressive (-19 score); 8 = softer crowded penalty
+    ob_contra_penalty_pts: int = -20       # wall opposes trade direction
     scale_in_threshold_pct: float = 0.005      # +0.5% in 3min = scale in 50%
     scale_in_threshold_sec: int = 180           # 3 min window for scale-in check
     max_scale_ins: int = 1                     # max 1 add per position
