@@ -1763,17 +1763,27 @@ class ScoringEngine:
                 price_falling = closes[-1] < closes_5m[-2] if len(closes_5m) >= 2 else False
 
                 if price_rising and rsi > rsi_5m + 5:
-                    # [AUDIT #15 FIX] RSI momentum moved from setup → confirm_pts.
-                    # Was: bull_setup += 8 → inflated aligned_setup → score 65+ = LOSS.
-                    # Root cause: RSI momentum = LAGGING (price already moved, RSI confirms after).
-                    # Data: score 65+ trades (where RSI momentum fires) = 0% WR, -$5.11.
-                    # Fix: +8 to confirm_pts (not setup). Still contributes to raw score,
-                    # but doesn't inflate aligned_setup which drives direction + setup strength.
-                    confirm_pts += 8; _c_div = 8
-                    reasons.append(f"📈 RSI momentum: RSI 1m({rsi:.0f})>5m({rsi_5m:.0f}) + price rising +8")
+                    # [AUDIT #19 FIX] RSI momentum overhaul based on root cause analysis.
+                    # DATA: 109 trades WITH RSI mom → WR 34.9%. 60 WITHOUT → WR 41.7%.
+                    # SHORT worst: WITH WR 26.9% vs WITHOUT 45.8% (delta -18.9%).
+                    # ROOT CAUSE: RSI 1m > 5m saat RSI sudah >65 = OVERBOUGHT confirmation.
+                    # You're entering AFTER the move. RSI 70 "confirming uptrend" = entry di top.
+                    # FIX: If RSI already >65 → PENALTY (late entry warning).
+                    #      If RSI 40-60 (fresh, not stretched) → small bonus +3.
+                    if rsi >= 65:
+                        confirm_pts -= 4; _c_div = -4
+                        reasons.append(f"⚠️ RSI {rsi:.0f} overbought + momentum → late entry PENALTY -4")
+                    elif rsi <= 60:
+                        confirm_pts += 3; _c_div = 3
+                        reasons.append(f"📈 RSI {rsi:.0f} fresh momentum (1m>5m) +3")
+                    # else RSI 60-65: neutral, no points
                 elif price_falling and rsi < rsi_5m - 5:
-                    confirm_pts += 8; _c_div = 8
-                    reasons.append(f"📉 RSI momentum: RSI 1m({rsi:.0f})<5m({rsi_5m:.0f}) + price falling +8")
+                    if rsi <= 35:
+                        confirm_pts -= 4; _c_div = -4
+                        reasons.append(f"⚠️ RSI {rsi:.0f} oversold + falling → late SHORT PENALTY -4")
+                    elif rsi >= 40:
+                        confirm_pts += 3; _c_div = 3
+                        reasons.append(f"📉 RSI {rsi:.0f} fresh sell momentum (1m<5m) +3")
 
         # ── CONFIRMATION LAYER: CVD — [AUDIT #17] RE-ENABLED (5m window, ZONE logic) ──
         # Disabled 24 Mei dengan klaim r=-0.21 (pakai window 80-trade lagging).
@@ -1806,26 +1816,55 @@ class ScoringEngine:
                 confirm_pts += 6
                 reasons.append(f"📊 CVD 5m moderate pressure ({_cvd_dir:+.2f}) — sweet spot +6")
             elif _cvd_dir >= 0.70:
-                reasons.append(f"⚠️ CVD 5m extreme ({_cvd_dir:+.2f}) — exhaustion zone, no bonus")
+                # [AUDIT #19 FIX] CVD extreme = EXHAUSTION PENALTY, not just "no bonus".
+                # DATA: 76 trades with CVD extreme → WR 26.3%, -$19.17.
+                # ROOT CAUSE: Entry saat aggressive flow SUDAH HABIS. Buyer/seller exhausted.
+                # Both LONG (WR 27.5%) and SHORT (WR 24.0%) rugi di extreme.
+                # Fix: apply penalty to reduce score → fewer entries during exhaustion.
+                _c_cvd = -5
+                confirm_pts -= 5
+                reasons.append(f"⚠️ CVD 5m extreme ({_cvd_dir:+.2f}) — exhaustion PENALTY -5")
             # flat/negative-aligned → no contribution
 
         # ── SETUP LAYER 4: Bybit Long/Short Ratio (CONTRARIAN — fade the crowd) ──
         # Ratio > 1.5 = crowd heavily long → contrarian SHORT setup
         # Ratio < 0.67 = crowd heavily short → contrarian LONG setup
         # This is institutional-grade data not available on Hyperliquid.
+        # [AUDIT #19 FIX 2026-06-04] ROOT CAUSE: L/S selalu > 1.5 di HL (selalu bilang
+        # "crowd long, fade SHORT"). Ketika trade final = LONG, L/S kasih +12 bear yang
+        # MELAWAN trade → inflate score tanpa conviction. Data:
+        # - L/S agrees (26 SHORT trades): WR 38.5%, +$2.35 ← signal BENAR
+        # - L/S disagrees (16 LONG trades): WR 12.5%, -$10.10 ← KONTRADIKSI
+        #
+        # FIX: L/S poin HANYA diberikan kalau arah L/S SAMA dengan arah final trade.
+        # Contrarian signal tanpa follow-through = noise, bukan edge.
+        # Direction `side` sudah ditentukan oleh vote system sebelum kode ini.
         if ls_ratio is not None and ls_ratio > 0:
-            if ls_ratio > 2.0:
-                bear_setup += 12
-                reasons.append(f"🐻 L/S ratio {ls_ratio:.2f} — crowd VERY long, fade SHORT +12")
-            elif ls_ratio > 1.5:
-                bear_setup += 7
-                reasons.append(f"🐻 L/S ratio {ls_ratio:.2f} — crowd long, SHORT tilt +7")
-            elif ls_ratio < 0.5:
-                bull_setup += 12
-                reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd VERY short, fade LONG +12")
-            elif ls_ratio < 0.67:
-                bull_setup += 7
-                reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd short, LONG tilt +7")
+            _ls_suggests_short = ls_ratio > 1.5  # crowd long → fade SHORT
+            _ls_suggests_long = ls_ratio < 0.67   # crowd short → fade LONG
+            
+            if _ls_suggests_short and side == Side.SHORT:
+                # L/S says SHORT and we're going SHORT → ALIGNED, give points
+                if ls_ratio > 2.0:
+                    bear_setup += 8
+                    reasons.append(f"🐻 L/S ratio {ls_ratio:.2f} — crowd VERY long + trade SHORT aligned +8")
+                else:
+                    bear_setup += 4
+                    reasons.append(f"🐻 L/S ratio {ls_ratio:.2f} — crowd long + trade SHORT aligned +4")
+            elif _ls_suggests_long and side == Side.LONG:
+                # L/S says LONG and we're going LONG → ALIGNED, give points
+                if ls_ratio < 0.5:
+                    bull_setup += 8
+                    reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd VERY short + trade LONG aligned +8")
+                else:
+                    bull_setup += 4
+                    reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd short + trade LONG aligned +4")
+            elif _ls_suggests_short and side == Side.LONG:
+                # L/S says SHORT but we're going LONG → CONTRADICTION, no points
+                # Don't penalize (maybe vote system sees something L/S doesn't), just ignore
+                reasons.append(f"⚠️ L/S ratio {ls_ratio:.2f} — crowd long (fade SHORT) but trade LONG → no pts (contradiction)")
+            elif _ls_suggests_long and side == Side.SHORT:
+                reasons.append(f"⚠️ L/S ratio {ls_ratio:.2f} — crowd short (fade LONG) but trade SHORT → no pts (contradiction)")
 
         # ── CONFIRMATION LAYER: MTF 15m Trend — DISABLED ──
         # [AUDIT FIX 2026-05-21] r=-0.68 vs PnL (p=0.0008). Strongest inverse predictor.
@@ -1940,13 +1979,11 @@ class ScoringEngine:
 
         # ── CONFIRMATION: MFI (Money Flow Index) — replaces DVI (Audit #11) ──
         # MFI = volume-weighted RSI. Measures conviction (money) behind price move.
-        # Unlike DVI (snapshot aggression), MFI uses 14-bar lookback = smoother, less noise.
-        # [AUDIT #12 FIX] MFI bearish DISABLED for SHORT signals.
-        # Data: 15 SHORT trades with MFI bearish → WR 40%, PnL -$5.67.
-        # Root cause: MFI on 1m altcoin candles is STRUCTURALLY always low (1-36)
-        # because volume is small/lumpy and typical price drifts down.
-        # MFI "bearish" is not a real signal — it's a timeframe artifact.
-        # MFI bullish (>60) for LONG remains useful (WR 50%, PnL +$2.10).
+        # [AUDIT #19 FIX] MFI reduced from max +8 to max +4.
+        # DATA: MFI high (n=89) WR 37.1% vs low (n=80) WR 37.5% → NO EDGE.
+        # ROOT CAUSE: MFI > 80 = money ALREADY in = same exhaustion as CVD extreme.
+        # MFI is redundant with CVD (both measure aggressive flow).
+        # Keep small confirmation (+3-4) but add penalty when MFI > 85 (overbought flow).
         _mfi_pts = 0
         if len(closes) >= 15 and len(volumes) >= 15 and len(highs_c) >= 15 and len(lows_c) >= 15:
             # Typical price = (H + L + C) / 3
@@ -1960,9 +1997,15 @@ class ScoringEngine:
                     neg_mf += raw_mf[i]
             mfi = 100 - (100 / (1 + pos_mf / neg_mf)) if neg_mf > 0 else 100
             
-            if mfi > 60:
-                # Bullish MFI — useful for LONG confirmation
-                _mfi_pts = min(8, int((mfi - 50) / 5))
+            if mfi > 85:
+                # [AUDIT #19] MFI > 85 = flow exhaustion (like CVD extreme).
+                # Money already rushed in → late entry risk.
+                _mfi_pts = -3
+                reasons.append(f"⚠️ MFI {mfi:.0f} — flow exhaustion, late entry penalty (-3)")
+            elif mfi > 60:
+                # Moderate MFI — small confirmation only
+                _mfi_pts = min(4, int((mfi - 55) / 8))  # max +4 (was +8)
+                _mfi_pts = max(1, _mfi_pts)
                 reasons.append(f"💰 MFI {mfi:.0f} — money flowing in (+{_mfi_pts})")
             # Bearish MFI disabled — structural bias on 1m altcoin, not a real signal
         
@@ -2169,9 +2212,23 @@ class ScoringEngine:
             (side == Side.LONG and htf_regime == "TRENDING_UP" and _ob_signed > 0)
             or (side == Side.SHORT and htf_regime == "TRENDING_DOWN" and _ob_signed < 0)
         )
+        # [AUDIT #19 FIX] Additional counter-trend check:
+        # LONG + bid wall + TRENDING_DOWN = wall AGAINST dominant flow → will be broken.
+        # Data: OB strong + TRENDING_DOWN: WR 30%, -$6.70 (worst regime for OB).
+        _ob_counter_trend = (
+            (side == Side.LONG and htf_regime == "TRENDING_DOWN" and _ob_signed > 0)
+            or (side == Side.SHORT and htf_regime == "TRENDING_UP" and _ob_signed < 0)
+        )
         _ob_edge_adj = 0
         if _ob_dir >= _OB_STRONG_THRESHOLD:
-            if _ob_crowded:
+            if _ob_counter_trend:
+                # Wall opposes macro trend → will likely be eaten. No edge, small penalty.
+                _ob_edge_adj = 0
+                reasons.append(
+                    f"🧱 OB wall aligned to trade but COUNTER HTF {htf_regime} "
+                    f"(ob_dir={_ob_dir:+d}) — wall will break, no bonus"
+                )
+            elif _ob_crowded:
                 _ob_edge_adj = _OB_CROWDED_BONUS
                 reasons.append(
                     f"🧱 OB wall aligned but crowded w/ HTF {htf_regime} "

@@ -53,65 +53,65 @@ class OIFundingAnalyzer:
         fr = funding.funding_rate
         log.debug(f"[FUNDING] {asset}: rate={fr:.6f} (is this 0.0? then API fetch failed)")
 
-        # ── 1. Funding Rate — CONTRARIAN interpretation ──────────────
-        # [AUDIT FIX 2026] Extreme funding LEVEL = crowded positioning, not momentum.
-        # Empirical evidence (Phase 1 109-trade audit): score bucket 65-69 was
-        # counter-predictive (44% WR) precisely because absolute funding bias
-        # pushed the bot into trades AT the top of crowding. Reverse the bias:
-        # extreme positive funding -> LONGS already crowded -> mean-reversion BEARISH.
-        # Mild funding still gives a small same-side tilt (positioning still building).
-        # Funding SLOPE (Section 2 below) keeps its directional meaning — slope IS
-        # a real momentum signal, LEVEL is a positioning indicator only.
+        # ── 1. Funding Rate — PURE CONTRARIAN (no mild-direction bias) ──
+        # [AUDIT #19 ROOT CAUSE FIX 2026-06-04]
+        #
+        # DATA: 169 trade, OI/Funding r=-0.179 (p=0.020, SIGNIFIKAN).
+        # - LONG+OI bullish(5-8): 89 trade WR 33.7%, -$29.31 (BLEED)
+        # - LONG+OI bearish(<=-4): 4 trade WR 100%, +$4.84
+        # - Per regime: TRENDING_UP r=-0.414, CHOPPY r=-0.258
+        #
+        # ROOT CAUSE: "mild positive funding → bull +8" fire 38% waktu,
+        # memberi constant LONG bias. Di HL, funding > 0.005%/8h = NORMAL
+        # (bukan signal). Bot masuk LONG di posisi yang sudah crowded.
+        #
+        # FIX: Funding level HANYA contrarian. Mild = ZERO poin.
+        # Rationale trader futures: funding LEVEL = cost of carry = positioning.
+        # - Tinggi positif = longs bayar shorts = longs crowded = FADE short.
+        # - Tinggi negatif = shorts bayar longs = shorts crowded = SQUEEZE long.
+        # - Mild = noise, bukan edge. Tidak kasih arah.
+        # Funding SLOPE (Section 2) tetap directional — itu momentum asli.
+        #
         if fr > SIGNAL.funding_extreme_threshold * 2:     # > 0.0006
-            bear += 18   # [QUANT AGGRESSION] contrarian: crowded longs → strong fade signal
+            bear += 8    # contrarian: EXTREME crowded longs
             reasons.append(
-                f"⚠️ EXTREME positive funding {fr*100:.4f}%/8h - longs over-crowded -> contrarian BEARISH +18"
+                f"⚠️ EXTREME positive funding {fr*100:.4f}%/8h - longs over-crowded -> contrarian BEARISH +8"
             )
             log.info(
-                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | threshold={SIGNAL.funding_extreme_threshold:.6f} | "
-                f"bias=bear | pts=18 | direction=contrarian"
+                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | extreme>2x | bias=bear | pts=8"
             )
         elif fr > SIGNAL.funding_extreme_threshold:        # > 0.0003
-            bear += 12   # [QUANT AGGRESSION] contrarian: heavy long positioning
+            bear += 5    # contrarian: heavy long positioning
             reasons.append(
-                f"⚠️ HIGH positive funding {fr*100:.4f}%/8h -> longs crowded, contrarian SHORT bias +12"
+                f"⚠️ HIGH positive funding {fr*100:.4f}%/8h -> longs crowded, contrarian SHORT +5"
             )
             log.info(
-                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | threshold={SIGNAL.funding_extreme_threshold:.6f} | "
-                f"bias=bear | pts=12 | direction=contrarian"
-            )
-        elif fr > 0.00005:                                 # > 0.005%/8h - mild positive
-            bull += 8    # [AUDIT FIX 2026-05-21] Was +5. Funding r=+0.62 vs PnL — strongest proven edge. Boost weight.
-            reasons.append(
-                f"Mild positive funding {fr*100:.4f}%/8h -> LONG tilt (+8)"
+                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | high | bias=bear | pts=5"
             )
         elif fr < -SIGNAL.funding_extreme_threshold * 2:   # < -0.0006
-            bull += 18   # [QUANT AGGRESSION] contrarian: crowded shorts → squeeze potential
+            bull += 8    # contrarian: EXTREME crowded shorts → squeeze
             reasons.append(
-                f"⚠️ EXTREME negative funding {fr*100:.4f}%/8h - shorts over-crowded -> SQUEEZE / contrarian LONG +18"
+                f"⚠️ EXTREME negative funding {fr*100:.4f}%/8h - shorts over-crowded -> SQUEEZE +8"
             )
             log.info(
-                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | threshold={SIGNAL.funding_extreme_threshold:.6f} | "
-                f"bias=bull | pts=18 | direction=contrarian"
+                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | extreme<-2x | bias=bull | pts=8"
             )
         elif fr < -SIGNAL.funding_extreme_threshold:       # < -0.0003
-            bull += 12   # [QUANT AGGRESSION] contrarian: heavy short positioning
+            bull += 5    # contrarian: heavy short positioning
             reasons.append(
-                f"⚠️ HIGH negative funding {fr*100:.4f}%/8h -> shorts crowded, contrarian LONG bias +12"
+                f"⚠️ HIGH negative funding {fr*100:.4f}%/8h -> shorts crowded, contrarian LONG +5"
             )
             log.info(
-                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | threshold={SIGNAL.funding_extreme_threshold:.6f} | "
-                f"bias=bull | pts=12 | direction=contrarian"
-            )
-        elif fr < -0.00005:                                # < -0.005%/8h - mild negative
-            bear += 8    # [AUDIT FIX 2026-05-21] Was +5. Funding r=+0.62 — boost contrarian weight.
-            reasons.append(
-                f"Mild negative funding {fr*100:.4f}%/8h -> SHORT tilt (+8)"
+                f"[FUNDING-CONTRA] {asset} | fr={fr:.6f} | high neg | bias=bull | pts=5"
             )
         else:
+            # [AUDIT #19] Mild funding = NO POINTS. Not a signal for scalper.
+            # Data: mild_pos fired 38% = constant bias, not edge.
             reasons.append(f"Flat/noise funding {fr*100:.4f}%/8h -> no signal")
 
         # ── 2. Funding trend (slope of last 8) ────────────────────────
+        # [AUDIT #19] Slope = REAL momentum signal (unlike level).
+        # Keep directional, but cap at ±4 pts (secondary, not primary).
         if len(funding_history) >= 8:
             y = funding_history[-8:]
             x = list(range(8))
@@ -121,7 +121,6 @@ class OIFundingAnalyzer:
             sum_xy = sum(x[i]*y[i] for i in range(n))
             sum_xx = sum(x[i]*x[i] for i in range(n))
             
-            # Prevent division by zero
             denom = (n * sum_xx - sum_x**2)
             if denom != 0:
                 slope = (n * sum_xy - sum_x * sum_y) / denom
@@ -129,86 +128,75 @@ class OIFundingAnalyzer:
                 trend_str = "rising" if slope > 0 else "falling"
                 log.debug(f"[FTRD] {asset}: funding_slope={slope:.6f}, trend={trend_str}")
                 
-                # Positive slope = strong upside momentum = LONG pressure
+                # Positive slope = funding rising = longs getting more aggressive
                 if slope > 0.000005:
-                    pts = min(int(slope * 400000), 8)
+                    pts = min(int(slope * 400000), 4)  # [AUDIT #19] cap 8→4
                     pts = max(pts, 1)
                     bull += pts
-                    reasons.append(f"• Funding trend: 📈 RISING (slope {slope:.6f}) -> LONG pressure")
-                # Negative slope = strong downside momentum = SHORT pressure
+                    reasons.append(f"• Funding trend: 📈 RISING (slope {slope:.6f}) -> LONG pressure +{pts}")
                 elif slope < -0.000005:
-                    pts = min(int(abs(slope) * 400000), 8)
+                    pts = min(int(abs(slope) * 400000), 4)  # [AUDIT #19] cap 8→4
                     pts = max(pts, 1)
                     bear += pts
-                    reasons.append(f"• Funding trend: 📉 FALLING (slope {slope:.6f}) -> SHORT pressure")
+                    reasons.append(f"• Funding trend: 📉 FALLING (slope {slope:.6f}) -> SHORT pressure +{pts}")
                 else:
                     reasons.append(f"• Funding trend: ⚖️ STABLE (slope {slope:.6f}) -> Neutral")
 
-        # ── 3. Predicted vs actual — CONTRARIAN ──────────────────────
-        # [AUDIT FIX 2026] Predicted funding = where positioning is HEADING.
-        # Predicted shifting MORE positive = longs getting MORE crowded = contrarian bear.
-        # Aligned with Section 1 reversal above.
+        # ── 3. Predicted vs actual — CONTRARIAN (minor signal) ───────
+        # [AUDIT #19] Reduce weight: predicted shift is noisy, +1 max.
         if funding.predicted_rate is not None:
             pred_diff = funding.predicted_rate - fr
-            if abs(pred_diff) > 0.00005:
+            if abs(pred_diff) > 0.0001:  # only meaningful shift
                 if pred_diff > 0:
-                    bear += 3
+                    bear += 1
                     reasons.append(
-                        f"Predicted funding shifting positive -> longs crowding further -> contrarian bear"
+                        f"Predicted funding shifting positive -> longs crowding -> contrarian bear +1"
                     )
                 else:
-                    bull += 3
+                    bull += 1
                     reasons.append(
-                        f"Predicted funding shifting negative -> shorts crowding further -> contrarian bull"
+                        f"Predicted funding shifting negative -> shorts crowding -> contrarian bull +1"
                     )
 
         # ── 4. OI Change Analysis (graduated scoring) ──────────────────
-        # [FIX 2026-05-18] Sebelumnya all-or-nothing: 0 atau 22 poin.
-        # Sekarang graduated: OI kecil = sedikit poin, OI besar = banyak poin.
+        # [AUDIT #19 FIX 2026-06-04] Tighten price confirmation threshold.
         #
-        # [AUDIT #17 FIX] Ganti price_change_1h → price_change_5m.
-        # Root cause inverse (r=-0.072): blok ini pakai momentum 1-JAM untuk
-        # konfirmasi arah, padahal hold scalper cuma 10-15 MENIT. "Harga naik 1h +
-        # OI naik → +bull" = entry di UJUNG move 1-jam → langsung reversal di window
-        # scalp. Bukti (56 trade, candle HL asli, directional):
-        #   momentum 5m  r(PnL) = +0.228  (prediktif)
-        #   momentum 60m r(PnL) = -0.064  (inverse — yang dipakai lama)
-        #   dir_60m > +2% → WR 20% (masuk di puncak). dir_5m fresh → lebih baik.
-        # Teori OI/funding contrarian tetap sound; yang salah = TIMEFRAME konfirmasi.
-        # Threshold price diturunkan 0.001 → 0.0005 karena window 5m gerakannya
-        # lebih kecil dari 1h. Fallback ke price_change_1h jika 5m tidak tersedia.
+        # ROOT CAUSE: _px_min 0.0005 (0.05%) terlalu rendah. Di crypto 5-min,
+        # random noise bisa +0.1% kapan saja. Efeknya: OI "confirms" arah yang
+        # sebenarnya noise → bull += 8 hampir setiap kali → constant bias.
+        #
+        # DATA: "oi_bull" fired 282/484 signals (58%) → BUKAN signal, itu noise floor.
+        #
+        # FIX: Naikkan price confirmation ke 0.15% (same as momentum gate).
+        # Rationale: OI expansion + price move 0.15% = REAL directional aggression.
+        # OI expansion + price move 0.05% = noise / spread jitter.
+        #
+        # Also: Reduce max points to +5 (from +22). OI bukan primary edge.
+        # OB (+15) tetap dominan. OI = secondary confirmation saja.
         oi_chg = oi.oi_change_pct
         oi_threshold = SIGNAL.oi_change_threshold_pct  # 0.3%
         _px_chg = price_change_5m if price_change_5m is not None else price_change_1h
-        _px_min = 0.0005  # 0.05% net move dalam 5m = konfirmasi arah fresh
+        _px_min = 0.0015  # [AUDIT #19] 0.0005→0.0015 (0.15%): real move, not noise
 
         if _px_chg > _px_min and oi_chg > oi_threshold * 3:  # > 0.9%
-            bull += 22
-            reasons.append(f"📊 OI/Funding bullish (+22)")
-        elif _px_chg > _px_min and oi_chg > oi_threshold * 1.5:  # > 0.45%
-            bull += 14
-            reasons.append(f"📊 OI/Funding bullish (+14)")
+            bull += 5
+            reasons.append(f"📊 OI surge + price up → bullish confirmation (+5)")
         elif _px_chg > _px_min and oi_chg > oi_threshold:  # > 0.3%
-            bull += 8
-            reasons.append(f"📊 OI/Funding bullish (+8)")
+            bull += 3
+            reasons.append(f"📊 OI rising + price up → mild bull (+3)")
         elif _px_chg < -_px_min and oi_chg > oi_threshold * 3:
-            bear += 22
-            reasons.append(f"📊 OI/Funding bearish (+22)")
-        elif _px_chg < -_px_min and oi_chg > oi_threshold * 1.5:
-            bear += 14
-            reasons.append(f"📊 OI/Funding bearish (+14)")
+            bear += 5
+            reasons.append(f"📊 OI surge + price down → bearish confirmation (+5)")
         elif _px_chg < -_px_min and oi_chg > oi_threshold:
-            bear += 8
-            reasons.append(f"📊 OI/Funding bearish (+8)")
-        elif _px_chg > 0.005 and oi_chg < -0.005:
             bear += 3
-            warnings.append(f"Price up but OI falling -> weak move, short covering")
+            reasons.append(f"📊 OI rising + price down → mild bear (+3)")
+        elif _px_chg > 0.005 and oi_chg < -0.005:
+            # Price up but OI falling = short covering rally, not real demand
+            bear += 2
+            warnings.append(f"Price up but OI falling -> short covering, weak move")
         elif oi_chg < -oi_threshold:
-            if _px_chg > 0:
-                bull += 5
-            else:
-                bear += 5
-            reasons.append(f"OI dropping {oi_chg*100:.1f}% -> position unwinding")
+            # OI dropping = position unwinding, no direction
+            reasons.append(f"OI dropping {oi_chg*100:.1f}% -> deleveraging (no score)")
 
         # ── 5. OI Magnitude (context label only — no longer a score adder) ────
         # FIX #9: Removed magnitude_bonus from bull/bear score.
@@ -241,40 +229,29 @@ class OIFundingAnalyzer:
             reasons.append(f"24h OI decline {oi_24h*100:.0f}% -> deleveraging")
 
         # ── 7. Spot-Perp Basis ─────────────────────────────────────────
-        # Basis dan funding menunjukkan sinyal yang sama (demand perp > spot).
-        # Jika funding sudah memberikan poin besar (>=12), basis tidak menambah apapun
-        # karena itu akan menghitung ulang sinyal yang sudah dihitung.
-        # Basis hanya berkontribusi saat funding lemah/netral (< 6 poin dari fr).
+        # [AUDIT #19] Basis = premium/discount. Keep directional but reduce to max ±4.
+        # Basis > 0.15% = perp premium over spot = bullish positioning.
+        # Jangan double-count dengan funding contrarian di atas.
         if spot_price > 0 and mark_price > 0:
             basis = (mark_price - spot_price) / spot_price
             signal_str = "neutral"
 
-            # Ukur seberapa besar funding sudah berkontribusi ke sisi yang sama
-            # agar kita tahu apakah basis masih menambah informasi baru
-            funding_bull_pts = bull  # poin bull yang sudah terkumpul sebelum basis
-            funding_bear_pts = bear
-
             if basis > 0.0015:
-                # Kurangi poin basis jika funding bull sudah besar (>= 10 dari fr alone)
-                basis_pts = 6 if funding_bull_pts >= 10 else 10
-                bull += basis_pts
-                signal_str = f"bull (+{basis_pts})"
-                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> bullish premium (LONG)")
+                bull += 3
+                signal_str = "bull (+3)"
+                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> bullish premium")
             elif basis > 0.0008:
-                basis_pts = 3 if funding_bull_pts >= 10 else 5
-                bull += basis_pts
-                signal_str = f"bull (+{basis_pts})"
-                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> bullish momentum")
+                bull += 1
+                signal_str = "bull (+1)"
+                reasons.append(f"Spot-Perp basis +{basis*100:.3f}% -> mild bullish")
             elif basis < -0.0015:
-                basis_pts = 6 if funding_bear_pts >= 10 else 10
-                bear += basis_pts
-                signal_str = f"bear (+{basis_pts})"
-                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> fear/discount (SHORT)")
+                bear += 3
+                signal_str = "bear (+3)"
+                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> fear/discount")
             elif basis < -0.0008:
-                basis_pts = 3 if funding_bear_pts >= 10 else 5
-                bear += basis_pts
-                signal_str = f"bear (+{basis_pts})"
-                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> bearish momentum")
+                bear += 1
+                signal_str = "bear (+1)"
+                reasons.append(f"Spot-Perp basis {basis*100:.3f}% -> mild bearish")
 
             log.debug(f"[BASIS] {asset}: spot={spot_price:.2f} perp={mark_price:.2f} basis={basis*100:.3f}% signal={signal_str}")
         else:

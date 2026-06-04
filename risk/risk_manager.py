@@ -1200,30 +1200,21 @@ class RiskManager:
             )
             # Fall through to Rule D to apply trail immediately
 
-        # ── Rule D0: Pre-TP1 armed trailing (L1 time_exit early profit-lock) ──
-        # [AUDIT #18 P0] L1 sets trailing_active + trailing_stop_price at +0.10%;
-        # without this check those positions never exited via trail until TP1/time.
-        if (not position.tp1_hit
-                and getattr(position, 'trailing_active', False)):
-            trail_sl = getattr(position, 'trailing_stop_price', 0.0)
-            _pre_tp1_trail_w = getattr(cfg, 'time_exit_early_trail_width', 0.0012)
-            if trail_sl > 0:
-                hit = (
-                    (position.side == Side.LONG and current_price <= trail_sl)
-                    or (position.side == Side.SHORT and current_price >= trail_sl)
-                )
-                if hit:
-                    return {
-                        "action":      "trailing_stop",
-                        "close_ratio": 1.0,
-                        "price":       current_price,
-                        "trail_price": trail_sl,
-                        "trail_pct":   _pre_tp1_trail_w,
-                        "message":     (
-                            f"🛡️ Pre-TP1 trail hit at {trail_sl:.6f} "
-                            f"(peak +{max_floating*100:.2f}%)."
-                        ),
-                    }
+        # ── Rule D0: DISABLED (Audit #19 root cause) ────────────────────
+        # [AUDIT #19 FIX 2026-06-04]
+        # DATA: 87/92 trailing exits (95%) = pre-TP1 scratch, avg +0.025%, WR 51.7%.
+        # REAL post-TP1 trailing: 5 trades, 100% WR, avg +0.317%.
+        #
+        # ROOT CAUSE: arm at +0.10% with width 0.12% puts stop at -0.02% (below BE).
+        # Every minor retrace triggers exit = coin flip, not edge.
+        #
+        # FIX: Remove pre-TP1 trail exit. Let positions either:
+        # - Reach TP1 → arm proper ATR trail (Rule D, the REAL edge)
+        # - Get killed by momentum_death/time_exit (acceptable loss)
+        #
+        # The edge of this bot is trailing POST-TP1 (historically 100% WR).
+        # Pre-TP1 scratch trades destroy that by exiting before trend develops.
+        # --- Rule D0 code removed, fall through to Rule D ---
 
         # ── Rule D: ATR-based trailing stop on last position piece ───────
         # Standard: trail aktivasi setelah TP1, gunakan ATR × 2.0 dari peak.
@@ -1423,22 +1414,11 @@ class RiskManager:
             # Runner grace: jika TP1 sudah hit, extend deadline 50%
             effective_max = max_hold * 1.5 if position.tp1_hit else max_hold
 
-            # ── L1: Early profit-lock trailing ──────────────────────────────
-            # Aktif sebelum TP1 hit, saat floating sudah cukup untuk di-lock.
-            # Daripada tunggu time exit, aktifkan trailing sekarang.
-            if (not position.tp1_hit
-                    and not getattr(position, 'trailing_active', False)
-                    and floating >= early_trail_pct):
-                # Hitung trailing stop price dari current price
-                if position.side == Side.LONG:
-                    trail_price = current_price * (1.0 - early_trail_width)
-                else:
-                    trail_price = current_price * (1.0 + early_trail_width)
-                position.trailing_active    = True
-                position.trailing_high      = current_price
-                position.trailing_stop_price = trail_price
-                # Tidak return — biarkan trailing stop check di atas yang handle exit
-                # (trailing_active sudah True, scan berikutnya akan cek)
+            # ── L1: Early profit-lock trailing — DISABLED ────────────────
+            # [AUDIT #19 FIX 2026-06-04] This armed trailing at +0.10% pre-TP1.
+            # With Rule D0 removed, arming here has no exit path anyway.
+            # Let trades develop to TP1. Don't cut +0.12% ticks.
+            # --- L1 early profit-lock disabled ---
 
             # ── L1.5: MOMENTUM DEATH — flat AND never developed favorable move ─
             # [AUDIT #18 P0] Skip if peak favorable >= 0.10% — those trades should

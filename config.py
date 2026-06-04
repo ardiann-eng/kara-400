@@ -288,10 +288,10 @@ class ScalperConfig:
     max_hold_soft_floor_pct: float = -0.010   # cut loss jika -1% (1%×15x = -15% ROE)
 
     # ── [TIME EXIT REDESIGN 2026-05-18] ──────────────────────────────────────
-    # [AUDIT #18 P0] Trail pipeline: arm pre-TP1 lock at +0.10% (was 0.15%).
-    # Data: trailing_stop 100% WR, 19% fire — race vs momentum_death @ 3m flat.
-    time_exit_early_trail_pct:   float = 0.0010   # +0.10% → set trailing_active before flat exit
-    time_exit_early_trail_width: float = 0.0012   # trail width once armed
+    # [AUDIT #19 FIX] time_exit_early_trail DISABLED (L1 removed).
+    # Keep config for reference but L1 code no longer arms trailing pre-TP1.
+    time_exit_early_trail_pct:   float = 0.0020   # [AUDIT #19] 0.10%→0.20% (unused, L1 disabled)
+    time_exit_early_trail_width: float = 0.0015   # [AUDIT #19] 0.12%→0.15% (unused, L1 disabled)
     # Early loss cut: jangan tunggu lama jika sinyal salah
     time_exit_early_loss_pct:    float = -0.002   # [AUDIT FIX 2026-05-21] -0.2%: cut if floating below this
     time_exit_early_loss_mins:   float = 5.0      # [AUDIT FIX 2026-05-21] 5m verdict: enough time to develop, not too long to bleed
@@ -363,8 +363,8 @@ class ScalperConfig:
 
     # ── Early trailing: lock profit sebelum TP1 ──
     early_trail_enabled:         bool  = True
-    early_trail_activation_pct:  float = 0.0010  # [AUDIT #18 P0] 0.25%→0.10% — same as time_exit early trail
-    early_trail_distance_pct:    float = 0.0012  # [AUDIT #18 P0] retrace to trigger early_trail exit
+    early_trail_activation_pct:  float = 0.0025  # [AUDIT #19] revert 0.10%→0.25% — meaningful profit lock
+    early_trail_distance_pct:    float = 0.0015  # [AUDIT #19] revert 0.12%→0.15% — wider = less noise trigger
 
     # ── Quick-profit exit: langsung close saat profit signifikan + harga berbalik ──
     # Di Hyperliquid banyak asset max leverage 3-5x → ROE per % move kecil.
@@ -372,20 +372,24 @@ class ScalperConfig:
     # Logic: jika floating >= quick_profit_threshold DAN retrace dari peak >= quick_profit_retrace,
     # close FULL posisi langsung (tidak tunggu TP1/TP2/trail).
     quick_profit_enabled:         bool  = True
-    quick_profit_threshold_pct:   float = 0.0020  # [AUDIT FIX 2026-05-20] 0.35%→0.20% — tangkap profit kecil sebelum time-exit
-    quick_profit_retrace_pct:     float = 0.0010  # [AUDIT FIX 2026-05-20] 0.12%→0.10% — retrace lebih ketat
+    quick_profit_threshold_pct:   float = 0.0040  # [AUDIT #19] 0.20%→0.40% — don't cut runners too early
+    quick_profit_retrace_pct:     float = 0.0020  # [AUDIT #19] 0.10%→0.20% — need real retrace, not noise
     # Leverage-aware: low leverage = ambil profit lebih cepat
-    quick_profit_low_lev_threshold: float = 0.0025  # 0.25% untuk lev <= 5x (was 0.5%)
-    quick_profit_low_lev_retrace:   float = 0.0010  # 0.10% retrace (was 0.2%)
+    quick_profit_low_lev_threshold: float = 0.0035  # [AUDIT #19] 0.25%→0.35% untuk lev <= 5x
+    quick_profit_low_lev_retrace:   float = 0.0015  # 0.15% retrace
 
     # ── [C5 FIX] Partial profit & breakeven — turunkan threshold ──
-    # [AUDIT #18 P0] TP1 @ 0.5×SL → lebih banyak posisi hit TP1 → ATR trail bucket (+$49).
-    partial_tp1_at_sl_multiple: float = 0.50   # [AUDIT #18] 0.7→0.5
+    # [AUDIT #19 FIX] Keep TP1 @ 0.5×SL (realistis untuk 12-20min scalper).
+    # Data: median profitable price move = 0.46%. SL typically 0.8-1.0%.
+    # 0.5×SL = TP1 at 0.40-0.50% → achievable in window.
+    # Masalah BUKAN TP1 level — masalah = pre-TP1 trail yang rusak (sudah di-disable).
+    # Post-TP1 trail tetap fire via Rule D (ATR-based, the REAL edge).
+    partial_tp1_at_sl_multiple: float = 0.50   # keep (achievable in scalper window)
     partial_tp2_at_sl_multiple: float = 1.0    # unchanged
     partial_tp3_trail_at: float = 1.3          # unchanged
     breakeven_trigger_at_sl_multiple: float = 0.5
-    # Post-TP1 ATR trail arms when peak >= TP1 distance + extra (was hardcoded +0.3%)
-    atr_trail_post_tp1_extra_pct: float = 0.001  # +0.1% beyond TP1 price level
+    # Post-TP1 ATR trail arms when peak >= TP1 distance + extra
+    atr_trail_post_tp1_extra_pct: float = 0.002  # [AUDIT #19] 0.1%→0.2% — need real extension beyond TP1
     # Momentum death: only if never reached +0.10% favorable (don't kill +0.12% tick winners)
     momentum_death_min_minutes: float = 4.0
     momentum_death_flat_pct: float = 0.0005      # ±0.05% right now = flat
