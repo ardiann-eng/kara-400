@@ -578,8 +578,9 @@ class ScoringEngine:
         elif abs(trend_pct) >= 0.070:
             # [FIX 2026-05-25] Was 3% — too aggressive for crypto (3%/24h is NORMAL).
             # 7%/24h = actual parabolic move where exhaustion is real.
+            # [AUDIT #20 FIX] 0.85→0.90 — crypto trends persist, -15% overkill.
             _regime_cat = "late_trend"
-            _regime_mult = 0.85  # [FIX] was 0.70 — 30% penalty killed ALL signals
+            _regime_mult = 0.90
             late_trend = True
             reasons.append(f"⚠️ Late trend {trend_pct*100:.2f}%/24h — score penalized (×0.85)")
         elif abs(trend_pct) >= 0.035:
@@ -609,10 +610,11 @@ class ScoringEngine:
         # New: +4 to score (NY+3, London+1), rest lowers threshold.
         # Rationale: session IS a mild edge (more liquidity, tighter spreads),
         # but should not be the primary driver of a high score.
+        # [AUDIT #20 FIX] 30%→40% — session edge deserves slightly more weight.
         session_bonus, session_reasons, session_threshold_delta = self._get_session_bonus()
-        SESSION_SCORE_RATIO = 0.30  # 30% of bonus goes to score, 70% to threshold
-        session_score_add = int(round(session_bonus * SESSION_SCORE_RATIO))  # NY=+3, London=+1
-        session_threshold_add = session_bonus - session_score_add            # NY=+7, London=+3
+        SESSION_SCORE_RATIO = 0.40  # 40% of bonus goes to score, 60% to threshold
+        session_score_add = int(round(session_bonus * SESSION_SCORE_RATIO))  # NY=+4, London=+1
+        session_threshold_add = session_bonus - session_score_add            # NY=+6, London=+2
         score += session_score_add
         score = max(0, min(score, 100))
         reasons.extend(session_reasons)
@@ -1722,19 +1724,20 @@ class ScoringEngine:
             # Opportunity scoring RSI logic:
             # RSI extreme = price already moved far = PENALTY (exhaustion)
             # RSI neutral (40-60) = price hasn't moved much = OPPORTUNITY
-            if rsi > 75:
+            # [AUDIT #20 FIX] Crypto 1m RSI >65 is NORMAL — penalty only at truly extreme levels.
+            if rsi > 85:
                 confirm_pts -= 8; _c_rsi = -8
                 reasons.append(f"⚠️ RSI {rsi:.0f} extreme OB — exhaustion risk (-8)")
-            elif rsi > 65:
+            elif rsi > 75:
                 confirm_pts -= 4; _c_rsi = -4
                 reasons.append(f"📊 RSI {rsi:.0f} high — mild exhaustion (-4)")
-            elif rsi < 25:
+            elif rsi < 15:
                 confirm_pts -= 8; _c_rsi = -8
                 reasons.append(f"⚠️ RSI {rsi:.0f} extreme OS — exhaustion risk (-8)")
-            elif rsi < 35:
+            elif rsi < 25:
                 confirm_pts -= 4; _c_rsi = -4
                 reasons.append(f"📊 RSI {rsi:.0f} low — mild exhaustion (-4)")
-            elif 42 <= rsi <= 58:
+            elif 38 <= rsi <= 62:
                 # Neutral RSI = price hasn't moved much = good for fresh entry
                 confirm_pts += 5; _c_rsi = 5
                 reasons.append(f"✅ RSI {rsi:.0f} neutral — fresh opportunity (+5)")
@@ -1768,20 +1771,19 @@ class ScoringEngine:
                     # SHORT worst: WITH WR 26.9% vs WITHOUT 45.8% (delta -18.9%).
                     # ROOT CAUSE: RSI 1m > 5m saat RSI sudah >65 = OVERBOUGHT confirmation.
                     # You're entering AFTER the move. RSI 70 "confirming uptrend" = entry di top.
-                    # FIX: If RSI already >65 → PENALTY (late entry warning).
-                    #      If RSI 40-60 (fresh, not stretched) → small bonus +3.
-                    if rsi >= 65:
+                    # [AUDIT #20 FIX] Penalty threshold 65→75. Crypto 1m RSI 65-75 is normal.
+                    if rsi >= 75:
                         confirm_pts -= 4; _c_div = -4
                         reasons.append(f"⚠️ RSI {rsi:.0f} overbought + momentum → late entry PENALTY -4")
-                    elif rsi <= 60:
+                    elif rsi <= 65:
                         confirm_pts += 3; _c_div = 3
                         reasons.append(f"📈 RSI {rsi:.0f} fresh momentum (1m>5m) +3")
-                    # else RSI 60-65: neutral, no points
+                    # else RSI 65-75: neutral, no points
                 elif price_falling and rsi < rsi_5m - 5:
-                    if rsi <= 35:
+                    if rsi <= 25:
                         confirm_pts -= 4; _c_div = -4
                         reasons.append(f"⚠️ RSI {rsi:.0f} oversold + falling → late SHORT PENALTY -4")
-                    elif rsi >= 40:
+                    elif rsi >= 35:
                         confirm_pts += 3; _c_div = 3
                         reasons.append(f"📉 RSI {rsi:.0f} fresh sell momentum (1m<5m) +3")
 
@@ -1810,61 +1812,20 @@ class ScoringEngine:
             _cvd_norm = (_cvd_delta / _cvd_totvol) if _cvd_totvol > 0 else 0.0
             # Direction-align: bull pressure helps LONG, sell pressure helps SHORT
             _cvd_dir = _cvd_norm if bull_setup >= bear_setup else -_cvd_norm
-            # ZONE: only the moderate band (0.3-0.7) is predictive (sweet spot WR 50%)
-            if 0.30 <= _cvd_dir < 0.70:
-                _c_cvd = 6
-                confirm_pts += 6
-                reasons.append(f"📊 CVD 5m moderate pressure ({_cvd_dir:+.2f}) — sweet spot +6")
-            elif _cvd_dir >= 0.70:
-                # [AUDIT #19 FIX] CVD extreme = EXHAUSTION PENALTY, not just "no bonus".
-                # DATA: 76 trades with CVD extreme → WR 26.3%, -$19.17.
-                # ROOT CAUSE: Entry saat aggressive flow SUDAH HABIS. Buyer/seller exhausted.
-                # Both LONG (WR 27.5%) and SHORT (WR 24.0%) rugi di extreme.
-                # Fix: apply penalty to reduce score → fewer entries during exhaustion.
+            # [AUDIT #20 FIX] Candle-proxy CVD is noisy. Thresholds widened:
+            # Moderate band 0.50-0.85 (was 0.30-0.70) — reduce false positives.
+            # Extreme ≥0.85 (was ≥0.70) — only truly exhausted flows penalized.
+            if 0.50 <= _cvd_dir < 0.85:
+                _c_cvd = 4
+                confirm_pts += 4
+                reasons.append(f"📊 CVD 5m moderate pressure ({_cvd_dir:+.2f}) — sweet spot +4")
+            elif _cvd_dir >= 0.85:
+                # [AUDIT #19 FIX] CVD extreme = EXHAUSTION PENALTY.
+                # [AUDIT #20 FIX] Threshold 0.70→0.85 to reduce false positives in candle proxy.
                 _c_cvd = -5
                 confirm_pts -= 5
                 reasons.append(f"⚠️ CVD 5m extreme ({_cvd_dir:+.2f}) — exhaustion PENALTY -5")
             # flat/negative-aligned → no contribution
-
-        # ── SETUP LAYER 4: Bybit Long/Short Ratio (CONTRARIAN — fade the crowd) ──
-        # Ratio > 1.5 = crowd heavily long → contrarian SHORT setup
-        # Ratio < 0.67 = crowd heavily short → contrarian LONG setup
-        # This is institutional-grade data not available on Hyperliquid.
-        # [AUDIT #19 FIX 2026-06-04] ROOT CAUSE: L/S selalu > 1.5 di HL (selalu bilang
-        # "crowd long, fade SHORT"). Ketika trade final = LONG, L/S kasih +12 bear yang
-        # MELAWAN trade → inflate score tanpa conviction. Data:
-        # - L/S agrees (26 SHORT trades): WR 38.5%, +$2.35 ← signal BENAR
-        # - L/S disagrees (16 LONG trades): WR 12.5%, -$10.10 ← KONTRADIKSI
-        #
-        # FIX: L/S poin HANYA diberikan kalau arah L/S SAMA dengan arah final trade.
-        # Contrarian signal tanpa follow-through = noise, bukan edge.
-        # Direction `side` sudah ditentukan oleh vote system sebelum kode ini.
-        if ls_ratio is not None and ls_ratio > 0:
-            _ls_suggests_short = ls_ratio > 1.5  # crowd long → fade SHORT
-            _ls_suggests_long = ls_ratio < 0.67   # crowd short → fade LONG
-            
-            if _ls_suggests_short and side == Side.SHORT:
-                # L/S says SHORT and we're going SHORT → ALIGNED, give points
-                if ls_ratio > 2.0:
-                    bear_setup += 8
-                    reasons.append(f"🐻 L/S ratio {ls_ratio:.2f} — crowd VERY long + trade SHORT aligned +8")
-                else:
-                    bear_setup += 4
-                    reasons.append(f"🐻 L/S ratio {ls_ratio:.2f} — crowd long + trade SHORT aligned +4")
-            elif _ls_suggests_long and side == Side.LONG:
-                # L/S says LONG and we're going LONG → ALIGNED, give points
-                if ls_ratio < 0.5:
-                    bull_setup += 8
-                    reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd VERY short + trade LONG aligned +8")
-                else:
-                    bull_setup += 4
-                    reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd short + trade LONG aligned +4")
-            elif _ls_suggests_short and side == Side.LONG:
-                # L/S says SHORT but we're going LONG → CONTRADICTION, no points
-                # Don't penalize (maybe vote system sees something L/S doesn't), just ignore
-                reasons.append(f"⚠️ L/S ratio {ls_ratio:.2f} — crowd long (fade SHORT) but trade LONG → no pts (contradiction)")
-            elif _ls_suggests_long and side == Side.SHORT:
-                reasons.append(f"⚠️ L/S ratio {ls_ratio:.2f} — crowd short (fade LONG) but trade SHORT → no pts (contradiction)")
 
         # ── CONFIRMATION LAYER: MTF 15m Trend — DISABLED ──
         # [AUDIT FIX 2026-05-21] r=-0.68 vs PnL (p=0.0008). Strongest inverse predictor.
@@ -2168,6 +2129,36 @@ class ScoringEngine:
             f"OI={_oi_signed:+d} EMA={'bull' if ema_bullish else 'bear' if ema_bearish else 'flat'})"
         )
 
+        # ── SETUP LAYER 4: Bybit Long/Short Ratio (CONTRARIAN — fade the crowd) ──
+        # Ratio > 1.5 = crowd heavily long → contrarian SHORT setup
+        # Ratio < 0.67 = crowd heavily short → contrarian LONG setup
+        # [AUDIT #19 FIX 2026-06-04] L/S poin HANYA diberikan kalau arah L/S SAMA dengan
+        # arah final trade. Contrarian tanpa follow-through = noise, bukan edge.
+        # [AUDIT #20 FIX 2026-06-05] MOVED HERE: sebelumnya di atas direction vote
+        # sehingga `side` belum diset → UnboundLocalError crash pada major coins.
+        if ls_ratio is not None and ls_ratio > 0:
+            _ls_suggests_short = ls_ratio > 1.5  # crowd long → fade SHORT
+            _ls_suggests_long = ls_ratio < 0.67   # crowd short → fade LONG
+
+            if _ls_suggests_short and side == Side.SHORT:
+                if ls_ratio > 2.0:
+                    bear_setup += 8
+                    reasons.append(f"🐻 L/S ratio {ls_ratio:.2f} — crowd VERY long + trade SHORT aligned +8")
+                else:
+                    bear_setup += 4
+                    reasons.append(f"🐻 L/S ratio {ls_ratio:.2f} — crowd long + trade SHORT aligned +4")
+            elif _ls_suggests_long and side == Side.LONG:
+                if ls_ratio < 0.5:
+                    bull_setup += 8
+                    reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd VERY short + trade LONG aligned +8")
+                else:
+                    bull_setup += 4
+                    reasons.append(f"🐂 L/S ratio {ls_ratio:.2f} — crowd short + trade LONG aligned +4")
+            elif _ls_suggests_short and side == Side.LONG:
+                reasons.append(f"⚠️ L/S ratio {ls_ratio:.2f} — crowd long (fade SHORT) but trade LONG → no pts (contradiction)")
+            elif _ls_suggests_long and side == Side.SHORT:
+                reasons.append(f"⚠️ L/S ratio {ls_ratio:.2f} — crowd short (fade LONG) but trade SHORT → no pts (contradiction)")
+
         # MFI alignment: only add confirm points if MFI direction matches chosen side
         if _mfi_pts != 0:
             if (side == Side.LONG and _mfi_pts > 0) or (side == Side.SHORT and _mfi_pts < 0):
@@ -2205,7 +2196,9 @@ class ScoringEngine:
         _ob_dir = _ob_signed if side == Side.LONG else -_ob_signed  # OB aligned to trade side
         _scfg_ob = config.SCALPER
         _OB_STRONG_THRESHOLD = 12
-        _OB_STRONG_BONUS = int(getattr(_scfg_ob, "ob_strong_bonus_pts", 15))
+        # [AUDIT #20 FIX] OB strong = ONLY robust predictor (r=+0.337).
+        # Was +15 → +18 to reflect its dominance as the sole edge component.
+        _OB_STRONG_BONUS = int(getattr(_scfg_ob, "ob_strong_bonus_pts", 18))
         _OB_CROWDED_BONUS = int(getattr(_scfg_ob, "ob_crowded_wall_bonus_pts", 3))
         _OB_CONTRA_PENALTY = int(getattr(_scfg_ob, "ob_contra_penalty_pts", -20))
         _ob_crowded = (
@@ -2240,9 +2233,14 @@ class ScoringEngine:
                     f"🧱 Strong aligned orderbook wall (ob_dir={_ob_dir:+d}) — edge (+{_OB_STRONG_BONUS})"
                 )
         elif _ob_dir < 0:
-            _ob_edge_adj = _OB_CONTRA_PENALTY
+            # [AUDIT #20 FIX] Proportional OB contra penalty instead of flat -20.
+            # Flat -20 kills any signal with setup < 40. Proportional = stronger setups
+            # can absorb penalty, weak setups still get meaningful deduction.
+            # Formula: -max(5, setup//3) → range -5 (setup=0) to -20 (setup=60)
+            _ob_contra_pts = -max(5, abs(dominant_setup) // 3)
+            _ob_edge_adj = _ob_contra_pts
             reasons.append(
-                f"⛔ Orderbook contradicts {side.value.upper()} (ob_dir={_ob_dir:+d}) — edge inverted ({_OB_CONTRA_PENALTY})"
+                f"⛔ Orderbook contradicts {side.value.upper()} (ob_dir={_ob_dir:+d}) — edge inverted ({_ob_contra_pts})"
             )
 
         # Raw score = setup (0-63) + confirmation (-15 to +31) + OB edge (±) → pre-scaling
