@@ -545,14 +545,12 @@ class ScoringEngine:
         htf_leverage_adj  = 0
 
         # ══════════════════════════════════════════════════════════════
-        # [REKONSTRUKSI v10 — FASE 1] GATE SYSTEM (di belakang flag)
-        # Ganti scoring aditif → 3-lapis gate institusional.
-        # Flag KARA_V10_GATES=true mengaktifkan. Default false (shadow/off) agar
-        # bisa bandingkan & rollback tanpa risiko. size_mult dipakai executor.
+        # [REKONSTRUKSI v10] GATE SYSTEM — PERMANENT (v10 always ON)
+        # Scoring aditif lama → 3-lapis gate institusional.
+        # size_mult dipakai executor. Shadow mode disabled.
         # ══════════════════════════════════════════════════════════════
-        import os as _os_v10
-        _V10_ACTIVE = _os_v10.getenv("KARA_V10_GATES", "true").lower() == "true"
-        _V10_SHADOW = _os_v10.getenv("KARA_V10_SHADOW", "false").lower() == "true"
+        _V10_ACTIVE = True   # [PERMANENT] v10 gate system — no env override
+        _V10_SHADOW = False  # shadow mode disabled (was .getenv("KARA_V10_SHADOW"))
         if _V10_ACTIVE or _V10_SHADOW:
             try:
                 from engine.gate_system import gate_system
@@ -2079,8 +2077,7 @@ class ScoringEngine:
         # Buang EMA (Vote 2) & RSI momentum (Vote 4) dari voting — keduanya lagging.
         # Bukti: EMA milih arah lawan HTF di 35 trade → -$20.95 (counter-trend bleed).
         # Arah v10 = HTF(×2) + displacement(×2) + OI(×1) — semua prediktif.
-        import os as _os_dir
-        _V10_DIR = _os_dir.getenv("KARA_V10_GATES", "true").lower() == "true"
+        _V10_DIR = True  # [PERMANENT] v10 institutional direction — no env override
 
         # Direction votes (exclude OB — it's noise for direction, data proves it)
         _dir_bull = 0
