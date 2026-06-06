@@ -52,7 +52,7 @@ class GateSystem:
     SWEEP_RECLAIM_BARS = 2       # tembus level lalu balik dalam <=2 candle
     OB_WALL_STRONG     = 12      # ob_dir >= 12 = institutional wall
     MIN_DISPLACEMENT   = 0.0008  # 0.08% net move = displacement proof (LONG) — [AUDIT #21] loosened from 0.0015
-        MIN_DISP_SHORT     = 0.0012  # 0.12% SHORT — [AUDIT #21] loosened from 0.0020
+    MIN_DISP_SHORT     = 0.0012  # 0.12% SHORT — [AUDIT #21] loosened from 0.0020
 
     def __init__(self):
         pass
