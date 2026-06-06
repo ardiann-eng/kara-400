@@ -145,9 +145,6 @@ class KaraBot:
             if cfg.scl_min_score_to_signal != 45:
                 cfg.scl_min_score_to_signal = 45
                 dirty = True
-            if cfg.scl_min_score_to_auto_trade != 52:
-                cfg.scl_min_score_to_auto_trade = 52
-                dirty = True
             # Force scalper mode for all users
             if getattr(cfg, 'trading_mode', 'standard') != 'scalper':
                 cfg.trading_mode = 'scalper'
@@ -1187,10 +1184,6 @@ class KaraBot:
             if not base_signal:
                 continue
 
-            # ── Per-User Threshold Check (AUTO-ONLY POLICY) ──────────────────
-            user_cfg = session.user.config
-            auto_threshold = int(user_cfg.scl_min_score_to_auto_trade)
-
             # ── MULTI-USER FIX: Deep-copy signal with a UNIQUE signal_id per user ──
             # model_copy() copies ALL fields including signal_id.
             # If two users share the same signal_id, User A confirming/skipping
@@ -1286,20 +1279,6 @@ class KaraBot:
                     continue
 
             acc = await session.get_account_state()
-
-            # Full-auto only behavior requested:
-            # - only process signals that meet auto threshold
-            # - anything below threshold is fully skipped (no Telegram signal)
-            effective_auto_threshold = auto_threshold
-            # [NOTE] Session-aware threshold is already applied in scoring engine
-            # (_get_session_bonus → session_threshold_delta). No double penalty here.
-            if user_signal.score < effective_auto_threshold:
-                if chat_id == target_ids[0]:  # log sekali saja, jangan spam per-user
-                    log.info(
-                        f"🔕 [BELOW_THRESH] {user_signal.asset} {user_signal.side.value.upper()} "
-                        f"score={user_signal.score} < auto_threshold={effective_auto_threshold} — skipped"
-                    )
-                continue
 
             # Inject user leverage ke signal SEBELUM calculate_position_size
             # supaya notif Telegram menampilkan leverage yang benar (dari /settings user),

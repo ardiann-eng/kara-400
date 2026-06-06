@@ -1232,7 +1232,9 @@ class ScoringEngine:
                     # Note: accel requirement REMOVED for shorts — shorts profit from
                     # momentum exhaustion, not acceleration
 
-                if not _pump_starting:
+                if not _pump_starting and not _V10_ACTIVE:
+                    # [v10] Pump timing gate bypassed — gate G4 (displacement proof)
+                    # + regime alignment sudah verifikasi momentum & entry timing.
                     _accel_ratio = _last_candle / _avg_candle if _avg_candle > 0 else 0
                     if side == Side.LONG:
                         _reason = (
