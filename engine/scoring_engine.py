@@ -543,6 +543,67 @@ class ScoringEngine:
         # 4b2. Apply 1H regime adjustment to score and leverage
         htf_threshold_adj = 0
         htf_leverage_adj  = 0
+
+        # ══════════════════════════════════════════════════════════════
+        # [REKONSTRUKSI v10 — FASE 1] GATE SYSTEM (di belakang flag)
+        # Ganti scoring aditif → 3-lapis gate institusional.
+        # Flag KARA_V10_GATES=true mengaktifkan. Default false (shadow/off) agar
+        # bisa bandingkan & rollback tanpa risiko. size_mult dipakai executor.
+        # ══════════════════════════════════════════════════════════════
+        import os as _os_v10
+        _V10_ACTIVE = _os_v10.getenv("KARA_V10_GATES", "true").lower() == "true"
+        _V10_SHADOW = _os_v10.getenv("KARA_V10_SHADOW", "false").lower() == "true"
+        if _V10_ACTIVE or _V10_SHADOW:
+            try:
+                from engine.gate_system import gate_system
+                # Build inputs dari komponen + candles
+                _v10_closes = []
+                for _c in candles:
+                    try:
+                        _v10_closes.append(float(_c.get("c", 0)) if isinstance(_c, dict)
+                                           else float(_c[4]))
+                    except (TypeError, ValueError, IndexError):
+                        pass
+                _v10_net5m = 0.0
+                if len(_v10_closes) >= 6 and _v10_closes[-6] > 0:
+                    _raw5 = (_v10_closes[-1] - _v10_closes[-6]) / _v10_closes[-6]
+                    _v10_net5m = _raw5 if side == Side.LONG else _raw5  # signed; gate checks dir
+                _v10_ob = _scalper_components.get("ob_signed", 0)
+                _v10_ob_dir = _v10_ob if side == Side.LONG else -_v10_ob
+                # [v10 F2.1] CVD tick asli (side B/A), fallback ke proxy candle
+                _v10_cvd_proxy = _scalper_components.get("cvd_dir", 0.0)
+                _v10_cvd_tick = self._calc_tick_cvd(asset)
+                _v10_cvd_raw = _v10_cvd_tick if abs(_v10_cvd_tick) > 0.001 else _v10_cvd_proxy
+                # align ke arah trade (positif = mendukung side)
+                _v10_cvd = _v10_cvd_raw if side == Side.LONG else -_v10_cvd_raw
+                _v10_oi_usd = oi.open_interest * mark_price if oi else 0.0
+                _v10_dec = gate_system.evaluate(
+                    asset=asset, side=side.value.lower(), htf_regime=htf_regime,
+                    candles=candles, price=mark_price, realized_vol=realized_vol or 0.0,
+                    cvd_dir=_v10_cvd, ob_dir=int(_v10_ob_dir), net_move_5m=_v10_net5m,
+                    oi_usd=_v10_oi_usd,
+                )
+                if _V10_ACTIVE:
+                    # PRODUKSI: gate memutuskan
+                    if not _v10_dec.passed:
+                        log.info(f"[V10-GATE SKIP] {asset} {side.value} | reason={_v10_dec.reject_reason}")
+                        self.skip_counters[f"v10_{_v10_dec.reject_reason}"] = \
+                            self.skip_counters.get(f"v10_{_v10_dec.reject_reason}", 0) + 1
+                        return None, score
+                    reasons.extend(_v10_dec.reasons)
+                    _scalper_components["v10_size_mult"] = _v10_dec.size_mult
+                    _scalper_components["v10_setup"] = _v10_dec.setup
+                    _scalper_components["v10_tier"] = _v10_dec.tier
+                else:
+                    # SHADOW: cuma log, tidak pengaruhi keputusan (untuk bandingkan)
+                    log.info(
+                        f"[V10-SHADOW] {asset} {side.value} | would_pass={_v10_dec.passed} "
+                        f"reason={_v10_dec.reject_reason or 'ok'} setup={_v10_dec.setup} "
+                        f"tier={_v10_dec.tier} size×{_v10_dec.size_mult}"
+                    )
+            except Exception as _v10_err:
+                log.warning(f"[V10-GATE] {asset}: error {_v10_err} — skip gate (fail-open)")
+
         if htf_regime == "TRENDING_UP":
             if side == Side.LONG:
                 htf_threshold_adj = -3   # easier entry — aligned with 1h trend
@@ -774,7 +835,9 @@ class ScoringEngine:
         # system genuinely can't decide direction. CAVEAT: tie sample n=8, bug-detection
         # grade. Re-validate Audit #18. Threshold 1 (not 2) — margin 2 bucket is profitable.
         _MIN_VOTE_MARGIN = 2  # require |bull-bear| >= 2 (skip margin 0 and 1)
-        if _vote_margin < _MIN_VOTE_MARGIN:
+        if _vote_margin < _MIN_VOTE_MARGIN and not _V10_ACTIVE:
+            # [v10] Vote-margin gate bypassed — gate system sudah memutuskan arah via
+            # regime + displacement + liquidity. Score voting tidak lagi penentu.
             log.info(
                 f"[SKIP] {asset} | score={score} | side={side.value} | "
                 f"reason=low_vote_consensus | context=vote_margin={_vote_margin}<{_MIN_VOTE_MARGIN} "
@@ -806,7 +869,10 @@ class ScoringEngine:
             + _oi_gate_adj                  # [AUDIT #7] low OI: +5
             + _funding_bonus                # [AUDIT #7] negative funding LONG: -3 (easier entry)
         )
-        if score < effective_threshold:
+        if score < effective_threshold and not _V10_ACTIVE:
+            # [v10] Score-threshold bypassed — gate system (regime+displacement+liquidity)
+            # adalah penentu entry, bukan score aditif. Score tetap dihitung untuk sizing
+            # conviction & telemetri, tapi TIDAK lagi mem-block trade.
             log.info(
                 f"[SKIP] {asset} | score={score} | side={side.value} | "
                 f"reason=score_below_threshold | context=threshold={effective_threshold},regime={_regime_cat}"
@@ -818,7 +884,9 @@ class ScoringEngine:
             return None, score
 
         # SHORT-specific filters: higher threshold + funding rate confirmation + squeeze guard
-        if side == Side.SHORT:
+        # [v10] Seluruh blok SHORT score/regime gate REDUNDAN dengan gate G1 (regime align)
+        # + G2 (exhaustion) + G4 (displacement). Hanya jalan kalau v10 OFF (engine lama).
+        if side == Side.SHORT and not _V10_ACTIVE:
             # [AUDIT #16] BLOCK SHORT in TRENDING_UP regime — counter-trend disaster.
             # POST-deploy 28 Mei sore - 29 Mei: 12 SHORTs, 1W/11L, $-12.17 (PF 0.010).
             # ~9-11 dari trades ini di HTF=TRENDING_UP atau CHOPPY (rally market).
@@ -914,6 +982,20 @@ class ScoringEngine:
                 self._skip_count_since_summary += 1
                 return None, score
 
+        # ── [REKONSTRUKSI v10 — F0.1] HARD-BLOCK LONG COUNTER-TREND ──────────
+        # Saat v10 aktif: gate G1 sudah handle counter-trend (LONG & SHORT simetris).
+        # Block ini hanya jalan kalau v10 OFF (fallback engine lama).
+        if side == Side.LONG and not _V10_ACTIVE:
+            if htf_regime == "TRENDING_DOWN":
+                log.info(
+                    f"[SKIP] {asset} | score={score} | side=LONG | "
+                    f"reason=long_against_downtrend | context=htf={htf_regime} "
+                    f"(v10 F0.1: LONG vs TRENDING_DOWN = -$20.01 WR 25.8%)"
+                )
+                self.skip_counters["long_against_downtrend"] = self.skip_counters.get("long_against_downtrend", 0) + 1
+                self._skip_count_since_summary += 1
+                return None, score
+
         # ── [QUANT AGGRESSION 2026] Funding extreme = CONTRARIAN OPPORTUNITY, bukan veto.
         # Sebelumnya veto membuang 15-20% sinyal. Sekarang: flagkan sebagai "fade_mode".
         fade_mode = False
@@ -952,7 +1034,8 @@ class ScoringEngine:
         # SHORT-specific: winners avg ATR=0.00305, losers avg ATR=0.00157.
         # SHORT needs higher threshold due to structural upward bias + bounce risk.
         _min_atr = 0.0015 if side == Side.SHORT else 0.0013  # [AUDIT #7] LONG 0.0010→0.0013: ATR<0.0013 = dead zone, trailing never fires
-        if atr_pct_now > 0 and atr_pct_now < _min_atr:
+        if atr_pct_now > 0 and atr_pct_now < _min_atr and not _V10_ACTIVE:
+            # [v10] Redundant — gate G3 (junk filter) + displacement sudah cover.
             log.info(
                 f"[SKIP] {asset} | score={score} | side={side.value} | "
                 f"reason=low_atr | context=atr={atr_pct_now:.5f} < {_min_atr} (need volatility for trailing)"
@@ -1001,7 +1084,8 @@ class ScoringEngine:
                     if _has_leading_early and getattr(_scfg_mom, "long_choppy_leading_use_base", True):
                         _min_momentum = getattr(_scfg_mom, "long_min_dir_move_pct", 0.0015)
                         _mom_gate_reason = "low_momentum"
-            if _dir_move < _min_momentum:
+            if _dir_move < _min_momentum and not _V10_ACTIVE:
+                # [v10] Redundant — gate G4 (displacement proof) sudah cover ini.
                 log.info(
                     f"[SKIP] {asset} | score={score} | side={side.value} | "
                     f"reason={_mom_gate_reason} | context=htf={htf_regime} "
@@ -1038,7 +1122,8 @@ class ScoringEngine:
                     (side == Side.SHORT and _net_move < -_min_confirm and _bearish_candles >= 3)
                 )
 
-            if not _direction_ok:
+            if not _direction_ok and not _V10_ACTIVE:
+                # [v10] Redundant — gate G4 (displacement direction) sudah cover.
                 log.info(
                     f"[SKIP] {asset} | score={score} | side={side.value} | "
                     f"reason=no_momentum_confirm | context=5m_move={_net_move*100:.4f}%,bull_candles={_bullish_candles}/5,leading={_has_leading_signal}"
@@ -1292,6 +1377,10 @@ class ScoringEngine:
             scfg = config.SCALPER
             new_lev = max(3, min(scfg.max_leverage, signal.suggested_leverage + htf_leverage_adj))
             signal.suggested_leverage = new_lev
+
+        # [v10] Inject gate sizing modifier ke signal — dipakai calculate_position_size
+        if signal:
+            signal.size_mult = float(_scalper_components.get("v10_size_mult", 1.0))
 
         # Attach last-known funding rate for Telegram warning
         _fr_cache = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
@@ -1683,29 +1772,12 @@ class ScoringEngine:
             # Data: EMA +10 fired 57% signals, r=-0.185 (INVERSE). Too many
             # "fresh" crosses that were actually 3min old = price already moved.
             # Crypto moves fast — 3 candles (3min) is NOT fresh for 1m scalping.
+            # [REKONSTRUKSI v10 F1.4] EMA cross score contribution DIHAPUS.
+            # EMA r=-0.336 (inverse, fire 94% = constant bias). Tidak lagi nambah
+            # confirm_pts/setup. Flag ema_bullish/ema_bearish TETAP dipakai direction
+            # voter (Vote 2) untuk pilih side — itu peran beda, bukan inflasi skor.
             if candles_since_cross <= 2:
-                # Truly fresh cross = just happened = GOOD confirmation
-                pts = 8  # [AUDIT #13] was 10 — reduced to prevent score inflation
-                confirm_pts += pts; _c_ema = pts
-                if ema_bullish:
-                    bull_setup += 4  # [AUDIT #13] was 5
-                    reasons.append(f"📈 Fresh EMA cross ({candles_since_cross}m ago) +{pts}")
-                else:
-                    bear_setup += 4
-                    reasons.append(f"📉 Fresh EMA cross ({candles_since_cross}m ago) +{pts}")
-            elif candles_since_cross >= 8:
-                # Stale cross = move already well underway = PENALTY
-                penalty = min(candles_since_cross - 5, 10)
-                confirm_pts -= penalty; _c_ema = -penalty
-                reasons.append(f"⚠️ Stale EMA ({candles_since_cross}m) — move old (-{penalty})")
-            else:
-                # Medium freshness (3-7 candles) — small confirmation
-                confirm_pts += 4; _c_ema = 4
-                if ema_bullish:
-                    bull_setup += 2
-                else:
-                    bear_setup += 2
-                reasons.append(f"📊 EMA aligned ({candles_since_cross}m)")
+                reasons.append(f"📊 EMA cross {candles_since_cross}m (direction-only, no score)")
         else:
             reasons.append("📊 EMA neutral (no cross)")
         # ── CONFIRMATION LAYER: RSI (penalizes exhaustion, rewards neutral) ──
@@ -1765,6 +1837,9 @@ class ScoringEngine:
                 price_rising = closes[-1] > closes_5m[-2] if len(closes_5m) >= 2 else False
                 price_falling = closes[-1] < closes_5m[-2] if len(closes_5m) >= 2 else False
 
+                # [REKONSTRUKSI v10 F1.4] RSI momentum score DIHAPUS.
+                # 109 trades WITH RSI mom WR 34.9% vs 60 WITHOUT 41.7% (lagging, inverse).
+                # Flag _c_div TETAP di-set untuk direction Vote 4 (peran beda).
                 if price_rising and rsi > rsi_5m + 5:
                     # [AUDIT #19 FIX] RSI momentum overhaul based on root cause analysis.
                     # DATA: 109 trades WITH RSI mom → WR 34.9%. 60 WITHOUT → WR 41.7%.
@@ -1802,6 +1877,7 @@ class ScoringEngine:
         # Audit #18 dengan tick CVD asli dari WS cache. Bobot kecil (confirm, bukan setup).
         _c_cvd = 0
         _CVD_ENABLED = True
+        _cvd_dir = 0.0  # default for telemetry/gate when CVD data insufficient
         if _CVD_ENABLED and len(closes) >= 5 and len(opens) >= 5 and len(volumes) >= 5:
             _cvd_delta = 0.0; _cvd_totvol = 0.0
             for _i in range(-5, 0):
@@ -1938,38 +2014,10 @@ class ScoringEngine:
                             f"(${_large_sells:.0f}, {(1-_buy_dominance)*100:.0f}% dom) +{_loc_pts}"
                         )
 
-        # ── CONFIRMATION: MFI (Money Flow Index) — replaces DVI (Audit #11) ──
-        # MFI = volume-weighted RSI. Measures conviction (money) behind price move.
-        # [AUDIT #19 FIX] MFI reduced from max +8 to max +4.
-        # DATA: MFI high (n=89) WR 37.1% vs low (n=80) WR 37.5% → NO EDGE.
-        # ROOT CAUSE: MFI > 80 = money ALREADY in = same exhaustion as CVD extreme.
-        # MFI is redundant with CVD (both measure aggressive flow).
-        # Keep small confirmation (+3-4) but add penalty when MFI > 85 (overbought flow).
+        # ── MFI — [REKONSTRUKSI v10 F1.4] DIHAPUS dari scoring ──
+        # Data: MFI high (n=89) WR 37.1% vs low (n=80) WR 37.5% = NO EDGE (noise).
+        # MFI redundan dengan CVD (sama-sama ukur aggressive flow). Buang permanen.
         _mfi_pts = 0
-        if len(closes) >= 15 and len(volumes) >= 15 and len(highs_c) >= 15 and len(lows_c) >= 15:
-            # Typical price = (H + L + C) / 3
-            tp = [(highs_c[i] + lows_c[i] + closes[i]) / 3 for i in range(-15, 0)]
-            raw_mf = [tp[i] * volumes[len(volumes)-15+i] for i in range(15)]
-            pos_mf, neg_mf = 0.0, 0.0
-            for i in range(1, 15):
-                if tp[i] > tp[i-1]:
-                    pos_mf += raw_mf[i]
-                else:
-                    neg_mf += raw_mf[i]
-            mfi = 100 - (100 / (1 + pos_mf / neg_mf)) if neg_mf > 0 else 100
-            
-            if mfi > 85:
-                # [AUDIT #19] MFI > 85 = flow exhaustion (like CVD extreme).
-                # Money already rushed in → late entry risk.
-                _mfi_pts = -3
-                reasons.append(f"⚠️ MFI {mfi:.0f} — flow exhaustion, late entry penalty (-3)")
-            elif mfi > 60:
-                # Moderate MFI — small confirmation only
-                _mfi_pts = min(4, int((mfi - 55) / 8))  # max +4 (was +8)
-                _mfi_pts = max(1, _mfi_pts)
-                reasons.append(f"💰 MFI {mfi:.0f} — money flowing in (+{_mfi_pts})")
-            # Bearish MFI disabled — structural bias on 1m altcoin, not a real signal
-        
 
         # OB Absorption removed — reversal signal, not compatible with trend following strategy.
         _abs_pts = 0
@@ -2027,36 +2075,46 @@ class ScoringEngine:
 
         _oi_signed = int(oi_bull - oi_bear)
 
+        # [REKONSTRUKSI v10] Direction logic INSTITUSIONAL.
+        # Buang EMA (Vote 2) & RSI momentum (Vote 4) dari voting — keduanya lagging.
+        # Bukti: EMA milih arah lawan HTF di 35 trade → -$20.95 (counter-trend bleed).
+        # Arah v10 = HTF(×2) + displacement(×2) + OI(×1) — semua prediktif.
+        import os as _os_dir
+        _V10_DIR = _os_dir.getenv("KARA_V10_GATES", "true").lower() == "true"
+
         # Direction votes (exclude OB — it's noise for direction, data proves it)
         _dir_bull = 0
         _dir_bear = 0
 
-        # Vote 1: OI/Funding (strongest predictor, weight 3x)
+        # Vote 1: OI/Funding (predictor, weight 3x lama / 1x v10)
+        _oi_w = 1 if _V10_DIR else 3
         if _oi_signed > 3:
-            _dir_bull += 3
+            _dir_bull += _oi_w
         elif _oi_signed < -3:
-            _dir_bear += 3
+            _dir_bear += _oi_w
 
-        # Vote 2: EMA direction (trend structure)
-        if ema_bullish:
-            _dir_bull += 2
-        elif ema_bearish:
-            _dir_bear += 2
+        # Vote 2: EMA direction — [v10] DIBUANG dari voting (lagging, counter-trend)
+        if not _V10_DIR:
+            if ema_bullish:
+                _dir_bull += 2
+            elif ema_bearish:
+                _dir_bear += 2
 
-        # Vote 3: Price momentum (5min net move — already calculated)
+        # Vote 3: Price momentum (5min net move) — [v10] weight 2 (displacement = inti edge)
         _mom_5m = 0.0
+        _mom_w = 2 if _V10_DIR else 1
         if len(closes) >= 6:
             _mom_5m = (closes[-1] - closes[-6]) / closes[-6] if closes[-6] > 0 else 0
-            if _mom_5m > 0.001:
-                _dir_bull += 1
-            elif _mom_5m < -0.001:
-                _dir_bear += 1
+            if _mom_5m > 0.0005:
+                _dir_bull += _mom_w
+            elif _mom_5m < -0.0005:
+                _dir_bear += _mom_w
 
-        # Vote 4: RSI momentum (confirms trend acceleration)
-        if _c_div > 0:  # RSI momentum bullish (+8 was added to bull_setup)
-            if any("price rising" in r for r in reasons):
+        # Vote 4: RSI momentum direction — [v10] DIBUANG (lagging, WR 34.9% vs 41.7%)
+        if not _V10_DIR:
+            if _c_div > 0:
                 _dir_bull += 1
-            elif any("price falling" in r for r in reasons):
+            elif _c_div < 0:
                 _dir_bear += 1
 
         # Vote 5: 1H HTF regime (higher-timeframe trend — now actually discriminates)
@@ -2115,14 +2173,26 @@ class ScoringEngine:
                         _dir_bear += 2
                         reasons.append(f"🐋 Whale sell flow {_whale_ratio*100:.0f}% imbalance")
 
-        # Direction decision: if votes tied, fall back to bull_setup vs bear_setup
+        # Direction decision: if votes tied, fall back appropriately
         if _dir_bull > _dir_bear:
             side = Side.LONG
         elif _dir_bear > _dir_bull:
             side = Side.SHORT
         else:
-            # Tied — use full setup as tiebreaker (includes OB)
-            side = Side.LONG if bull_setup >= bear_setup else Side.SHORT
+            # Tied
+            if _V10_DIR:
+                # [v10] Tie-break institusional: ikut HTF trend, lalu displacement.
+                if htf_regime == "TRENDING_UP":
+                    side = Side.LONG
+                elif htf_regime == "TRENDING_DOWN":
+                    side = Side.SHORT
+                elif _mom_5m > 0:
+                    side = Side.LONG
+                else:
+                    side = Side.SHORT
+            else:
+                # Lama: full setup tiebreaker (includes OB)
+                side = Side.LONG if bull_setup >= bear_setup else Side.SHORT
 
         reasons.append(
             f"🧭 Direction: {side.value.upper()} (votes: bull={_dir_bull} bear={_dir_bear} | "
@@ -2276,6 +2346,7 @@ class ScoringEngine:
             out_components["ob_crowded"] = int(_ob_crowded)
             out_components["ob_edge_adj"] = int(_ob_edge_adj)
             out_components["cvd_pts"] = int(_c_cvd)
+            out_components["cvd_dir"] = float(_cvd_dir)
             out_components["xam_pts"] = int(_xam_pts)
             out_components["loc_pts"] = int(_loc_pts)
             out_components["abs_pts"] = int(_abs_pts)
@@ -2335,6 +2406,39 @@ class ScoringEngine:
             pts = min(12, int(abs(avg_leader) * 5000))
             return -pts, f"🔗 BTC/ETH dumping {avg_leader*100:.2f}%, {asset} lagging → SHORT +{pts}"
         return 0, ""
+
+    def _calc_tick_cvd(self, asset: str, window_sec: int = 300) -> float:
+        """
+        [v10 F2.1] CVD tick ASLI dari trade tape (side B/A per trade), bukan proxy candle.
+        Normalized cumulative delta: (buy_vol - sell_vol) / total_vol dalam window.
+        Return -1..1. 0 kalau data kurang. HL: side 'B'=buy(taker beli), 'A'=sell.
+        """
+        trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
+        if len(trades) < 20:
+            return 0.0
+        import time as _t
+        now_ms = _t.time() * 1000
+        cutoff = now_ms - window_sec * 1000
+        buy_vol = 0.0; sell_vol = 0.0
+        for tr in trades[-500:]:
+            try:
+                t_ms = float(tr.get("time", tr.get("ts", 0)) or 0)
+                if t_ms > 0 and t_ms < cutoff:
+                    continue
+                sz = float(tr.get("sz", tr.get("size", 0)) or 0)
+                px = float(tr.get("px", tr.get("price", 0)) or 0)
+                notional = sz * px if px > 0 else sz
+                side_raw = str(tr.get("side", "")).upper()
+                if side_raw in ("B", "BUY", "BID"):
+                    buy_vol += notional
+                elif side_raw in ("A", "S", "SELL", "ASK"):
+                    sell_vol += notional
+            except (TypeError, ValueError):
+                continue
+        total = buy_vol + sell_vol
+        if total <= 0:
+            return 0.0
+        return (buy_vol - sell_vol) / total
 
     def _calc_delta_volume_imbalance(self, asset: str) -> Tuple[int, str]:
         """

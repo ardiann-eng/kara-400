@@ -398,6 +398,14 @@ class RiskManager:
             size_usd *= 0.5
             log.warning(f"[RISK] Drawdown guard active (DD: {drawdown*100:.1f}% >= 15%). Risk halved to {risk_pct/2*100:.1f}%.")
 
+        # ── [v10] Gate sizing modifier (tier A/B × vol tier) ──────────
+        # Tier B (no liquidity context) = 0.6×, high-vol = 0.5×, dst.
+        # Risk dikelola lewat UKURAN, bukan menolak trade (jaga volume tinggi).
+        _v10_mult = getattr(signal, 'size_mult', 1.0) or 1.0
+        if _v10_mult != 1.0:
+            size_usd *= _v10_mult
+            log.debug(f"[RISK] {signal.asset}: v10 size_mult ×{_v10_mult} → {format_usd(size_usd)}")
+
         # ── 3. Hard Margin Cap — 15% balance untuk modal kecil ($62.50)
         max_allowed_margin = account_balance * 0.15
         if size_usd > max_allowed_margin:
@@ -407,9 +415,7 @@ class RiskManager:
         # ── 3b. Minimum margin floor — ensure meaningful trade size
         min_margin = getattr(cfg, 'fixed_margin_per_position', 0.0)
         if min_margin > 0 and size_usd < min_margin:
-            # Only apply if we can afford it (don't exceed 20% balance)
-            if min_margin <= account_balance * 0.20:
-                size_usd = min_margin
+            size_usd = min_margin
 
         # ── 4. Calculate Contracts ────────────────────────────────────
         # isolated margin = notional / leverage -> notional = margin * leverage
@@ -1244,6 +1250,28 @@ class RiskManager:
                     else:
                         trail_pct = max(vol_est * 0.50, 0.005)
 
+                # [REKONSTRUKSI v10 F2.2] Structural trail — trail di balik swing
+                # low/high terbaru (bukan % tetap). Default OFF (flag). Kalau ON,
+                # override trail_pct dengan jarak ke swing struktur + buffer.
+                if getattr(cfg, 'structural_trail_enabled', False):
+                    _lb = int(getattr(cfg, 'structural_trail_swing_lookback', 10))
+                    _buf = getattr(cfg, 'structural_trail_buffer_pct', 0.001)
+                    _highs_s = getattr(position, 'candle_highs', []) or []
+                    _lows_s = getattr(position, 'candle_lows', []) or []
+                    try:
+                        if position.side == Side.LONG and len(_lows_s) >= _lb:
+                            _swing_low = min(_lows_s[-_lb:])
+                            _struct_pct = (new_high - _swing_low) / new_high + _buf
+                            if 0.002 <= _struct_pct <= 0.060:
+                                trail_pct = _struct_pct
+                        elif position.side == Side.SHORT and len(_highs_s) >= _lb:
+                            _swing_high = max(_highs_s[-_lb:])
+                            _struct_pct = (_swing_high - new_low) / new_low + _buf
+                            if 0.002 <= _struct_pct <= 0.060:
+                                trail_pct = _struct_pct
+                    except (ValueError, ZeroDivisionError):
+                        pass
+
                 if position.side == Side.LONG:
                     # Compute fresh trail level from current peak
                     trail_sl_new = new_high * (1 - trail_pct)
@@ -1413,6 +1441,34 @@ class RiskManager:
 
             # Runner grace: jika TP1 sudah hit, extend deadline 50%
             effective_max = max_hold * 1.5 if position.tp1_hit else max_hold
+
+            # ── [REKONSTRUKSI v10 — F0.2] PROGRESS-BASED TIME STOP ───────────
+            # Trader pro tidak hold trade yang tidak perform. Data KARA: time_exit
+            # median hold 6min, WR 5.8%, -$55 (seluruh kerugian bot). Akar: trade
+            # masuk lalu DIAM. Solusi: kalau dalam 8 menit belum capai +0.5R, thesis
+            # kemungkinan salah → keluar SEBELUM jadi time_exit -1R penuh.
+            # 0.5R = setengah jarak SL. Ubah time_exit dari "dump bucket" jadi
+            # "early invalidation cut". Hanya pre-TP1 (post-TP1 sudah profit-locked).
+            _prog_mins = getattr(scfg, 'progress_time_stop_minutes', 8.0)
+            _prog_min_r = getattr(scfg, 'progress_time_stop_min_r', 0.5)
+            if (not position.tp1_hit
+                    and not getattr(position, 'trailing_active', False)
+                    and hold_minutes >= _prog_mins):
+                _sl_dist = sl_distance if sl_distance > 0 else 0.008
+                _progress_r = floating / _sl_dist if _sl_dist > 0 else 0.0
+                if _progress_r < _prog_min_r:
+                    return {
+                        "action":      "time_exit",
+                        "close_ratio": 1.0,
+                        "price":       current_price,
+                        "pnl":         position.pnl_unrealized,
+                        "position_id": position.position_id,
+                        "message":     (
+                            f"⏱️ Progress stop {hold_minutes:.0f}m: hanya {_progress_r:.2f}R "
+                            f"(<{_prog_min_r}R) — thesis lemah, cut sebelum -1R penuh. "
+                            f"PnL: {floating*100:.2f}%."
+                        )
+                    }
 
             # ── L1: Early profit-lock trailing — DISABLED ────────────────
             # [AUDIT #19 FIX 2026-06-04] This armed trailing at +0.10% pre-TP1.

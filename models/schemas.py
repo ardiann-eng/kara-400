@@ -185,6 +185,7 @@ class TradeSignal(BaseModel):
     realized_vol:       float = 0.02             # daily realized vol — used for trail distance
     entry_atr:          float = 0.0              # ATR% at entry — for ATR trailing stop
     funding_rate:       Optional[float] = None   # last known funding rate at signal time
+    size_mult:          float = 1.0              # [v10] gate sizing modifier (tier A/B × vol tier)
 
     # Meta
     timestamp:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

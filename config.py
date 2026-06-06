@@ -310,7 +310,7 @@ class ScalperConfig:
     mtf_confirm_lookback:    int   = 32       # ~8h on 15m candles
 
     # Concurrent positions
-    max_concurrent_positions: int  = 5        # [RANKED] 5 posisi terbaik per cycle (ranked by score)
+    max_concurrent_positions: int  = 3        # [v10 F0.3] 5→3: kurangi konsentrasi + fee drag + correlation risk
 
     # Partial TP ratios (scalper: heavier close at TP1/TP2 given tight hold window)
     tp1_close_ratio:         float = 0.50     # 50% on TP1
@@ -394,6 +394,18 @@ class ScalperConfig:
     momentum_death_min_minutes: float = 4.0
     momentum_death_flat_pct: float = 0.0005      # ±0.05% right now = flat
     momentum_death_peak_max_pct: float = 0.0010  # peak favorable must stay below 0.10%
+
+    # [REKONSTRUKSI v10 F0.2] Progress-based time stop — cut underperformers early.
+    # Belum +0.5R dalam 8 menit = thesis lemah → exit sebelum -1R penuh.
+    progress_time_stop_minutes: float = 8.0
+    progress_time_stop_min_r: float = 0.5
+
+    # [REKONSTRUKSI v10 F2.2] Structural trailing — trail di balik swing low/high
+    # (bukan % tetap). Default OFF: edge ATR trail (100% WR) tidak diganggu sampai
+    # structural terbukti lebih baik di walk-forward. Set True untuk uji.
+    structural_trail_enabled: bool = False
+    structural_trail_swing_lookback: int = 10   # candle untuk cari swing low/high
+    structural_trail_buffer_pct: float = 0.001  # buffer 0.1% di bawah/atas swing
 
     # [AUDIT #18] OB edge bonuses — strong wall vs crowded (redundant with HTF trend)
     ob_strong_bonus_pts: int = 15          # ob_dir>=12, wall aligns, NOT crowded
