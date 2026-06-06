@@ -1500,27 +1500,12 @@ class RiskManager:
                     )
                 }
 
-            # ── L2: Early loss cut ───────────────────────────────────────────
-            # Posisi yang langsung turun -0.5% dalam 8m = sinyal salah, bukan noise.
-            # Jangan tunggu max_hold — cut sekarang.
-            if (hold_minutes >= early_loss_mins
-                    and floating <= early_loss_pct
-                    and not position.tp1_hit):
-                # [AUDIT FIX 2026-05-21] Removed never_profited gate.
-                # Data: 75% of time_exit trades were losers that briefly touched +0.01%
-                # then bled out. If floating -0.2% after 5min, signal is dead regardless.
-                return {
-                    "action":      "time_exit",
-                    "close_ratio": 1.0,
-                    "price":       current_price,
-                    "pnl":         position.pnl_unrealized,
-                    "position_id": position.position_id,
-                    "message":     (
-                        f"⏱️ Early loss cut {hold_minutes:.0f}m: "
-                        f"floating {floating*100:.2f}% < {early_loss_pct*100:.1f}%. "
-                        f"Cut sekarang."
-                    )
-                }
+            # ── L2: Early loss cut — DISABLED v10 ──────────────────────────
+            # [v10] Dihapus: progress stop (F0.2) di 8 menit + <0.5R lebih baik — 
+            # kasih trade waktu 3 menit ekstra untuk berkembang. L2 terlalu agresif 
+            # motong di 5 menit dengan -0.2% (hanya 0.13R), bunuh trade sebelum
+            # progress stop sempat ngecek. Data: semua 5 HYPE exits kena L2, 0 kena progress stop.
+
 
             # ── L3: Hard time limit ──────────────────────────────────────────
             # [AUDIT #10 FIX] Grace period for high-conviction flat trades.
