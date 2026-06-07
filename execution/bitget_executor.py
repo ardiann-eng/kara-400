@@ -452,6 +452,7 @@ class BitgetExecutor(BaseExecutor):
             signal_id=bridged.signal_id,
             is_paper=False,
             entry_score=bridged.score,
+            entry_tier=getattr(bridged, 'v10_tier', 'B'),
             realized_vol=getattr(bridged, "realized_vol", 0.02),
             original_entry_price=fill_price,
             entry_funding_rate=getattr(bridged, "funding_rate", 0.0) or 0.0,
@@ -608,7 +609,7 @@ class BitgetExecutor(BaseExecutor):
         close_ratio = float(action.get("close_ratio", 1.0))
 
         # Full close untuk SL/trail/time/momentum/early_trail
-        if atype in ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "early_trail"):
+        if atype in ("trailing_stop", "stop_loss", "time_exit", "progress_stop", "momentum_exit", "early_trail"):
             fill_px = pos.stop_loss if atype == "stop_loss" else current_price
             res = await self.close_position(pos.position_id, fill_px, reason=atype)
             return {**action, "pnl": (res or {}).get("pnl", 0), "position_id": pos.position_id}
@@ -754,6 +755,7 @@ class BitgetExecutor(BaseExecutor):
                 "pnl":        pos.pnl_realized,
                 "pnl_pct":    pos.roe_pct(current_price),
                 "score":      pos.entry_score,
+                "tier":       getattr(pos, 'entry_tier', 'B'),
                 "timestamp":  utcnow(),
             })
         except Exception:

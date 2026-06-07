@@ -1065,9 +1065,10 @@ class KaraBot:
             if all_signals_batch:
                 all_signals_batch.sort(key=lambda x: x[0], reverse=True)  # highest score first
                 ranked_signals = [sig for _, sig in all_signals_batch]
+                _top_tiers = ", ".join(f"{s.asset}={getattr(s, 'v10_tier', 'B')}" for s in ranked_signals[:5])
                 log.info(
                     f"[RANKED] {len(ranked_signals)} signals ranked. "
-                    f"Top: {', '.join(f'{s.asset}={s.score}' for s in ranked_signals[:5])}"
+                    f"Top: [{_top_tiers}]"
                 )
                 for sig in ranked_signals:
                     await self._handle_signals({"scalper": sig})
@@ -1097,7 +1098,7 @@ class KaraBot:
                     )
 
             top_scorers.sort(key=lambda x: x[1], reverse=True)
-            top_str = ", ".join([f"{a}:{s}" for a, s in top_scorers[:5]])
+            top_str = ", ".join([f"{a}:{s}" for a, s in top_scorers[:5]])  # score internal
             scalper_extra = len(scalper_only_assets)
 
             blocked_info = f" | Blocked: {blocked_count}" if blocked_count > 0 else ""
@@ -1273,7 +1274,7 @@ class KaraBot:
                 )
                 if not ev_ok:
                     log.info(
-                        f"⛔ [EV_BLOCKED] {user_signal.asset} score={user_signal.score} "
+                        f"⛔ [EV_BLOCKED] {user_signal.asset} tier={getattr(user_signal, 'v10_tier', 'B')} "
                         f"ev={ev_val*100:.3f}% — mathematical EV negative, skip"
                     )
                     continue
@@ -1346,7 +1347,7 @@ class KaraBot:
                 _latency_ms = (time.monotonic() - _t0) * 1000
                 log.debug(
                     f"[EXEC] {user_signal.asset} {user_signal.side.value.upper()} "
-                    f"score={user_signal.score} latency={_latency_ms:.0f}ms"
+                    f"tier={getattr(user_signal, 'v10_tier', 'B')} latency={_latency_ms:.0f}ms"
                 )
                 if pos:
                     # Low-latency: subscribe Bitget WS untuk asset ini supaya monitor pakai push price
@@ -1357,7 +1358,7 @@ class KaraBot:
             else:
                 # FULL_AUTO is off — log signal clearly so operator knows it was seen but not executed
                 log.info(
-                    f"📨 [SIGNAL] {user_signal.asset} {user_signal.side.value.upper()} score={user_signal.score} "
+                    f"📨 [SIGNAL] {user_signal.asset} {user_signal.side.value.upper()} tier={getattr(user_signal, 'v10_tier', 'B')} "
                     f"user={chat_id} → NOT executed (FULL_AUTO=off, set KARA_FULL_AUTO=true to enable)"
                 )
                 continue
@@ -1560,9 +1561,9 @@ class KaraBot:
                 exec_prices = hl_prices
 
             actions = await session.executor.update_positions(exec_prices)
-            early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "momentum_exit", "momentum_death", "early_trail")]
+            early_exit_actions = [a for a in actions if a.get("action") in ("time_exit", "progress_stop", "momentum_exit", "momentum_death", "early_trail")]
             # Exclude semua early_exit dari other_actions agar tidak dikirim dua kali
-            other_actions = [a for a in actions if a.get("action") not in ("time_exit", "momentum_exit", "momentum_death", "early_trail")]
+            other_actions = [a for a in actions if a.get("action") not in ("time_exit", "progress_stop", "momentum_exit", "momentum_death", "early_trail")]
 
             # Kirim notifikasi personal per posisi (KARA style)
             if early_exit_actions:

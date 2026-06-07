@@ -189,6 +189,7 @@ class UserDB:
                 for col, typedef in [
                     ("reasons",    "TEXT DEFAULT '[]'"),
                     ("components", "TEXT DEFAULT '{}'"),
+                    ("tier",       "TEXT DEFAULT 'B'"),
                 ]:
                     try:
                         cursor.execute(f"ALTER TABLE signals_history ADD COLUMN {col} {typedef}")
@@ -399,18 +400,21 @@ class UserDB:
                     "bear_total":  sig.breakdown.total_bear if sig.breakdown else 0,
                     "raw_score":   sig.breakdown.raw_score if sig.breakdown else 0,
                 })
+                _tier = getattr(sig, 'v10_tier', 'B')
                 cursor.execute(
-                    "INSERT OR REPLACE INTO signals_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO signals_history "
+                    "(sig_id, asset, side, price, data, created_at, reasons, components, tier) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         sig.signal_id,
                         sig.asset,
                         sig.side.value,
-                        sig.score,
                         sig.entry_price,
                         sig_data,
                         sig.timestamp.timestamp(),
                         reasons_json,
                         components_json,
+                        _tier,
                     )
                 )
                 conn.commit()

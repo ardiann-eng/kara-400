@@ -81,7 +81,7 @@ Ingat, kita prioritaskan <b>keamanan modal</b> dulu ya!
 SIGNAL_TEMPLATE = """
 {side_emoji} <b>SINYAL {asset} - {strength}</b>
 --------------------
-Score: <b>{score}/100</b>
+💎 Tier <b>{gate_tier}</b>
 Arah: <b>{side_text}</b>
 Regime: <code>{regime}</code>
 --------------------
@@ -101,7 +101,7 @@ PYRAMID_TEMPLATE = """
 --------------------
 Existing Profit: <b>+{profit_pct:.2f}%</b> ✅
 Side: <b>{side_text}</b> {side_emoji}
-Score Baru: <b>{score}/100</b>
+💎 Tier: <b>{tier}</b>
 --------------------
 📍 Entry Tambahan: <code>${entry}</code>
 ⚡ Leverage: <b>{lev}x</b>
@@ -1456,7 +1456,7 @@ class KaraTelegram:
                     "tp1": "TP1 (25%)", "tp2": "TP2 (25%)", "tp3": "TP3 (25%)",
                     "trailing_stop": "ATR Trail", "trailing": "ATR Trail",
                     "stop_loss": "Stop Loss", "sl": "Stop Loss",
-                    "time_exit": "Time Exit", "manual": "Manual",
+                    "time_exit": "Time Exit", "progress_stop": "Progress Stop", "manual": "Manual",
                     "close_all": "Close All",
                 }
                 return labels.get(key, key.replace("_", " ").title())
@@ -1855,7 +1855,7 @@ class KaraTelegram:
             t_bear = bd.total_bear
 
             lines.append(
-                f"{i}. <b>{sig.asset}</b> ({side_emoji} {sig.side.value.upper()}) — <b>{sig.score}/100</b>\n"
+                f"{i}. <b>{sig.asset}</b> ({side_emoji} {sig.side.value.upper()}) — 💎 Tier <b>{getattr(sig, 'v10_tier', 'B')}</b>\n"
                 f"   <code>[OI:{oi:+} Liq:{liq:+} OB:{ob:+} Ses:{ses:+}]</code>\n"
                 f"   Pts: {t_bull:.1f} vs {t_bear:.1f} | {time_str}\n"
             )
@@ -2277,19 +2277,15 @@ class KaraTelegram:
         short_warning = ""
         if signal.side == Side.SHORT:
             fr = getattr(signal, 'funding_rate', None)
-            # 0.005% per 8h = 0.00005 dalam desimal
             high_funding_threshold = 0.00005
             if fr is not None and fr > high_funding_threshold:
                 fr_per_8h_pct = fr * 100
                 margin_est = getattr(signal, 'suggested_size_usd', None) or 0
                 cost_8h = margin_est * fr if margin_est else None
-                cost_str = f" (~${cost_8h:.2f}/8h)" if cost_8h else ""
+                cost_str = f" (~${cost_8h:.2f}/h)" if cost_8h else ""
                 short_warning = (
                     f"\n⚠️ <b>SHORT</b> | 💸 Funding tinggi: <code>{fr_per_8h_pct:.4f}%/8h{cost_str}</code>"
-                    f" — SHORT bayar funding ke LONG. Hold pendek!"
                 )
-            else:
-                short_warning = "\n⚠️ <b>SHORT</b> — cek SL & leverage sebelum konfirmasi."
 
         # Map internal regime enum → human-readable label with emoji
         _regime_labels = {
@@ -2305,11 +2301,14 @@ class KaraTelegram:
         regime_raw = signal.regime.value if signal.regime else "normal"
         regime_label = _regime_labels.get(regime_raw.lower(), f"⚖️ {regime_raw.title()}")
 
+        gate_size = getattr(signal, 'size_mult', 1.0)
         text = SIGNAL_TEMPLATE.format(
             side_emoji=side_emoji,
             asset=signal.asset,
             strength=signal.strength.value,
-            score=signal.score,
+            gate_tier=getattr(signal, 'v10_tier', 'B'),
+            gate_setup=getattr(signal, 'v10_setup', 'none'),
+            gate_size=gate_size,
             side_text=side_text,
             regime=regime_label,
             entry=format_price(signal.entry_price),
@@ -2338,8 +2337,7 @@ class KaraTelegram:
                 [InlineKeyboardButton("📝 Mengapa Sinyal Ini?", callback_data=f"reasons:{signal.signal_id}")]
             ]
         else:
-            text += "\n🚀 <b>AUTO-EXECUTED</b>"
-            # Match screenshot buttons for auto-trade
+            text += "\n⚡ <b>OTOMATIS</b>"
             keyboard = [
                 [
                     InlineKeyboardButton("🔍 Lihat Alasan KARA", callback_data=f"reasons:{signal.signal_id}"),
@@ -2391,7 +2389,7 @@ class KaraTelegram:
             f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code>\n"
             f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code>\n"
             f"  • 📐 R:R Ratio: <b>{_calc_rr(pos):.2f}x</b>\n"
-            f"  • 📊 Score: <b>{signal.score}/100</b>\n\n"
+            f"  • 💎 Tier: <b>{getattr(signal, 'v10_tier', 'B')}</b>\n\n"
             
             f"<i>Eksekusi selesai. Memantau market untuk exit terbaik. ✨</i>"
         )
@@ -2455,7 +2453,7 @@ class KaraTelegram:
         _close_pct = int(action.get("close_ratio", 0.25) * 100)
 
         # Action types yang merupakan full/final close (posisi benar-benar selesai)
-        FINAL_EXIT_TYPES = ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "momentum_death", "early_trail")
+        FINAL_EXIT_TYPES = ("trailing_stop", "stop_loss", "time_exit", "progress_stop", "momentum_exit", "momentum_death", "early_trail")
 
         if action_type == "tp1":
             _remaining = 100 - _close_pct
@@ -2677,6 +2675,7 @@ class KaraTelegram:
                 hold_minutes=hold_minutes,
                 leverage=getattr(position, "leverage", 1),
                 score=close_data.get("score", getattr(position, "entry_score", 0) or 0),
+                tier=close_data.get("tier", getattr(position, "entry_tier", "B")),
                 session_pnl=getattr(account, "daily_pnl", 0),
                 session_pnl_pct=getattr(account, "daily_pnl_pct", 0),
                 total_equity=getattr(account, "total_equity", getattr(account, "balance", 0)),
@@ -2735,6 +2734,9 @@ class KaraTelegram:
                 elif reason_lower == "time_exit":
                     header_emoji, header_label = "⏱", "Time Exit"
                     sub = f"Posisi ditutup otomatis setelah {hold_min} menit~"
+                elif reason_lower == "progress_stop":
+                    header_emoji, header_label = "⏱", "Progress Stop"
+                    sub = f"Progress <0.5R dalam {hold_min} menit → thesis lemah, cut sebelum rugi penuh~"
                 else:
                     header_emoji, header_label = "🔒", "Manual Close"
                     sub = f"Posisi ditutup manual setelah {hold_min} menit~"
@@ -3264,8 +3266,8 @@ class KaraTelegram:
                 score_parts.append(f"Session adjustment: <b>{sess:+d}</b>")
 
             score_summary = (
-                f"📊 <b>Kenapa skor {final}/100?</b>\n"
-                + ("\n".join(f"• {p}" for p in score_parts) if score_parts else f"• Raw score: {raw} → Final: {final}")
+                f"💎 <b>Entry Quality: Tier {getattr(signal, 'v10_tier', 'B')}</b>\n"
+                + ("\n".join(f"• {p}" for p in score_parts) if score_parts else "")
             )
 
             # ── Categorize reasons ────────────────────────────────────
@@ -3378,7 +3380,7 @@ class KaraTelegram:
                 htf_line = f"\n📊 <b>1H Regime:</b> <code>{htf}</code> ({adj_str})"
 
             explanation = (
-                f"<b>{signal.asset} {side_label}</b> — Skor <b>{signal.score}/100</b>\n\n"
+                f"<b>{signal.asset} {side_label}</b> — 💎 Tier <b>{getattr(signal, 'v10_tier', 'B')}</b>\n\n"
                 f"{reasons_text}"
                 f"{comp_line}"
                 f"{mom_line}"

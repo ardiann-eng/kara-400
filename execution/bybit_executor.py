@@ -158,6 +158,7 @@ class BybitExecutor(BaseExecutor):
             mode=signal.mode if hasattr(signal, "mode") else BotMode.STANDARD,
             order_id=order_id,
             score=signal.score if hasattr(signal, "score") else 0,
+            entry_tier=getattr(signal, 'v10_tier', 'B'),
         )
         self._positions[pos.id] = pos
         log.info(f"[{symbol}] Opened {side_str} | qty={qty} @ {fill_price} | lev={leverage}x | SL={sl_price}")

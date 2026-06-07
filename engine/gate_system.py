@@ -3,12 +3,17 @@ KARA v10 — Gate System (REKONSTRUKSI Fase 1)
 
 Mengganti scoring aditif 8-komponen dengan sistem 3-lapis institusional:
   LAPIS 1 — HARD GATES (murah, regime-agnostic): regime align, exhaustion, junk filter
-  LAPIS 2 — SIZING TIERS (modulate size, TIDAK reject): liquidity context, vol
+  LAPIS 2 — ENTRY TIERS (modulate size, TIDAK reject): liquidity context, OB edge, vol
   LAPIS 3 — SETUP CLASSIFIER (label untuk audit): sweep / pullback / breakout / momentum
+
+Entry Quality Tiers:
+  S = OB trend-aligned (strong wall + searah HTF) — premium entry, +$5.41 WR 44.4%
+  A = Good liquidity context (near level / OB wall / CVD moderate)
+  B = No strong evidence, but passes all gates — acceptable, size dikurangi
 
 Prinsip anti-over-filter (funnel study 90 sinyal):
   Hanya filter MURAH yang hard-reject. Filter yang buang >30% sinyal = sizing modifier.
-  RV filter = SIZING (full/0.75x/0.5x), block hanya >15% (bukan 6% yang buang 77%).
+  RV filter = SIZING (full/0.75x/0.3x), block hanya >8% (AUDIT #21: RV r=-0.50 → tighten).
 
 Edge yang dipertahankan: trailing stop, momentum death (di risk_manager, bukan di sini).
 Edge baru: level likuiditas (session H/L, range extreme) + order flow (OB wall, CVD).
@@ -28,7 +33,7 @@ class GateDecision:
     reject_reason: str = ""          # diisi kalau passed=False
     size_mult: float = 1.0           # sizing modifier (Lapis 2): 1.0 / 0.75 / 0.6 / 0.5 / 0.3
     setup: str = "none"              # Lapis 3 label: sweep / pullback / breakout / momentum
-    tier: str = "B"                  # A (liq context) / B (tanpa liq context)
+    tier: str = "B"                  # S (OB trend-aligned) / A (liq context) / B (basic pass)
     reasons: List[str] = field(default_factory=list)
     # Telemetri untuk audit
     has_liq_context: bool = False
@@ -42,11 +47,11 @@ class GateSystem:
     Dipanggil dari scoring_engine setelah direction + htf_regime ditentukan.
     """
 
-    # ── Thresholds (dari funnel study + audit data) ──
-    RV_HARD_MAX        = 0.15    # >15% = junk, hard reject (bukan 6% yang bunuh volume)
+    # ── Thresholds (dari funnel study + audit data — [AUDIT #21] tuned) ──
+    RV_HARD_MAX        = 0.08    # >8% = hard reject (diturunkan dari 15%, RV r=-0.50 p=0.0005)
     RV_FULL_MAX        = 0.04    # <=4% = size penuh
     RV_REDUCED_MAX     = 0.06    # 4-6% = 0.75x
-    # 6-15% = 0.5x (damage control via size, bukan skip)
+    # 6-8% = 0.3x (damage control: vol tinggi tapi belum ekstrem, size dikecilkan drastis)
     CVD_EXTREME        = 0.70    # CVD 5m >0.7 searah = exhaustion, reject
     LEVEL_PROXIMITY    = 0.004   # dalam 0.4% dari level = "di level"
     SWEEP_RECLAIM_BARS = 2       # tembus level lalu balik dalam <=2 candle
@@ -218,13 +223,13 @@ class GateSystem:
         # ═══════════════════════════════════════════
         d.passed = True
 
-        # Vol tier
+        # Vol tier — [AUDIT #21] RV r=-0.50, p=0.0005 → 6-8% dikecilkan ke 0.3×
         if realized_vol <= self.RV_FULL_MAX:
             vol_mult = 1.0; d.rv_tier = "full"
         elif realized_vol <= self.RV_REDUCED_MAX:
             vol_mult = 0.75; d.rv_tier = "0.75x"
         else:
-            vol_mult = 0.5; d.rv_tier = "0.5x"
+            vol_mult = 0.3; d.rv_tier = "0.3x"     # 6-8%: damage control, size kecil
 
         # Liquidity context → tier A/B
         # [v10 OB EDGE] OB strong wall = predictor terkuat (r=+0.208 p=0.049, 90 trade).
@@ -245,19 +250,23 @@ class GateSystem:
 
         d.near_level = lvl_name
 
-        if d.has_liq_context:
-            d.tier = "A"; liq_mult = 1.0
-        else:
-            d.tier = "B"; liq_mult = 0.6   # tanpa konteks = size kecil, TAPI tetap trade
-
         # [v10 OB EDGE] OB strong wall + searah HTF trend = kombinasi terbaik
-        # (WR 44.4%, +$5.41). Boost size 1.5× untuk setup premium ini.
+        # (WR 44.4%, +$5.41). Boost size 1.5×, Tier S (entry quality premium).
         _ob_trend_aligned = (
             has_strong_wall and (
                 (side == "long" and htf_regime == "TRENDING_UP") or
                 (side == "short" and htf_regime == "TRENDING_DOWN")
             )
         )
+
+        # Entry Quality Tiers: S > A > B
+        if _ob_trend_aligned:
+            d.tier = "S"; liq_mult = 1.0
+        elif d.has_liq_context:
+            d.tier = "A"; liq_mult = 1.0
+        else:
+            d.tier = "B"; liq_mult = 0.6   # tanpa konteks = size kecil, TAPI tetap trade
+
         ob_boost = 1.5 if _ob_trend_aligned else 1.0
 
         d.size_mult = round(max(1.0, vol_mult * liq_mult * ob_boost), 3)

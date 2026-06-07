@@ -295,6 +295,7 @@ class LiveExecutor(BaseExecutor):
             signal_id=signal.signal_id,
             is_paper=False,
             entry_score=signal.score,
+            entry_tier=getattr(signal, 'v10_tier', 'B'),
             realized_vol=getattr(signal, 'realized_vol', 0.02),
             original_entry_price=signal.entry_price,  # [QUANT AGGRESSION] breakeven reference
             # [POST-MORTEM] Entry context for autopsy
@@ -569,6 +570,7 @@ class LiveExecutor(BaseExecutor):
                 "pnl":       pnl,
                 "pnl_pct":   pos.roe_pct(current_price),
                 "score":     getattr(pos, 'entry_score', 0),
+                "tier":      getattr(pos, 'entry_tier', 'B'),
                 "timestamp": utcnow(),
                 "autopsy":   getattr(pos, 'autopsy', ''),
             }

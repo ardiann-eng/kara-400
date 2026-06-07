@@ -1378,9 +1378,11 @@ class ScoringEngine:
             new_lev = max(3, min(scfg.max_leverage, signal.suggested_leverage + htf_leverage_adj))
             signal.suggested_leverage = new_lev
 
-        # [v10] Inject gate sizing modifier ke signal — dipakai calculate_position_size
+        # [v10] Inject gate sizing modifier + tier + setup ke signal
         if signal:
             signal.size_mult = float(_scalper_components.get("v10_size_mult", 1.0))
+            signal.v10_tier = str(_scalper_components.get("v10_tier", "B"))
+            signal.v10_setup = str(_scalper_components.get("v10_setup", "none"))
 
         # Attach last-known funding rate for Telegram warning
         _fr_cache = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []
@@ -1393,8 +1395,9 @@ class ScoringEngine:
             self._last_signal_time = time.time()
             reasoning_logger.log_execution(asset, {"entry": signal.entry_price, "sl": signal.stop_loss, "tp1": signal.tp1})
             reasoning_logger.end_trace(asset, "execute", score, side.value, "signal accepted")
+            _tier = getattr(signal, 'v10_tier', 'B')
             log.info(
-                f"[SIGNAL-TRACE] {asset} | FINAL | score={score} | side={side.value} | "
+                f"[SIGNAL-TRACE] {asset} | FINAL | tier={_tier} | side={side.value} | "
                 f"sl={signal.stop_loss:.4f} | tp1={signal.tp1:.4f} | tp2={signal.tp2:.4f} | "
                 f"atr_used={atr_pct_now > 0} | fade={fade_mode} | late_trend={late_trend} | "
                 f"reasons={' | '.join(reasons[-5:])}"
@@ -3521,23 +3524,24 @@ class ScoringEngine:
             ema8  = _ema(closes, 8) if len(closes) >= 8 else closes[-1]
             ema21 = _ema(closes, 21) if len(closes) >= 21 else closes[-1]
 
-            # [FIX A] Strength threshold 0.15 (was 0.30)
-            # Crypto moves 0.5-2% per hour routinely. 30% strength = only parabolic moves.
-            # 15% = moderate directional bias, appropriate for 1H timeframe.
-            n = min(len(closes), 8)  # last 8 hours (was 10 candles of 4H = 40 hours)
+            # [AUDIT #21 FIX] Hapus strength threshold — pro-cyclical saat volatilitas tinggi.
+            # Root cause: ZEC EMA8 > EMA21 sepanjang June 7 (uptrend $349→$385).
+            # Sharp dip $400→$363 bikin total_range melebar → strength < 0.15
+            # → regime flip ke CHOPPY → G1 izinkan SHORT → loss $15.
+            # Strength AND condition bikin volatilitas tinggi = CHOPPY = anti-trend trade.
+            # EMA8/21 dengan EMA_GAP 0.1% sudah cukup konservatif untuk 1H.
+            n = min(len(closes), 8)
             total_range = sum(highs[-n:][i] - lows[-n:][i] for i in range(n))
             net_move    = abs(closes[-1] - closes[-n])
             strength    = net_move / total_range if total_range > 0 else 0
-
-            STRENGTH_THRESHOLD = 0.15  # [FIX A] was 0.30
 
             # [FIX B] EMA gap 0.1% (was 0.2%)
             # 0.2% gap on 4H = needs multi-day trend. 0.1% on 1H = few hours of direction.
             EMA_GAP = 1.001  # was 1.002
 
-            if ema8 > ema21 * EMA_GAP and strength >= STRENGTH_THRESHOLD:
+            if ema8 > ema21 * EMA_GAP:
                 regime = "TRENDING_UP"
-            elif ema8 < ema21 * (2 - EMA_GAP) and strength >= STRENGTH_THRESHOLD:
+            elif ema8 < ema21 * (2 - EMA_GAP):
                 regime = "TRENDING_DOWN"
             else:
                 regime = "CHOPPY"

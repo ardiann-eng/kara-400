@@ -117,6 +117,7 @@ def _exit_reason_label(reason: str) -> str:
         "tp2":           "TAKE PROFIT 2",
         "stop_loss":     "STOP LOSS",
         "time_exit":     "TIME EXIT",
+        "progress_stop": "PROGRESS STOP",
         "manual_close":  "MANUAL CLOSE",
     }.get(reason.lower(), reason.upper())
 
@@ -173,6 +174,7 @@ def generate_pnl_card(
     session_pnl: float,
     session_pnl_pct: float,
     total_equity: float,
+    tier: str = "B",
     bg_path: str = "notify/assets/kara_bg.png",
 ) -> bytes:
     """Returns PNG bytes ready for Telegram send_photo."""
@@ -326,8 +328,8 @@ def generate_pnl_card(
     draw.text((col1_x, grid_y + 62), "Hold Time", font=fonts["label"], fill=C_LABEL)
     draw.text((col1_x, grid_y + 84), _fmt_hold(hold_minutes), font=fonts["value"], fill=C_TEXT)
 
-    draw.text((col2_x, grid_y + 62), "Score",    font=fonts["label"], fill=C_LABEL)
-    draw.text((col2_x, grid_y + 84), f"{max(0, min(score, 100))}/100", font=fonts["value"], fill=C_TEXT)
+    draw.text((col2_x, grid_y + 62), "Tier",     font=fonts["label"], fill=C_LABEL)
+    draw.text((col2_x, grid_y + 84), f"S/A/B > {tier}", font=fonts["value"], fill=C_TEXT)
 
     # ═══════════════════════════════════════════════════════════════════════
     # Divider (y=388)

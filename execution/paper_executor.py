@@ -214,6 +214,7 @@ class PaperExecutor(BaseExecutor):
             trade_mode=getattr(signal, 'trade_mode', 'scalper'),
             is_paper=True,
             entry_score=signal.score,
+            entry_tier=getattr(signal, 'v10_tier', 'B'),
             realized_vol=getattr(signal, 'realized_vol', 0.02),
             original_entry_price=signal.entry_price,  # [QUANT AGGRESSION] breakeven reference
             # [POST-MORTEM] Entry context for autopsy
@@ -447,6 +448,7 @@ class PaperExecutor(BaseExecutor):
             "pnl":              total_pnl,
             "pnl_pct":          pos.roe_pct(fill_price),
             "score":            pos.entry_score,
+            "tier":             getattr(pos, 'entry_tier', 'B'),
             "timestamp":        utcnow(),
             "autopsy":          pos.autopsy,
         }
@@ -457,16 +459,13 @@ class PaperExecutor(BaseExecutor):
         # [LEARNING ENGINE] Record outcome for pattern memory + ML training
         try:
             from engine.learning_engine import learning_engine
-            # Signal-level dedup: asset+side+entry_minute is shared across all users
-            # who traded the same signal, preventing N-times recording.
             _entry_minute = int(pos.opened_at.timestamp() // 60) if pos.opened_at else 0
             _signal_key = f"{pos.asset}_{pos.side.value.lower()}_{_entry_minute}"
-            # [AUDIT #8 FIX] Use real component scores from position metadata
             _comps = getattr(pos, '_ml_features', None) or {}
             learning_engine.record_outcome(
                 asset=pos.asset,
                 side=pos.side.value.lower(),
-                regime=getattr(pos, '_learn_regime', 'ranging'),  # [AUDIT #14 FIX] was 'trade_mode' → key mismatch with evaluate()
+                regime=getattr(pos, '_learn_regime', 'ranging'),
                 score=pos.entry_score,
                 pnl_usd=total_pnl,
                 pos_id=_signal_key,
@@ -481,6 +480,7 @@ class PaperExecutor(BaseExecutor):
                     'regime_code': _comps.get('regime_code', 0),
                     'hour_utc': pos.opened_at.hour if pos.opened_at else 0,
                     'score': pos.entry_score,
+                    'tier': getattr(pos, 'entry_tier', 'B'),
                     'cvd_score': _comps.get('CVD', 0),
                     'xam_score': _comps.get('XAM', 0),
                     'vote_margin': _comps.get('vote_margin', 0),
@@ -530,7 +530,7 @@ class PaperExecutor(BaseExecutor):
         # Full-close actions (SL, trailing, time, momentum): delegate entirely to
         # close_position() which owns the balance update + meta + ML labeling.
         # Do NOT touch balance/pnl here — close_position handles it all.
-        if action["action"] in ("trailing_stop", "stop_loss", "time_exit", "momentum_exit", "momentum_death", "early_trail"):
+        if action["action"] in ("trailing_stop", "stop_loss", "time_exit", "progress_stop", "momentum_exit", "momentum_death", "early_trail"):
             if pos.status == PositionStatus.OPEN:
                 result = await self.close_position(pos.position_id, fill_price, action["action"])
                 return {**action, "pnl": (result or {}).get("pnl", 0), "position_id": pos.position_id}

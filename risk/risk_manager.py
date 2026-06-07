@@ -1458,7 +1458,7 @@ class RiskManager:
                 _progress_r = floating / _sl_dist if _sl_dist > 0 else 0.0
                 if _progress_r < _prog_min_r:
                     return {
-                        "action":      "time_exit",
+                        "action":      "progress_stop",
                         "close_ratio": 1.0,
                         "price":       current_price,
                         "pnl":         position.pnl_unrealized,

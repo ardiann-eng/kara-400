@@ -186,6 +186,8 @@ class TradeSignal(BaseModel):
     entry_atr:          float = 0.0              # ATR% at entry — for ATR trailing stop
     funding_rate:       Optional[float] = None   # last known funding rate at signal time
     size_mult:          float = 1.0              # [v10] gate sizing modifier (tier A/B × vol tier)
+    v10_tier:           str = "B"                # [v10] gate tier (A/B)
+    v10_setup:          str = "none"             # [v10] setup label (sweep/breakout/pullback/momentum)
 
     # Meta
     timestamp:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -334,6 +336,7 @@ class Position(BaseModel):
     closed_at:         Optional[datetime] = None
     is_paper:          bool = True
     entry_score:       int = 50
+    entry_tier:        str = "B"          # [v10] gate entry quality S/A/B
     realized_vol:      float = 0.02       # daily realized vol at entry — used for trail distance
 
     # [QUANT AGGRESSION] Partial exit & scale-in tracking
