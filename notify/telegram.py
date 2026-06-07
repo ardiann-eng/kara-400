@@ -2735,7 +2735,7 @@ class KaraTelegram:
                     header_emoji, header_label = "⏱", "Time Exit"
                     sub = f"Posisi ditutup otomatis setelah {hold_min} menit~"
                 elif reason_lower == "progress_stop":
-                    header_emoji, header_label = "⏱", "Progress Stop"
+                    header_emoji, header_label = "⏳", "Progress Stop"
                     sub = f"Progress <0.5R dalam {hold_min} menit → thesis lemah, cut sebelum rugi penuh~"
                 else:
                     header_emoji, header_label = "🔒", "Manual Close"
