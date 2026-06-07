@@ -405,19 +405,20 @@ class RiskManager:
             log.debug(f"[RISK] Margin cap: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} (15%)")
             size_usd = max_allowed_margin
 
+        # ── 3b. Minimum margin floor — ensure meaningful trade size (SEBELUM size_mult)
+        min_margin = getattr(cfg, 'fixed_margin_per_position', 0.0)
+        if min_margin > 0 and size_usd < min_margin:
+            log.debug(f"[RISK] Margin floor: {format_usd(size_usd)} -> {format_usd(min_margin)} (min ${min_margin})")
+            size_usd = min_margin
+
         # ── [v10] Gate sizing modifier (tier A/B × vol tier) ──────────
         # Tier B (no liquidity context) = 0.6×, high-vol = 0.5×, dst.
         # Risk dikelola lewat UKURAN, bukan menolak trade (jaga volume tinggi).
-        # Diterapkan SETELAH cap agar S/A/B beda hasil akhirnya.
+        # Diterapkan SETELAH cap + floor agar S/A/B beda hasil akhirnya.
         _v10_mult = getattr(signal, 'size_mult', 1.0) or 1.0
         if _v10_mult != 1.0:
             size_usd *= _v10_mult
             log.debug(f"[RISK] {signal.asset}: v10 size_mult ×{_v10_mult} → {format_usd(size_usd)}")
-
-        # ── 3b. Minimum margin floor — ensure meaningful trade size
-        min_margin = getattr(cfg, 'fixed_margin_per_position', 0.0)
-        if min_margin > 0 and size_usd < min_margin:
-            size_usd = min_margin
 
         # ── 4. Calculate Contracts ────────────────────────────────────
         # isolated margin = notional / leverage -> notional = margin * leverage
