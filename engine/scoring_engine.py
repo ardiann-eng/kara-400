@@ -678,12 +678,6 @@ class ScoringEngine:
         score = max(0, min(score, 100))
         reasons.extend(session_reasons)
 
-        # ── SCORE-DEBUG final (post-regime, post-session) ─────────────
-        log.info(
-            f"[SCORE-DEBUG] {asset} | {side.value.upper()} score={score} | "
-            f"regime={_regime_cat}(×{_regime_mult}) session_add={session_score_add}"
-        )
-
         # ── [P0-2 FIX 2026-05-18] FUNDING RATE HARD GATE ──────────────
         # Data audit: funding_extreme adalah satu-satunya fitur dengan r>0 terhadap PnL.
         # Kalau funding crowded di sisi yang sama = market over-leveraged = mean reversion imminent.
@@ -1583,7 +1577,6 @@ class ScoringEngine:
         bear_setup = 0   # leading indicators pointing SHORT (max ~55)
         confirm_pts = 0  # lagging confirmation (can be negative, range -15 to +25)
 
-        # Component trackers for SCORE-DEBUG log
         _c_ob = 0
         _c_fund = 0
         _c_liq = 0
@@ -2327,15 +2320,6 @@ class ScoringEngine:
         # Apply displacement multiplier (the anti-chase mechanism)
         score = int(scaled * disp_mult)
         score = max(0, min(100, score))
-
-        # ── Per-coin SCORE-DEBUG log (pre-regime: before vol/regime multiplier) ──
-        log.info(
-            f"[SCORE-DEBUG] {asset} | {side.value.upper()} pre_regime={score} | "
-            f"setup={dominant_setup} confirm={confirm_pts} ob_edge={_ob_edge_adj:+d} disp={disp_mult:.2f} | "
-            f"OB={_c_ob} ob_dir={_ob_dir:+d} crowded={int(_ob_crowded)} EMA={_c_ema} RSI={_c_rsi} CVD={_c_cvd} "
-            f"FUND={_c_fund} LIQ={_c_liq} MTF={_c_mtf} | "
-            f"bull_s={bull_setup} bear_s={bear_setup}"
-        )
 
         # Populate breakdown telemetry for downstream persistence
         if out_components is not None:
