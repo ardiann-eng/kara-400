@@ -398,19 +398,21 @@ class RiskManager:
             size_usd *= 0.5
             log.warning(f"[RISK] Drawdown guard active (DD: {drawdown*100:.1f}% >= 15%). Risk halved to {risk_pct/2*100:.1f}%.")
 
-        # ── [v10] Gate sizing modifier (tier A/B × vol tier) ──────────
-        # Tier B (no liquidity context) = 0.6×, high-vol = 0.5×, dst.
-        # Risk dikelola lewat UKURAN, bukan menolak trade (jaga volume tinggi).
-        _v10_mult = getattr(signal, 'size_mult', 1.0) or 1.0
-        if _v10_mult != 1.0:
-            size_usd *= _v10_mult
-            log.debug(f"[RISK] {signal.asset}: v10 size_mult ×{_v10_mult} → {format_usd(size_usd)}")
-
         # ── 3. Hard Margin Cap — 15% balance untuk modal kecil ($62.50)
+        # Diterapkan SEBELUM size_mult agar tier beneran beda.
         max_allowed_margin = account_balance * 0.15
         if size_usd > max_allowed_margin:
             log.debug(f"[RISK] Margin cap: {format_usd(size_usd)} -> {format_usd(max_allowed_margin)} (15%)")
             size_usd = max_allowed_margin
+
+        # ── [v10] Gate sizing modifier (tier A/B × vol tier) ──────────
+        # Tier B (no liquidity context) = 0.6×, high-vol = 0.5×, dst.
+        # Risk dikelola lewat UKURAN, bukan menolak trade (jaga volume tinggi).
+        # Diterapkan SETELAH cap agar S/A/B beda hasil akhirnya.
+        _v10_mult = getattr(signal, 'size_mult', 1.0) or 1.0
+        if _v10_mult != 1.0:
+            size_usd *= _v10_mult
+            log.debug(f"[RISK] {signal.asset}: v10 size_mult ×{_v10_mult} → {format_usd(size_usd)}")
 
         # ── 3b. Minimum margin floor — ensure meaningful trade size
         min_margin = getattr(cfg, 'fixed_margin_per_position', 0.0)

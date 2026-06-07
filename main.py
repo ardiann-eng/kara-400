@@ -1061,14 +1061,27 @@ class KaraBot:
             tasks = [_scan_one(asset, scalper_only=(asset in scalper_only_assets)) for asset in assets_to_scan]
             await asyncio.gather(*tasks)
 
-            # ── [RANKED EXECUTION] Sort signals by score, execute top-N per user ──
+            # ── [RANKED EXECUTION] Multi-dimensi ranking: tier > setup > OB > score ──
             if all_signals_batch:
-                all_signals_batch.sort(key=lambda x: x[0], reverse=True)  # highest score first
+                _tier_priority  = {"S": 0, "A": 1, "B": 2}
+                _setup_priority = {"sweep": 0, "breakout": 1, "pullback": 2, "momentum": 3, "none": 4}
+                def _rank_key(item):
+                    sig = item[1]
+                    tier_p  = _tier_priority.get(getattr(sig, 'v10_tier', 'B'), 99)
+                    setup_p = _setup_priority.get(getattr(sig, 'v10_setup', 'none'), 99)
+                    ob_strength = abs(getattr(sig, 'gate_ob_dir', 0))
+                    score = getattr(sig, 'score', 0)
+                    # Lower key = higher priority. OB strength negated so stronger = earlier.
+                    return (tier_p, setup_p, -ob_strength, -score)
+                all_signals_batch.sort(key=_rank_key)
                 ranked_signals = [sig for _, sig in all_signals_batch]
-                _top_tiers = ", ".join(f"{s.asset}={getattr(s, 'v10_tier', 'B')}" for s in ranked_signals[:5])
+                _top_info = ", ".join(
+                    f"{s.asset}={getattr(s, 'v10_tier', 'B')}/{getattr(s, 'v10_setup', '?')}"
+                    for s in ranked_signals[:5]
+                )
                 log.info(
-                    f"[RANKED] {len(ranked_signals)} signals ranked. "
-                    f"Top: [{_top_tiers}]"
+                    f"[RANKED] {len(ranked_signals)} signals. "
+                    f"Top: [{_top_info}]"
                 )
                 for sig in ranked_signals:
                     await self._handle_signals({"scalper": sig})

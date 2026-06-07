@@ -186,8 +186,11 @@ class TradeSignal(BaseModel):
     entry_atr:          float = 0.0              # ATR% at entry — for ATR trailing stop
     funding_rate:       Optional[float] = None   # last known funding rate at signal time
     size_mult:          float = 1.0              # [v10] gate sizing modifier (tier A/B × vol tier)
-    v10_tier:           str = "B"                # [v10] gate tier (A/B)
+    v10_tier:           str = "B"                # [v10] gate tier (S/A/B)
     v10_setup:          str = "none"             # [v10] setup label (sweep/breakout/pullback/momentum)
+    gate_ob_dir:        int = 0                  # [RANK] OB strength signed aligned to trade — untuk ranking
+    gate_net_move:      float = 0.0              # [RANK] 5m net displacement (signed aligned) — untuk ranking
+    gate_cvd_dir:       float = 0.0              # [RANK] CVD directional (signed aligned) — untuk ranking
 
     # Meta
     timestamp:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

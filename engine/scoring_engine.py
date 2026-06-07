@@ -575,11 +575,50 @@ class ScoringEngine:
                 # align ke arah trade (positif = mendukung side)
                 _v10_cvd = _v10_cvd_raw if side == Side.LONG else -_v10_cvd_raw
                 _v10_oi_usd = oi.open_interest * mark_price if oi else 0.0
+                # [v10 F3.0] OB cluster levels dari orderbook depth
+                _v10_ob_levels = {}
+                _ob_cache = getattr(self.cache, 'orderbook', {}).get(asset) if hasattr(self.cache, 'orderbook') else None
+                if _ob_cache and isinstance(_ob_cache, dict):
+                    try:
+                        _obbids, _obasks = (_ob_cache.get("levels") or [[], []])[:2]
+                        # Cluster step = 0.2% dari harga (optimal untuk scalping 20m)
+                        _clust_step = max(price * 0.002, 1e-10)
+                        _bid_clusters = {}
+                        for _e in _obbids[:30]:
+                            _px = float(_e.get("px", 0)) if isinstance(_e, dict) else float(_e[0])
+                            _sz = float(_e.get("sz", 0)) if isinstance(_e, dict) else float(_e[1])
+                            if _px <= 0: continue
+                            _rounded = round(_px / _clust_step) * _clust_step
+                            _bid_clusters[_rounded] = _bid_clusters.get(_rounded, 0) + _sz
+                        _ask_clusters = {}
+                        for _e in _obasks[:30]:
+                            _px = float(_e.get("px", 0)) if isinstance(_e, dict) else float(_e[0])
+                            _sz = float(_e.get("sz", 0)) if isinstance(_e, dict) else float(_e[1])
+                            if _px <= 0: continue
+                            _rounded = round(_px / _clust_step) * _clust_step
+                            _ask_clusters[_rounded] = _ask_clusters.get(_rounded, 0) + _sz
+                        if _bid_clusters:
+                            _best_bid = max(_bid_clusters.keys())
+                            _avg_bid = sum(_bid_clusters.values()) / len(_bid_clusters)
+                            if _bid_clusters[_best_bid] > _avg_bid * 1.5:
+                                _v10_ob_levels["ob_bid_cluster"] = _best_bid
+                        if _ask_clusters:
+                            _best_ask = min(_ask_clusters.keys())
+                            _avg_ask = sum(_ask_clusters.values()) / len(_ask_clusters)
+                            if _ask_clusters[_best_ask] > _avg_ask * 1.5:
+                                _v10_ob_levels["ob_ask_cluster"] = _best_ask
+                        if _v10_ob_levels:
+                            log.debug(f"[OB-LEVELS] {asset}: {_v10_ob_levels}")
+                    except Exception as _ob_err:
+                        log.debug(f"[OB-LEVELS] {asset}: parse error {_ob_err}")
+                # [P1] Scalping regime dari 1m closes (EMA5/13)
+                _v10_scalp_regime = gate_system._detect_scalp_regime(_v10_closes)
                 _v10_dec = gate_system.evaluate(
                     asset=asset, side=side.value.lower(), htf_regime=htf_regime,
                     candles=candles, price=mark_price, realized_vol=realized_vol or 0.0,
                     cvd_dir=_v10_cvd, ob_dir=int(_v10_ob_dir), net_move_5m=_v10_net5m,
-                    oi_usd=_v10_oi_usd,
+                    oi_usd=_v10_oi_usd, ob_levels=_v10_ob_levels or None,
+                    scalp_regime=_v10_scalp_regime,
                 )
                 if _V10_ACTIVE:
                     # PRODUKSI: gate memutuskan
@@ -592,6 +631,10 @@ class ScoringEngine:
                     _scalper_components["v10_size_mult"] = _v10_dec.size_mult
                     _scalper_components["v10_setup"] = _v10_dec.setup
                     _scalper_components["v10_tier"] = _v10_dec.tier
+                    # [RANK] Store signal quality metrics untuk multi-dimensi ranking
+                    _scalper_components["v10_ob_dir"] = int(_v10_ob_dir)
+                    _scalper_components["v10_net_move"] = _v10_net5m
+                    _scalper_components["v10_cvd"] = _v10_cvd
                 else:
                     # SHADOW: cuma log, tidak pengaruhi keputusan (untuk bandingkan)
                     log.info(
@@ -1377,6 +1420,10 @@ class ScoringEngine:
             signal.size_mult = float(_scalper_components.get("v10_size_mult", 1.0))
             signal.v10_tier = str(_scalper_components.get("v10_tier", "B"))
             signal.v10_setup = str(_scalper_components.get("v10_setup", "none"))
+            # [RANK] Inject signal quality metrics untuk ranking
+            signal.gate_ob_dir = int(_scalper_components.get("v10_ob_dir", 0))
+            signal.gate_net_move = float(_scalper_components.get("v10_net_move", 0.0))
+            signal.gate_cvd_dir = float(_scalper_components.get("v10_cvd", 0.0))
 
         # Attach last-known funding rate for Telegram warning
         _fr_cache = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []

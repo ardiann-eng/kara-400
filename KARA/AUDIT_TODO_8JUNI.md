@@ -165,91 +165,93 @@ Toggle granular via env (kalau diimplement) atau code flag:
 
 ---
 
-## A. REALITAS AUDIT #21 — Temuan & Fix Hari Ini
+## A. FASE 2.1 — Perubahan 7 Juni (Sore)
 
-### A.1 Data Pull
-- Railway production DB: 175 trade_history rows, 177 signals
-- Dedup single-user (7667519263): **44 trades** → cocok jurnal Telegram
-
-### A.2 Verifikasi v10 Aktif
-| Marker | Status |
-|--------|--------|
-| `[V10-GATE SKIP]` (183×) / `[V10-GATE PASS]` (2×) | ✅ |
-| Direction tanpa EMA dominan | ✅ |
-| `score_below_threshold` | ❌ NOL muncul — gate bypass scoring |
-| `low_vote_consensus` | ❌ NOL muncul |
-
-**Catatan:** `_V10_ACTIVE = True` hardcoded di `scoring_engine.py:552`. `KARA_V10_GATES=false` di Railway env **TIDAK** berefek. Rollback = code change + redeploy.
-
-### A.3 Metrik POST-v10 (44 trades)
-
-| Metrik | Value | vs Target #21 |
-|--------|-------|---------------|
-| Win Rate | 47.7% | ✅ ≥40% |
-| Profit Factor | **0.78** | 🔴 <1.3 |
-| PnL | **-$7.63** | 🔴 < break-even |
-| time_exit % | 66% | 🔴 target <40% |
-| Trailing fire | 2.3% (1 trade) | 🔴 target ≥30% |
-| Counter-trend | 0 | ✅ |
-| LONG/SHORT | 29/15 | mending (sblm 90/10) |
-| Volume/hari | ~44 | ✅ ≥25 |
-| Score↔PnL Pearson | r=-0.12 | 🔴 INVERSE — score makin tinggi, PnL makin jelek |
-
-### A.4 ROOT CAUSE — ZEC Loss -$8.37 (54% total loss)
-
-**Masalah:** v10 regime detection `_fetch_1h_regime()` di `scoring_engine.py:3538-3543` pakai **AND**:
-```python
-if net_move >= 0 and ema8 > ema21 and strength >= 0.15:  # TRENDING_UP
-```
-Saat ZEC dip tajam $400→$363, `total_range` melebar → `strength = net_move / total_range < 0.15` → regime `CHOPPY` meski EMA8 > EMA21 masih true. G1 membaca CHOPPY → sinyal SHORT lolos → bot short ke uptrend → -$8.37.
-
-**Fix:** Hapus strength threshold → regime murni EMA8/21 cross (scoring_engine.py:3538).
-
-### A.5 ROOT CAUSE 2 — SHORT Filter Block Dinonaktifkan
-
-Seluruh blok filter SHORT spesifik (baris 887-981) di-bypass oleh:
-```python
-if side == Side.SHORT and not _V10_ACTIVE:
-```
-v10 menghapus: short-in-CHOPPY score threshold ≥67, OB contradiction guard, funding guard, squeeze guard.
-
-**Status:** Sudah difix via A.4 (regime fix). ZEC akan stay TRENDING_UP saat dip → G1 block SHORT langsung.
-
-### A.6 Exit Breakdown
-
-| Exit | Count | PnL | % Total Loss |
-|------|-------|-----|--------------|
-| time_exit | 29 (66%) | -$5.81 | 76% |
-| stop_loss | 2 | -$6.60 | **86%** (TON -$3.52, ZEC -$3.08) |
-| trailing_stop | 1 | +$0.78 | — |
-| tp1/tp2 | sisanya | — | — |
-
-### A.7 Fix yang Dideploy (7 Juni)
+### A.1 Ringkasan Perubahan
 
 | # | File | Change | Dampak |
 |---|------|--------|--------|
 | 1 | `engine/scoring_engine.py:3538` | Hapus strength ≥0.15 dari regime detection | ZEC stay TRENDING_UP saat dip → G1 block SHORT |
 | 2 | `engine/gate_system.py:46` | RV_HARD_MAX 15% → **8%** | RV r=-0.50 p=0.0005 → cutoff lebih ketat |
 | 3 | `engine/gate_system.py:225-229` | Vol-tier 6-8% → **0.3×** (was 0.5×) | RV tinggi = size minimal |
-| 4 | `engine/gate_system.py:248-251` | Tier S/A/B: OB trend-aligned = **S** (premium), liquidity context = A, basic = B | Entry quality tier |
-| 5 | `risk/risk_manager.py:1461` | Progress stop action `progress_stop` instead of `time_exit` | Separasi untuk audit trail |
-| 6 | `execution/paper_executor.py:533`, `bitget_executor.py:611` | Add `progress_stop` ke full-close list | Progress stop bisa close posisi |
-| 7 | `main.py:1563-1565`, `notify/telegram.py`, `notify/pnl_card.py` | progress_stop mappings | Progress stop tampil di log & card |
-| 8 | `notify/telegram.py` | Signal card: Score dihapus → `💎 Tier {gate_tier}` | User-friendly, tidak misleading |
-| 9 | `core/db.py` | `signals_history` simpan `tier` bukan `score` | Query langsung bisa filter tier |
-| 10 | `models/schemas.py` | TradeSignal: `v10_tier`, `v10_setup` fields | Signal carry metadata gate |
-| 11 | `execution/*.py` | `entry_tier` di Position + trade_data | Tier tercatat di trade history |
-| 12 | `main.py`, `scoring_engine.py`, `telegram.py` | Log lines: `score=` → `tier=` | Log jelas pakai tier |
+| 4 | `engine/gate_system.py:248-251` | Tier S/A/B: OB trend-aligned = **S**, liquidity context = A, basic = B | Entry quality tier |
+| 5 | `risk/risk_manager.py:1461` | Progress stop action `progress_stop` instead of `time_exit` | Separasi audit trail |
+| 6 | `execution/*.py` | Add `progress_stop` ke full-close list | Progress stop bisa close posisi |
+| 7 | `main.py`, `notify/*.py` | progress_stop mappings + card | Progress stop tampil di log & card |
+| 8 | `notify/telegram.py` | Signal card: Score → `💎 Tier {gate_tier}` | User-friendly |
+| 9 | `core/db.py` | `signals_history` simpan `tier` bukan `score` | Filter by tier |
+| 10 | `models/schemas.py` | TradeSignal: `v10_tier`, `v10_setup` | Signal carry gate metadata |
 
-### A.8 What's Next (Audit #22)
+### A.2 Perubahan Fase 2.1 (7 Juni Sore)
 
-1. **Deploy fix 1-12 ke Railway**
-2. **Verifikasi di logs:** `[1H-REGIME] ZEC: TRENDING_UP` saat uptrend dengan dip (bukan CHOPPY lagi)
-3. **Progress stop muncul** di exit breakdown: expected ≥10% dari total exit
-4. **Trailing fire rate naik** dari 2.3% — target ≥10%
-5. **Score tidak dipakai lagi** — verifikasi semua display & log pakai Tier
-6. **Tier vs PnL correlation:** sampel ≥40 trade → hitung PF per tier (S/A/B)
-7. **Score death zone** (12-17, WR 33.3%, -$13.91) sudah irrelevant karena score dihapus
+| # | File | Change | Dampak |
+|---|------|--------|--------|
+| **P1** | `engine/gate_system.py` | **Scalp regime:** G1 ganti 1h EMA8/21 → scalp EMA5/13 dari 1m closes. Counter-trend TIDAK di-block, hanya size reduction: 0.75× (CT scalp), 0.55× (double CT), 0.90× (CHOPPY) | Scalping 15m pakai trend 5-13m, bukan 1h. Counter-trend fade valid |
+| **P3** | `engine/gate_system.py` | **Diversity scoped:** key `{asset}` → `{asset}_{side}_{setup}`. Penalty turun 0.6→0.75. Hanya penalize entry SAMA arah+setup | LONG sweep lalu LONG breakout 60s = no penalty (setup beda) |
+| **CVD** | `engine/gate_system.py` | **CVD momentum rewrite:** EWMA baseline + linear regression slope. History 8→15 points. Bobot: slope 70% / deviation 30%. Threshold -0.08→-0.06 | Deteksi peak-decline: old +0.079 (ALLOW) → new -0.063 (REJECT) |
+| **RANK** | `main.py:1064-1078` | **Signal ranking multi-dimensi:** `(tier, setup, -OB, -score)`. Setup priority: sweep(0) > breakout(1) > pullback(2) > momentum(3) | Grade-S sweep didahulukan dari grade-B momentum |
+| **S-GRADE** | `engine/gate_system.py` | **Grade S pakai scalp_regime:** OB trend-aligned cek `scalp_regime` (5-13m), bukan `htf_regime` (1h). Jauh lebih sering terjadi | Konsisten dengan P1, timeframe sinkron |
+| **OB-ADAPT** | `engine/gate_system.py` | **OB threshold per aset:** track median `|ob_dir|` 100 scan. Threshold = max(4, min(24, median×2)). BTC butuh ~22, ZEC butuh ~6, fallback 12 | Adaptif ke depth orderbook per aset |
+| **SCHEMA** | `models/schemas.py` | TradeSignal tambah `gate_ob_dir`, `gate_net_move`, `gate_cvd_dir` | Data ranking tersimpan di signal |
+
+### A.3 Metrik PRE vs POST Fase 2.1
+
+| Metrik | PRE (44 trade, old v10) | Target POST (F2.1) | Perubahan |
+|--------|------------------------|-------------------|-----------|
+| Profit Factor | **0.78** | **≥ 1.0** | CVD fix deteksi exhaustion + Grade S lebih sering |
+| Win Rate | 47.7% | **≥ 45%** | Anti-chase tetap, displacement proof |
+| time_exit % | 66% | **< 50%** | Progress stop (dari F1) + CVD fix cegah bad entry |
+| Trailing fire | 2.3% | **≥ 10%** | Grade S lebih sering → lebih banyak TP1 reach |
+| SHORT ratio | 34% (15/44) | **≥ 25%** | Scalp regime tidak block SHORT di CHOPPY |
+| Counter-trend trade | 0 | **wajar <15%** | G1 bukan hard block, fade entry boleh |
+| Grade S trades | ~0% (dulu jarang) | **≥ 10%** | OB threshold adaptif + scalp regime alignment |
+| Volume/hari | ~44 | **≥ 30** | Gate tidak over-block |
+
+### A.4 Exit Breakdown (PRE — baseline)
+
+| Exit | % Total | PnL | Notes |
+|------|---------|-----|-------|
+| time_exit | 66% | -$5.81 | Masalah utama — CVD fix + scalp regime expected turunkan |
+| stop_loss | 5% | -$6.60 | ZEC/TON — regime fix seharusnya cegah |
+| trailing_stop | 2.3% | +$0.78 | Akan naik dengan Grade S lebih banyak |
+| tp1/tp2 | sisanya | — | — |
+
+### A.5 Verifikasi Deploy Fase 2.1
+
+Cek Railway logs — marker WAJIB muncul:
+- ✅ `[P1] G1: ...` — scalp regime active (bukan long_against_downtrend)
+- ✅ `g1_ct=0.75` / `g1_dbl=0.55` / `g1_choppy=0.90` di log size_mult
+- ✅ `scalp=TRENDING_UP` di gate PASS log (bukan cuma htf=)
+- ✅ `RANKED` — signal sorted by tier+setup+OB+score
+- ✅ Grade S `tier=S` muncul di log
+- ❌ TIDAK ada `long_against_downtrend` / `short_against_uptrend` (G1 lama)
+
+### A.6 What's Next — Audit Fase 2.1
+
+**Urutan prioritas audit (setelah deploy + kumpul ≥40 trade):**
+
+1. **CVD exhaustion rate:** hitung % reject vs total gate call. Expected ~10-15% sinyal kena CVD exhaustion reject (dulu false positive karena old method). Bandingkan dengan data PRE.
+2. **Grade S vs Grade A/B PnL:** kumpulkan sampel. Target: Grade S WR ≥45%, PF ≥1.0. Grade B WR ≥35%.
+3. **Setup WR breakdown:** apakah sweep benar-benar outperform momentum? Data menentukan.
+4. **OB threshold adaptif:** cek distribusi threshold per aset. Apakah BTC dan ZEC punya threshold yang proporsional dengan depth real?
+5. **Diversity penalty count:** hitung berapa kali diversity multiplier < 1.0. Apakah terlalu sering atau jarang?
+6. **Signal ranking efficacy:** apakah top-3 ranked signals outperform bottom-3? Cek PnL per rank position.
+7. **Scalp regime vs outcome:** apakah counter-trend scalp (G1=0.75) benar-benar rugi? Atau malah profit karena fade strategy valid?
+8. **Time exit turun:** dari 66% ke target <50%. Hitung ulang setelah F2.1.
+9. **Trailing fire rate:** dari 2.3% ke target ≥10%.
+
+**Red flag spesifik Fase 2.1:**
+- **Volume drop >50%** → G1 menjadi terlalu longgar (sinyal jelek lolos)? Atau justru terlalu ketat?
+- **SHORT ratio <15%** → scalp regime masih bias LONG? Cek distribusi scalp_regime.
+- **Grade S = 0** → OB threshold terlalu tinggi (cek median per aset) atau scalp regime selalu CHOPPY.
+- **All signals same rank** → ranking dimensi tidak cukup diskriminatif.
+
+### A.7 Known Issues (belum fix)
+
+- **Max hold masih 25-35 menit** di risk_manager (score-driven hold). Harusnya 15 menit flat.
+- **Setup classifier masih dekoratif** — label tidak pengaruhi size atau exit. Sweep, breakout, pullback, momentum diperlakukan sama.
+- **Dead code:** liquidation analyzer (0% fire rate), AI Intelligence (r=-0.101 inverse). Masih jalan tapi tidak dipakai.
+- **ATR minimum gate disabled** — tidak ada proteksi untuk aset dengan ATR terlalu rendah.
 
 ---
 
