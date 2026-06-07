@@ -193,6 +193,8 @@ Toggle granular via env (kalau diimplement) atau code flag:
 | **S-GRADE** | `engine/gate_system.py` | **Grade S pakai scalp_regime:** OB trend-aligned cek `scalp_regime` (5-13m), bukan `htf_regime` (1h). Jauh lebih sering terjadi | Konsisten dengan P1, timeframe sinkron |
 | **OB-ADAPT** | `engine/gate_system.py` | **OB threshold per aset:** track median `|ob_dir|` 100 scan. Threshold = max(4, min(24, median×2)). BTC butuh ~22, ZEC butuh ~6, fallback 12 | Adaptif ke depth orderbook per aset |
 | **SCHEMA** | `models/schemas.py` | TradeSignal tambah `gate_ob_dir`, `gate_net_move`, `gate_cvd_dir` | Data ranking tersimpan di signal |
+| **OB-CLUSTER** | `engine/scoring_engine.py:578-625` | **OB depth clustering:** cluster bid/ask 0.2% step, detect level dengan volume >1.5× avg. Pass ke gate sebagai `ob_levels` | Support/resistance dari orderbook depth, bukan cuma OB dir |
+| **MARGIN-ORDER** | `risk/risk_manager.py:398-420` | **Hard margin cap 15% dipindah SEBELUM `size_mult`:** cap diterapkan dulu, baru tier A/B ×1.0/×0.6 | Tier A vs B sekarang beneran beda size finalnya |
 
 ### A.3 Metrik PRE vs POST Fase 2.1
 
