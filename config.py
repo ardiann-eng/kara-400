@@ -384,7 +384,7 @@ class ScalperConfig:
     # 0.5×SL = TP1 at 0.40-0.50% → achievable in window.
     # Masalah BUKAN TP1 level — masalah = pre-TP1 trail yang rusak (sudah di-disable).
     # Post-TP1 trail tetap fire via Rule D (ATR-based, the REAL edge).
-    partial_tp1_at_sl_multiple: float = 0.50   # keep (achievable in scalper window)
+    partial_tp1_at_sl_multiple: float = 0.35   # [FIX 2026-06-07] 0.50→0.35: TP1 lebih dekat, trail lebih sering aktif
     partial_tp2_at_sl_multiple: float = 1.0    # unchanged
     partial_tp3_trail_at: float = 1.3          # unchanged
     breakeven_trigger_at_sl_multiple: float = 0.5
