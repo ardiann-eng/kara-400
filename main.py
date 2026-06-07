@@ -1609,12 +1609,12 @@ class KaraBot:
                         subtext = "<i>Profit dikunci sebelum harga berbalik.</i>"
                         exit_detail = ""
                     elif a.get("action") == "momentum_death":
-                        # [AUDIT #17 FIX] Was falling into the time_exit `else` branch →
-                        # momentum_death exits were MISLABELED as "Time Exit" in Telegram
-                        # (user never saw "Momentum Death" despite it firing 10×/audit).
-                        # DB `reason` was always correct; only the chat label was wrong.
                         header  = f"💀 <b>Momentum Death  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
                         subtext = f"<i>Harga flat &lt;0.05% dalam {hold_min}m — tidak ada momentum, cut minimal.</i>"
+                        exit_detail = ""
+                    elif a.get("action") == "progress_stop":
+                        header  = f"⏳ <b>Progress Stop  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
+                        subtext = f"<i>Progress &lt;0.5R dalam {hold_min} menit → thesis lemah, cut sebelum rugi penuh~</i>"
                         exit_detail = ""
                     else:  # time_exit
                         header  = f"⏱ <b>Time Exit  •  {pos.asset} {pos.side.value.upper()} {lev}x</b>"
