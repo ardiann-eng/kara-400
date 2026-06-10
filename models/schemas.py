@@ -143,7 +143,7 @@ class ScoreBreakdown(BaseModel):
     final_score:           int = 0
 
     # Per-sub-component scores (OB, EMA, RSI, CVD, FUND, LIQ, MTF)
-    components:            Dict[str, int] = Field(default_factory=dict)
+    components:            Dict[str, Any] = Field(default_factory=dict)
 
     # Momentum gate result
     momentum_gate_passed:  Optional[bool] = None
