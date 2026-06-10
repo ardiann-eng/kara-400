@@ -1085,8 +1085,7 @@ class KaraBot:
                     f"[RANKED] {len(ranked_signals)} signals. "
                     f"Top: [{_top_info}]"
                 )
-                for sig in ranked_signals:
-                    await self._handle_signals({"scalper": sig})
+                await asyncio.gather(*[self._handle_signals({"scalper": sig}) for sig in ranked_signals])
 
             scan_elapsed = time.monotonic() - scan_start
 

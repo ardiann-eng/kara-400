@@ -433,7 +433,7 @@ class ExecutionConfig:
     market_allowed_for_short_momentum: bool = True
     market_max_spread_bps: float = 4.0
     market_max_chase_pct: float = 0.0030
-    min_tp1_to_cost_multiple: float = 3.0
+    min_tp1_to_cost_multiple: float = 1.5
     default_roundtrip_cost_bps: float = 7.0
 
     # Limit placement / trigger tolerance

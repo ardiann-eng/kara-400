@@ -313,7 +313,7 @@ class ExecutionEngine:
         return intent
 
     def _cost_is_bad(self, signal: TradeSignal, ctx: Dict[str, Any], intent: ExecutionIntent) -> bool:
-        entry = float(ctx["mark"] or signal.entry_price)
+        entry = float(signal.entry_price) if signal.entry_price and signal.entry_price > 0 else float(ctx["mark"] or 0)
         tp1_dist_bps = abs(float(signal.tp1) - entry) / max(entry, 1e-9) * 10000.0
         cost_bps = self._estimated_cost_bps(ctx)
         intent.cost_bps = cost_bps

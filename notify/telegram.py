@@ -79,31 +79,38 @@ Ingat, kita prioritaskan <b>keamanan modal</b> dulu ya!
 """
 
 MARKET_SIGNAL_TEMPLATE = """
-{side_emoji} <b>{asset} {side_text} | {order_label}</b>
-{setup_label} · Tier <b>{gate_tier}</b>
-
-Entry now <code>~${entry}</code>
-No chase <code>{no_chase}</code> · Invalid <code>{invalid}</code>
-
-SL <code>${sl}</code> · TP1 <code>${tp1}</code> · TP2 <code>${tp2}</code>
-Lev <b>{lev}x</b> · RR <b>{rr:.1f}R</b> · Max hold <b>{max_hold}m</b>
-
-<i>Plan: hit fast, take TP1, trail sisanya.</i>
-<i>ID {sig_id}</i>
+{side_emoji} <b>{asset} {side_text}</b> · <b>{order_label}</b>
+━━━━━━━━━━━━━━━━━━━
+Setup    : {setup_label} (Tier {gate_tier})
+Entry    : ~<b>${entry}</b>
+Chase    : {no_chase} · Cancel {invalid}
+━━━━━━━━━━━━━━━━━━━
+SL  <b>${sl}</b>
+TP1 <b>${tp1}</b>
+TP2 <b>${tp2}</b>
+━━━━━━━━━━━━━━━━━━━
+Lev <b>{lev}x</b> · RR <b>{rr:.1f}R</b> · Hold <b>{max_hold}m</b>
+─────────────────────────
+🤖 KARA: hit fast, take TP1.
+   ID: {sig_id}
 """
 
 LIMIT_SIGNAL_TEMPLATE = """
-{side_emoji} <b>{asset} {side_text} | {order_label}</b>
-{setup_label} · Tier <b>{gate_tier}</b>
-
-{limit_verb} <code>${zone_low}-${zone_high}</code>
-Cancel <code>{invalid}</code> · Expire <b>{ttl}s</b>
-
-SL <code>${sl}</code> · TP1 <code>${tp1}</code> · TP2 <code>${tp2}</code>
-Lev <b>{lev}x</b> · RR <b>{rr:.1f}R</b> · Max hold <b>{max_hold}m</b>
-
-<i>Plan: fill only at zone. No fill = no trade.</i>
-<i>ID {sig_id}</i>
+{side_emoji} <b>{asset} {side_text}</b> · <b>{order_label}</b>
+━━━━━━━━━━━━━━━━━━━
+Setup    : {setup_label} (Tier {gate_tier})
+{limit_verb}: <b>${zone_low}</b> – <b>${zone_high}</b>
+Cancel   : {invalid} · ⏱ {ttl}s
+━━━━━━━━━━━━━━━━━━━
+SL  <b>${sl}</b>
+TP1 <b>${tp1}</b>
+TP2 <b>${tp2}</b>
+━━━━━━━━━━━━━━━━━━━
+Lev <b>{lev}x</b> · RR <b>{rr:.1f}R</b> · Hold <b>{max_hold}m</b>
+─────────────────────────
+🤖 KARA: fill only at zone.
+   No fill = no trade.
+   ID: {sig_id}
 """
 
 PYRAMID_TEMPLATE = """
@@ -2570,11 +2577,13 @@ class KaraTelegram:
 
     async def send_execution_cancelled(self, signal: TradeSignal, intent, target_chat_id: str = None):
         """Notify that KARA intentionally skipped a gate-pass signal due execution quality."""
+        order_type = getattr(intent, "order_type", "") or ""
+        if order_type not in ("market", "aggressive_limit", "passive_limit", "limit"):
+            return
+
         side_text = "LONG" if signal.side == Side.LONG else "SHORT"
         ref = getattr(intent, "reference_level", None)
-        actual = getattr(intent, "actual_entry", None)
         ref_txt = f"${format_price(ref)}" if ref else "-"
-        actual_txt = f"${format_price(actual)}" if actual else "-"
         reason = getattr(intent, "cancel_reason", None) or "execution_not_tradeable"
         reason_label = {
             "cost_bad_tp1_lt_3x_cost": "reward terlalu tipis untuk fee/slippage",
@@ -2582,13 +2591,17 @@ class KaraTelegram:
             "execution_not_tradeable": "lokasi entry tidak layak",
         }.get(reason, reason)
         text = (
-            f"🚫 <b>NO TRADE: {signal.asset} {side_text}</b>\n"
-            f"Setup <code>{getattr(signal, 'v10_setup', 'none')}</code> · Tier <b>{getattr(signal, 'v10_tier', 'B')}</b>\n"
-            f"Plan <code>{getattr(intent, 'playbook', '-')}</code> · Trigger <code>{getattr(intent, 'trigger', '-') or '-'}</code>\n\n"
-            f"Alasan: <b>{reason_label}</b>\n"
-            f"Level <code>{ref_txt}</code> · Last <code>{actual_txt}</code> · Wait <code>{getattr(intent, 'wait_sec', 0):.0f}s</code>\n"
-            f"Cost <code>{getattr(intent, 'cost_bps', 0):.1f}bps</code>\n\n"
-            f"<i>Skip disiplin. Tidak ada chase kalau lokasi tidak bayar risk.</i>"
+            f"🚫 <b>{signal.asset} {side_text}</b> · <b>NO TRADE</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"Setup    : {getattr(signal, 'v10_setup', 'none').replace('_', ' ').title()} (Tier {getattr(signal, 'v10_tier', 'B')})\n"
+            f"Reason   : {reason_label}\n"
+            f"Level    : {ref_txt} · Wait {getattr(intent, 'wait_sec', 0):.0f}s\n"
+            f"Cost     : {getattr(intent, 'cost_bps', 0):.1f} bps\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"🤖 KARA: skip disiplin.\n"
+            f"   Tidak ada chase kalau\n"
+            f"   lokasi tidak bayar risk.\n"
+            f"   ID: {signal.signal_id[:8]}"
         )
         keyboard = [[
             InlineKeyboardButton("🔍 Lihat Alasan KARA", callback_data=f"reasons:{signal.signal_id}"),
