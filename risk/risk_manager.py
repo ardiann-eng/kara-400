@@ -56,6 +56,9 @@ class RiskManager:
         self._latest_score:   Dict[str, int] = {}     # asset -> latest score from scanner
         # Per-asset trade tracker: asset -> [unix_ts, ...] of completed trades today
         self._asset_trade_times: Dict[str, List[float]] = {}
+        # Progress-stop feedback: setup key -> [unix_ts, ...], plus cooldown expiry.
+        self._progress_stop_times: Dict[str, List[float]] = {}
+        self._progress_stop_cooldowns: Dict[str, float] = {}
 
         # --- Hydrate from persisted state if exists
         self._load_risk_state()
@@ -70,6 +73,8 @@ class RiskManager:
             "last_reset_day": self._last_reset_day,
             "cooldown_until": self._cooldown_until.isoformat() if self._cooldown_until else None,
             "asset_trade_times": self._asset_trade_times,
+            "progress_stop_times": self._progress_stop_times,
+            "progress_stop_cooldowns": self._progress_stop_cooldowns,
         })
 
     def _load_risk_state(self):
@@ -104,6 +109,24 @@ class RiskManager:
             }
             if self._asset_trade_times:
                 log.debug(f"[REPEAT GUARD] Restored trade times: {list(self._asset_trade_times.keys())}")
+
+            now_ts = time.time()
+            raw_pst = state.get("progress_stop_times", {})
+            self._progress_stop_times = {
+                str(k): [float(ts) for ts in (v or []) if now_ts - float(ts) <= 3600]
+                for k, v in raw_pst.items()
+            }
+            self._progress_stop_times = {k: v for k, v in self._progress_stop_times.items() if v}
+
+            raw_psc = state.get("progress_stop_cooldowns", {})
+            self._progress_stop_cooldowns = {
+                str(k): float(v) for k, v in raw_psc.items()
+                if float(v or 0) > now_ts
+            }
+            if self._progress_stop_cooldowns:
+                log.warning(
+                    f"[PROGRESS-STOP] Restored cooldowns: {list(self._progress_stop_cooldowns.keys())}"
+                )
 
             # Validation: if session_start_balance is 0 but we have a peak, use that as fallback
             # to prevent 'amnesia' during mid-day restarts
@@ -182,6 +205,71 @@ class RiskManager:
         count = len(self._asset_trade_times[key])
         log.debug(f"[REPEAT GUARD] {asset}: trade ke-{count} hari ini dicatat.")
         self._persist_risk_state()   # survive restart
+
+    PROGRESS_STOP_LOOKBACK_SECONDS = 60 * 60
+    PROGRESS_STOP_COOLDOWN_SECONDS = 2 * 60 * 60
+    PROGRESS_STOP_TRIGGER_COUNT = 2
+
+    def _progress_stop_key(self, asset: str, side: str, setup: str) -> str:
+        setup = (setup or "none").strip().lower()
+        side = (side or "").strip().lower()
+        return f"{asset.upper()}_{side}_{setup}"
+
+    def _progress_stop_key_from_signal(self, signal: TradeSignal) -> str:
+        setup = getattr(signal, "v10_setup", "") or ""
+        if not setup:
+            bucket = getattr(signal, "gate_expectancy_bucket", "") or ""
+            parts = bucket.split("_")
+            setup = parts[2] if len(parts) >= 3 else "none"
+        return self._progress_stop_key(signal.asset, signal.side.value, setup)
+
+    def _progress_stop_key_from_position(self, pos: Position) -> str:
+        setup = getattr(pos, "entry_setup", "") or ""
+        if not setup:
+            bucket = getattr(pos, "gate_expectancy_bucket", "") or ""
+            parts = bucket.split("_")
+            setup = parts[2] if len(parts) >= 3 else "none"
+        return self._progress_stop_key(pos.asset, pos.side.value, setup)
+
+    def _check_progress_stop_cooldown(self, signal: TradeSignal) -> Tuple[bool, str]:
+        key = self._progress_stop_key_from_signal(signal)
+        expiry = self._progress_stop_cooldowns.get(key, 0.0)
+        now_ts = time.time()
+        if expiry <= now_ts:
+            if key in self._progress_stop_cooldowns:
+                self._progress_stop_cooldowns.pop(key, None)
+                self._persist_risk_state()
+            return True, ""
+
+        remaining = int(expiry - now_ts)
+        hrs = remaining // 3600
+        mins = (remaining % 3600) // 60
+        return False, (
+            f"Progress-stop cooldown: {key} failed "
+            f"{self.PROGRESS_STOP_TRIGGER_COUNT}x in 60m. Wait {hrs}h {mins}m."
+        )
+
+    def record_progress_stop(self, pos: Position):
+        """Pause an asset/side/setup bucket after repeated progress-stop exits."""
+        key = self._progress_stop_key_from_position(pos)
+        now_ts = time.time()
+        recent = [
+            ts for ts in self._progress_stop_times.get(key, [])
+            if now_ts - ts <= self.PROGRESS_STOP_LOOKBACK_SECONDS
+        ]
+        recent.append(now_ts)
+        self._progress_stop_times[key] = recent
+
+        if len(recent) >= self.PROGRESS_STOP_TRIGGER_COUNT:
+            expiry = now_ts + self.PROGRESS_STOP_COOLDOWN_SECONDS
+            self._progress_stop_cooldowns[key] = expiry
+            log.warning(
+                f"[PROGRESS-STOP] {key}: {len(recent)} exits in 60m -> "
+                f"cooldown until {datetime.fromtimestamp(expiry, timezone.utc).isoformat()}"
+            )
+        else:
+            log.info(f"[PROGRESS-STOP] {key}: recorded {len(recent)}/2 in 60m")
+        self._persist_risk_state()
 
     # ──────────────────────────────────────────
     # DAILY RESET
@@ -283,6 +371,10 @@ class RiskManager:
         asset_ok, asset_reason = self._check_asset_repeat(signal.asset)
         if not asset_ok:
             return False, asset_reason
+
+        progress_ok, progress_reason = self._check_progress_stop_cooldown(signal)
+        if not progress_ok:
+            return False, progress_reason
 
         # ── Daily loss limit ───────────────────────────────────────────
         daily_pnl_pct = self._daily_pnl / max(account.total_equity, 1)

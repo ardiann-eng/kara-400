@@ -418,6 +418,56 @@ class ScalperConfig:
 
 SCALPER = ScalperConfig()
 
+
+@dataclass
+class ExecutionConfig:
+    """
+    Hybrid execution layer between v10 gate pass and actual order placement.
+    Gate pass becomes an execution intent first; the bot enters only when
+    setup-specific location/trigger/cost is valid.
+    """
+    enabled: bool = os.getenv("KARA_EXECUTION_ENGINE", "true").lower() == "true"
+    shadow_mode: bool = os.getenv("KARA_EXECUTION_SHADOW", "false").lower() == "true"
+
+    # Cost discipline for 10-20m futures scalps
+    market_allowed_for_short_momentum: bool = True
+    market_max_spread_bps: float = 4.0
+    market_max_chase_pct: float = 0.0030
+    min_tp1_to_cost_multiple: float = 3.0
+    default_roundtrip_cost_bps: float = 7.0
+
+    # Limit placement / trigger tolerance
+    aggressive_limit_offset_bps: float = 2.0
+    passive_limit_offset_bps: float = 5.0
+    retest_tolerance_pct: float = 0.0015
+    reclaim_buffer_pct: float = 0.0005
+
+    # TTLs intentionally moderate: not too tight, not stale
+    short_momentum_ttl_sec: int = 30
+    retest_ttl_sec: int = 60
+    pullback_ttl_sec: int = 90
+    long_reclaim_ttl_sec: int = 120
+    high_rv_ttl_sec: int = 120
+    poll_interval_sec: float = 5.0
+
+    # Playbook-specific controls
+    long_max_chase_pct: float = 0.0015
+    pullback_max_away_pct: float = 0.0025
+    high_rv_market_entry_allowed: bool = False
+    high_rv_threshold: float = 0.06
+    require_reclaim_for_countertrend: bool = True
+
+    # Candles / microstructure
+    candle_interval: str = "1m"
+    candle_limit: int = 40
+    ema_fast: int = 13
+    ema_slow: int = 21
+    recent_break_lookback: int = 3
+    swing_lookback: int = 20
+
+
+EXECUTION = ExecutionConfig()
+
 # ──────────────────────────────────────────────
 # LIVE MODE RISK OVERRIDE
 # Berlaku HANYA saat TRADE_MODE=live. Paper mode pakai nilai di atas (longgar).

@@ -78,21 +78,32 @@ Ingat, kita prioritaskan <b>keamanan modal</b> dulu ya!
 <i>Mode: {mode} | Eksekusi: {exec_mode}</i>
 """
 
-SIGNAL_TEMPLATE = """
-{side_emoji} <b>SINYAL {asset} - {strength}</b>
---------------------
-💎 Tier <b>{gate_tier}</b>
-Arah: <b>{side_text}</b>
-Regime: <code>{regime}</code>
---------------------
- Entry: <code>${entry}</code>
-🛑 Stop Loss: <code>${sl}</code> ({sl_pct:.1f}%)
- TP1: <code>${tp1}</code> (+{tp1_pct:.1f}%)
- TP2: <code>${tp2}</code> (+{tp2_pct:.1f}%)
-⚡ Leverage: <b>{lev}x isolated</b>
-📐 R:R = <b>{rr:.1f}x</b>
---------------------
-<i>ID: {sig_id}</i>
+MARKET_SIGNAL_TEMPLATE = """
+{side_emoji} <b>{asset} {side_text} | {order_label}</b>
+{setup_label} · Tier <b>{gate_tier}</b>
+
+Entry now <code>~${entry}</code>
+No chase <code>{no_chase}</code> · Invalid <code>{invalid}</code>
+
+SL <code>${sl}</code> · TP1 <code>${tp1}</code> · TP2 <code>${tp2}</code>
+Lev <b>{lev}x</b> · RR <b>{rr:.1f}R</b> · Max hold <b>{max_hold}m</b>
+
+<i>Plan: hit fast, take TP1, trail sisanya.</i>
+<i>ID {sig_id}</i>
+"""
+
+LIMIT_SIGNAL_TEMPLATE = """
+{side_emoji} <b>{asset} {side_text} | {order_label}</b>
+{setup_label} · Tier <b>{gate_tier}</b>
+
+{limit_verb} <code>${zone_low}-${zone_high}</code>
+Cancel <code>{invalid}</code> · Expire <b>{ttl}s</b>
+
+SL <code>${sl}</code> · TP1 <code>${tp1}</code> · TP2 <code>${tp2}</code>
+Lev <b>{lev}x</b> · RR <b>{rr:.1f}R</b> · Max hold <b>{max_hold}m</b>
+
+<i>Plan: fill only at zone. No fill = no trade.</i>
+<i>ID {sig_id}</i>
 """
 
 PYRAMID_TEMPLATE = """
@@ -190,9 +201,26 @@ Akun Bybit kamu sudah aktif untuk eksekusi otomatis KARA.
 <b>Selanjutnya:</b>
 • Ketik /status untuk cek saldo & posisi
 • Ketik /settings untuk atur leverage & risk
-• Ketik /bitget untuk info koneksi Bitget
+• Ketik /exchange untuk info koneksi Bybit
 
-<i>KARA sekarang berjalan dalam <b>LIVE MODE — Bitget Execution</b>. Happy trading! 💜</i>
+<i>KARA sekarang berjalan dalam <b>LIVE MODE — Bybit Execution</b>. Happy trading! 💜</i>
+"""
+
+BITGET_CONNECTED_TEMPLATE = """
+✅ <b>Bitget Terhubung!</b> 🎉
+
+Akun Bitget kamu sudah aktif untuk eksekusi otomatis KARA.
+
+💰 <b>Saldo USDT</b>: <code>${balance}</code>
+📊 <b>Posisi terbuka</b>: <code>{positions}</code>
+⚡ <b>Max Leverage</b>: <code>{leverage}x</code> (bisa diubah dengan /setbitgetlev)
+
+<b>Selanjutnya:</b>
+• Ketik /exchange untuk cek koneksi exchange
+• Ketik /status untuk cek saldo & posisi
+• Ketik /settings untuk atur leverage & risk
+
+<i>KARA sekarang berjalan dalam <b>LIVE MODE — Bitget Execution</b>.</i>
 """
 
 AGENT_WALLET_CREATED_TEMPLATE = """
@@ -369,22 +397,22 @@ class KaraTelegram:
                 allow_reentry=True
             )
 
-            # Bitget leverage ConversationHandler
-            bitget_lev_conv = ConversationHandler(
-                entry_points=[CommandHandler("setbitgetlev", self.cmd_set_bitget_leverage_start)],
-                states={
-                    WAITING_BITGET_LEVERAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bitget_leverage)],
-                },
-                fallbacks=[CommandHandler("cancel", self.cmd_cancel)],
-                per_user=True,
-                allow_reentry=True,
-            )
+            bitget_lev_conv = None
+            if config.EXECUTION_EXCHANGE == "bitget":
+                bitget_lev_conv = ConversationHandler(
+                    entry_points=[CommandHandler("setbitgetlev", self.cmd_set_bitget_leverage_start)],
+                    states={
+                        WAITING_BITGET_LEVERAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bitget_leverage)],
+                    },
+                    fallbacks=[CommandHandler("cancel", self.cmd_cancel)],
+                    per_user=True,
+                    allow_reentry=True,
+                )
 
             handlers = [
                 access_conv,
                 settings_conv,
                 live_conv,
-                bitget_lev_conv,
                 CommandHandler("help",     self.cmd_help),
                 CommandHandler("status",   self.cmd_status),
                 CommandHandler("pos",      self.cmd_positions),
@@ -410,6 +438,8 @@ class KaraTelegram:
 
                 CallbackQueryHandler(self.on_callback),
             ]
+            if bitget_lev_conv is not None:
+                handlers.insert(3, bitget_lev_conv)
             for h in handlers:
                 self._app.add_handler(h)
 
@@ -432,6 +462,7 @@ class KaraTelegram:
                         BotCommand("signal",   "Lihat sinyal trading terbaru"),
                         BotCommand("journal",  "Statistik & performa trading"),
                         BotCommand("live",     "Setup Live Mode (Bybit API)"),
+                        BotCommand("exchange", "Status koneksi Bybit"),
                         BotCommand("settings", "Atur leverage, risk & threshold"),
                         BotCommand("help",     "Daftar instruksi lengkap"),
                         BotCommand("export",   "Export riwayat trade ke Excel"),
@@ -808,6 +839,51 @@ class KaraTelegram:
         if not user:
             return
 
+        if config.EXECUTION_EXCHANGE == "bybit":
+            api_key = user.bitget_api_key or config.BYBIT_API_KEY
+            api_secret = user.bitget_api_secret or config.BYBIT_SECRET_KEY
+            if not (api_key and api_secret):
+                await update.effective_message.reply_html(
+                    "🔌 <b>Bybit belum terhubung</b>\n\n"
+                    "Ketik /live untuk setup koneksi Bybit.\n\n"
+                    f"<i>Status execution exchange: <b>{config.EXECUTION_EXCHANGE}</b></i>"
+                )
+                return
+
+            bybit_client = getattr(self, "bybit_client", None)
+            if not bybit_client:
+                await update.effective_message.reply_html(
+                    "⚠️ Bybit client belum aktif di server. Coba lagi nanti."
+                )
+                return
+
+            try:
+                user_bybit = bybit_client.with_credentials(api_key, api_secret)
+                acct = await user_bybit.get_account()
+                positions = await user_bybit.get_open_positions()
+                equity = float(acct.get("totalEquity") or 0.0)
+                available = float(acct.get("totalAvailableBalance") or acct.get("availableBalance") or 0.0)
+                pos_count = len(positions)
+                cfg = user.config
+                lev_cap = cfg.scl_max_leverage if cfg.trading_mode == "scalper" else cfg.std_max_leverage
+
+                await update.effective_message.reply_html(
+                    f"✅ <b>Bybit Status</b>\n\n"
+                    f"🔗 <b>Connected</b> sebagai API key <code>{api_key[:6]}…{api_key[-4:]}</code>\n\n"
+                    f"💰 <b>Equity</b>: <code>${equity:.2f}</code>\n"
+                    f"💵 <b>Available</b>: <code>${available:.2f}</code>\n"
+                    f"📊 <b>Open Positions</b>: <code>{pos_count}</code>\n"
+                    f"⚡ <b>Max Leverage</b>: <code>{lev_cap}x</code> (ubah di /settings atau /setleverage)\n\n"
+                    f"<i>Execution mode: <b>{config.EXECUTION_EXCHANGE}</b> | "
+                    f"Bot mode: <b>{user.config.bot_mode.value}</b></i>"
+                )
+            except Exception as e:
+                await update.effective_message.reply_html(
+                    f"❌ <b>Gagal cek Bybit</b>: <code>{html.escape(str(e))}</code>\n\n"
+                    "Coba ketik /live lagi untuk reconnect."
+                )
+            return
+
         if not (user.bitget_api_key and user.bitget_authorized):
             await update.effective_message.reply_html(
                 "🔌 <b>Bitget belum terhubung</b>\n\n"
@@ -899,6 +975,9 @@ class KaraTelegram:
         User mengirim "API_KEY:SECRET:PASSPHRASE" — verify dan simpan terenkripsi.
         """
         if not self._is_authorized(update): return ConversationHandler.END
+
+        if config.EXECUTION_EXCHANGE == "bybit":
+            return await self._handle_bybit_creds(update, ctx)
 
         chat_id = str(update.effective_chat.id)
         text = (update.effective_message.text or "").strip()
@@ -1000,6 +1079,98 @@ class KaraTelegram:
             await self._app.bot.send_message(
                 chat_id=chat_id,
                 text=f"❌ Verifikasi error: <code>{html.escape(str(e))}</code>\n\n"
+                     "Kirim ulang credentials, atau /cancel.",
+                parse_mode=ParseMode.HTML,
+            )
+            return WAITING_BITGET_CREDS
+
+    async def _handle_bybit_creds(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Verify and store Bybit API credentials from /live setup."""
+        chat_id = str(update.effective_chat.id)
+        text = (update.effective_message.text or "").strip()
+        parts = text.split(":")
+        if len(parts) < 2:
+            await update.effective_message.reply_html(
+                "❌ <b>Format salah.</b>\n\n"
+                "Kirim dalam format <code>API_KEY:SECRET_KEY</code> (dipisah titik dua).\n\n"
+                "Ketik /cancel kalau mau batal."
+            )
+            return WAITING_BITGET_CREDS
+
+        api_key = parts[0].strip()
+        api_secret = ":".join(parts[1:]).strip()
+        if not (api_key and api_secret):
+            await update.effective_message.reply_html(
+                "❌ Ada bagian yang kosong. Cek lagi API Key / Secret Key kamu."
+            )
+            return WAITING_BITGET_CREDS
+
+        bybit_client = getattr(self, "bybit_client", None)
+        if not bybit_client:
+            await update.effective_message.reply_html(
+                "⚠️ Bybit belum aktif di server. Hubungi admin."
+            )
+            return ConversationHandler.END
+
+        try:
+            await update.effective_message.delete()
+        except Exception:
+            pass
+
+        await update.effective_chat.send_action("typing")
+
+        try:
+            test_client = bybit_client.with_credentials(api_key, api_secret)
+            ok, err = await test_client.verify_credentials()
+            if not ok:
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ <b>Verifikasi Bybit gagal</b>: {html.escape(err)}\n\n"
+                         "Cek API Key / Secret dan permission Read-Write Contract.\n"
+                         "Kirim ulang credentials, atau /cancel.",
+                    parse_mode=ParseMode.HTML,
+                )
+                return WAITING_BITGET_CREDS
+
+            user = user_db.get_user(chat_id)
+            user.bitget_api_key = api_key
+            user.bitget_api_secret = api_secret
+            user.bitget_passphrase = None
+            user.bitget_authorized = True
+            user.config.bot_mode = BotMode.LIVE
+            user_db.update_user(user)
+
+            try:
+                acct = await test_client.get_account()
+                balance = float(acct.get("totalEquity") or 0.0)
+                positions = await test_client.get_open_positions()
+                pos_count = len(positions)
+            except Exception:
+                balance = 0.0
+                pos_count = 0
+
+            cfg = user.config
+            lev = cfg.scl_max_leverage if cfg.trading_mode == "scalper" else cfg.std_max_leverage
+
+            if self.bot_app and chat_id in self.bot_app.sessions:
+                del self.bot_app.sessions[chat_id]
+                await self.bot_app.get_session(chat_id)
+
+            await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=BYBIT_CONNECTED_TEMPLATE.format(
+                    balance=f"{balance:.2f}",
+                    positions=pos_count,
+                    leverage=lev,
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return ConversationHandler.END
+        except Exception as e:
+            log.error(f"Bybit creds verify failed for {chat_id}: {e}")
+            await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Verifikasi Bybit error: <code>{html.escape(str(e))}</code>\n\n"
                      "Kirim ulang credentials, atau /cancel.",
                 parse_mode=ParseMode.HTML,
             )
@@ -1148,11 +1319,10 @@ class KaraTelegram:
             "• /settings — Atur threshold & leverage pribadi\n"
             "• /live     — Aktivasi Live Mode (Risiko Nyata)\n"
             "• /paper    — Kembali ke Paper Mode & Reset saldo\n\n"
-            "🔌 <b>Bitget Execution</b>\n"
-            "• /bitget       — Status koneksi Bitget (saldo, posisi, leverage)\n"
-            "• /bitgettut    — Tutorial buat API Key Bitget (step-by-step)\n"
-            "• /setbitgetlev — Atur max leverage khusus Bitget\n"
-            "• /bitgetreset  — Hapus credentials Bitget (paksa setup ulang)\n\n"
+            "🔌 <b>Bybit Execution</b>\n"
+            "• /exchange    — Status koneksi Bybit (saldo, posisi, leverage)\n"
+            "• /live        — Setup / reconnect API Key Bybit\n"
+            "• /setleverage — Atur max leverage dari trading mode aktif\n\n"
             "📊 <b>Informasi Portofolio</b>\n"
             "• /status   — Status bot, ekuitas, dan float\n"
             "• /pos      — Lihat daftar koin yang sedang jalan\n"
@@ -2302,24 +2472,74 @@ class KaraTelegram:
         regime_label = _regime_labels.get(regime_raw.lower(), f"⚖️ {regime_raw.title()}")
 
         gate_size = getattr(signal, 'size_mult', 1.0)
-        text = SIGNAL_TEMPLATE.format(
+        exec_order = (getattr(signal, 'execution_order_type', 'market') or 'market').lower()
+        exec_playbook = getattr(signal, 'execution_playbook', 'none') or 'none'
+        setup_raw = getattr(signal, 'v10_setup', 'none') or 'none'
+        setup_label_map = {
+            "short_momentum": "Fresh breakdown",
+            "short_momentum_retest": "Wait retest",
+            "pullback_limit": "Pullback only",
+            "long_reclaim": "Reclaim only",
+            "high_rv_retest": "High RV, wait price",
+        }
+        setup_label = setup_label_map.get(exec_playbook, setup_raw.replace("_", " ").title())
+
+        entry_px = float(signal.entry_price or 0.0)
+        invalid_px = (
+            getattr(signal, 'execution_invalidation_level', None)
+            or signal.stop_loss
+            or entry_px
+        )
+        chase_pct = float(getattr(config.EXECUTION, "market_max_chase_pct", 0.003) or 0.003)
+        if signal.side == Side.LONG:
+            no_chase_px = entry_px * (1 + chase_pct)
+            no_chase_txt = f"> ${format_price(no_chase_px)}"
+            invalid_txt = f"< ${format_price(invalid_px)}"
+            limit_verb = "Buy zone"
+        else:
+            no_chase_px = entry_px * (1 - chase_pct)
+            no_chase_txt = f"< ${format_price(no_chase_px)}"
+            invalid_txt = f"> ${format_price(invalid_px)}"
+            limit_verb = "Sell zone"
+
+        zone_mid = (
+            getattr(signal, 'execution_intended_entry', None)
+            or getattr(signal, 'execution_reference_level', None)
+            or entry_px
+        )
+        zone_pad = max(
+            float(getattr(config.EXECUTION, "retest_tolerance_pct", 0.0015) or 0.0015),
+            float(getattr(config.EXECUTION, "passive_limit_offset_bps", 5.0) or 5.0) / 10000.0,
+        )
+        zone_low = float(zone_mid) * (1 - zone_pad)
+        zone_high = float(zone_mid) * (1 + zone_pad)
+        ttl = int(getattr(signal, 'execution_ttl_sec', 0) or getattr(config.EXECUTION, "retest_ttl_sec", 90))
+        max_hold = int(
+            float(getattr(config.SCALPER, "max_hold_minutes", 15) or 15)
+            + float(getattr(config.SCALPER, "max_hold_grace_minutes", 5) or 5)
+        )
+        order_label = "MARKET" if exec_order == "market" else ("AGGR LIMIT" if exec_order == "aggressive_limit" else "LIMIT")
+        template = MARKET_SIGNAL_TEMPLATE if exec_order == "market" else LIMIT_SIGNAL_TEMPLATE
+        text = template.format(
             side_emoji=side_emoji,
             asset=signal.asset,
-            strength=signal.strength.value,
-            gate_tier=getattr(signal, 'v10_tier', 'B'),
-            gate_setup=getattr(signal, 'v10_setup', 'none'),
-            gate_size=gate_size,
             side_text=side_text,
-            regime=regime_label,
+            order_label=order_label,
+            setup_label=setup_label,
+            gate_tier=getattr(signal, 'v10_tier', 'B'),
+            no_chase=no_chase_txt,
+            invalid=invalid_txt,
+            limit_verb=limit_verb,
+            zone_low=format_price(min(zone_low, zone_high)),
+            zone_high=format_price(max(zone_low, zone_high)),
+            ttl=ttl,
             entry=format_price(signal.entry_price),
             sl=format_price(signal.stop_loss),
-            sl_pct=abs(signal.stop_loss / signal.entry_price - 1) * 100,
             tp1=format_price(signal.tp1),
-            tp1_pct=abs(signal.tp1 / signal.entry_price - 1) * 100,
             tp2=format_price(signal.tp2),
-            tp2_pct=abs(signal.tp2 / signal.entry_price - 1) * 100,
             lev=signal.suggested_leverage,
             rr=signal.risk_reward_ratio,
+            max_hold=max_hold,
             sig_id=signal.signal_id[:8]
         )
         text += short_warning
@@ -2348,6 +2568,35 @@ class KaraTelegram:
         reply_markup = InlineKeyboardMarkup(keyboard)
         await self.send_text(text, target_chat_id=target_chat_id, reply_markup=reply_markup)
 
+    async def send_execution_cancelled(self, signal: TradeSignal, intent, target_chat_id: str = None):
+        """Notify that KARA intentionally skipped a gate-pass signal due execution quality."""
+        side_text = "LONG" if signal.side == Side.LONG else "SHORT"
+        ref = getattr(intent, "reference_level", None)
+        actual = getattr(intent, "actual_entry", None)
+        ref_txt = f"${format_price(ref)}" if ref else "-"
+        actual_txt = f"${format_price(actual)}" if actual else "-"
+        reason = getattr(intent, "cancel_reason", None) or "execution_not_tradeable"
+        reason_label = {
+            "cost_bad_tp1_lt_3x_cost": "reward terlalu tipis untuk fee/slippage",
+            "no_retest_or_reclaim": "harga tidak memberi retest/reclaim valid",
+            "execution_not_tradeable": "lokasi entry tidak layak",
+        }.get(reason, reason)
+        text = (
+            f"🚫 <b>NO TRADE: {signal.asset} {side_text}</b>\n"
+            f"Setup <code>{getattr(signal, 'v10_setup', 'none')}</code> · Tier <b>{getattr(signal, 'v10_tier', 'B')}</b>\n"
+            f"Plan <code>{getattr(intent, 'playbook', '-')}</code> · Trigger <code>{getattr(intent, 'trigger', '-') or '-'}</code>\n\n"
+            f"Alasan: <b>{reason_label}</b>\n"
+            f"Level <code>{ref_txt}</code> · Last <code>{actual_txt}</code> · Wait <code>{getattr(intent, 'wait_sec', 0):.0f}s</code>\n"
+            f"Cost <code>{getattr(intent, 'cost_bps', 0):.1f}bps</code>\n\n"
+            f"<i>Skip disiplin. Tidak ada chase kalau lokasi tidak bayar risk.</i>"
+        )
+        keyboard = [[
+            InlineKeyboardButton("🔍 Lihat Alasan KARA", callback_data=f"reasons:{signal.signal_id}"),
+            InlineKeyboardButton("📈 Chart", url=f"https://www.bybit-global.com/trade/usdt/{signal.asset}USDT"),
+        ]]
+        self._pending_signals[signal.signal_id] = signal
+        await self.send_text(text, target_chat_id=target_chat_id, reply_markup=InlineKeyboardMarkup(keyboard))
+
     # ──────────────────────────────────────────
     # POSITION EVENT NOTIFICATIONS
     # ──────────────────────────────────────────
@@ -2366,32 +2615,19 @@ class KaraTelegram:
             if risk <= 0 or risk < p.entry_price * 0.001:
                 return 0.0
             return round(min(reward / risk, 20.0), 2)
-        # Determine labels
-        # Use user_db directly for reliable mode labeling in notifications
-        chat_id = target_chat_id or (list(self._authorized_chat_ids)[0] if self._authorized_chat_ids else "")
-        user = user_db.get_user(chat_id)
-        is_scalper = (user.config.trading_mode == "scalper") if user else False
-        mode_text = "Scalping ⚡" if is_scalper else "Standar 🌸"
+        exec_playbook = getattr(signal, "execution_playbook", "none")
+        exec_order = getattr(signal, "execution_order_type", "market")
+        exec_trigger = getattr(signal, "execution_trigger", "") or "-"
+        exec_wait = float(getattr(signal, "execution_wait_sec", 0.0) or 0.0)
         
-        # Style & Narrative
         text = (
-            f"🌸 <b>KARA SYSTEM: Position Executed</b>\n"
-            f"<i>Saya baru saja menganalisis pasar dan berhasil membuka posisi <b>{pos.side.value.upper()}</b> untuk <b><a href='https://www.bybit-global.com/trade/usdt/{pos.asset}USDT'>{pos.asset}</a></b>.</i>\n\n"
-            
-            f"📦 <b>Market Details</b>\n"
-            f"  • Entry   : <code>${format_price(pos.entry_price)}</code>\n"
-            f"  • Margin  : <b>{format_idr(pos.margin_usd)}</b> ({format_usd(pos.margin_usd)})\n"
-            f"  • Leverage: {pos.leverage}x isolated\n"
-            f"  • Mode    : {mode_text}\n\n"
-            
-            f"🛡️ <b>Risk Profile</b>\n"
-            f"  • 🛑 SL   : <code>${format_price(pos.stop_loss)}</code>\n"
-            f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code>\n"
-            f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code>\n"
-            f"  • 📐 R:R Ratio: <b>{_calc_rr(pos):.2f}x</b>\n"
-            f"  • 💎 Tier: <b>{getattr(signal, 'v10_tier', 'B')}</b>\n\n"
-            
-            f"<i>Eksekusi selesai. Memantau market untuk exit terbaik. ✨</i>"
+            f"✅ <b>FILLED: {pos.asset} {pos.side.value.upper()}</b>\n"
+            f"Entry <code>${format_price(pos.entry_price)}</code> · Lev <b>{pos.leverage}x</b> · Margin <b>{format_usd(pos.margin_usd)}</b>\n"
+            f"Exec <code>{exec_playbook}</code> / <code>{exec_order}</code> · Trigger <code>{exec_trigger}</code> ({exec_wait:.0f}s)\n\n"
+            f"SL <code>${format_price(pos.stop_loss)}</code>\n"
+            f"TP1 <code>${format_price(pos.tp1)}</code> · TP2 <code>${format_price(pos.tp2)}</code> · RR <b>{_calc_rr(pos):.2f}R</b>\n"
+            f"Tier <b>{getattr(signal, 'v10_tier', 'B')}</b>\n\n"
+            f"<i>Plan: ambil TP1, geser risk, biarkan sisanya trail. Tidak average down.</i>"
         )
         await self.send_text(text, target_chat_id=target_chat_id)
 
@@ -3379,12 +3615,31 @@ class KaraTelegram:
                 adj_str = f"threshold {htf_adj:+d}" if htf_adj != 0 else "no adj"
                 htf_line = f"\n📊 <b>1H Regime:</b> <code>{htf}</code> ({adj_str})"
 
+            exec_notes = getattr(signal, 'execution_notes', []) or []
+            exec_line = (
+                "\n\n⚙️ <b>Execution Plan:</b>\n"
+                f"• Playbook: <code>{html.escape(str(getattr(signal, 'execution_playbook', 'none')))}</code>\n"
+                f"• Order: <code>{html.escape(str(getattr(signal, 'execution_order_type', 'market')))}</code>\n"
+                f"• Status: <code>{html.escape(str(getattr(signal, 'execution_status', 'ready')))}</code>\n"
+                f"• Trigger: <code>{html.escape(str(getattr(signal, 'execution_trigger', '-') or '-'))}</code>\n"
+                f"• Bucket: <code>{html.escape(str(getattr(signal, 'gate_expectancy_bucket', '-') or '-'))}</code>\n"
+                f"• Ref: <code>{format_price(getattr(signal, 'execution_reference_level', None) or 0)}</code> | "
+                f"Actual: <code>{format_price(getattr(signal, 'execution_actual_entry', None) or signal.entry_price)}</code>\n"
+                f"• Wait: <code>{float(getattr(signal, 'execution_wait_sec', 0.0) or 0.0):.0f}s</code> | "
+                f"Cost: <code>{float(getattr(signal, 'execution_cost_bps', 0.0) or 0.0):.1f} bps</code>"
+            )
+            if getattr(signal, 'execution_cancel_reason', None):
+                exec_line += f"\n• Cancel: <b>{html.escape(str(signal.execution_cancel_reason))}</b>"
+            if exec_notes:
+                exec_line += "\n• Notes: <i>" + html.escape(", ".join(str(x) for x in exec_notes[-3:])) + "</i>"
+
             explanation = (
                 f"<b>{signal.asset} {side_label}</b> — 💎 Tier <b>{getattr(signal, 'v10_tier', 'B')}</b>\n\n"
                 f"{reasons_text}"
                 f"{comp_line}"
                 f"{mom_line}"
                 f"{htf_line}"
+                f"{exec_line}"
                 f"{warnings_text}"
                 f"{short_risk_text}"
             )

@@ -1,256 +1,486 @@
-"""Bybit V5 USDT-M Perpetual Futures Executor."""
+"""Bybit V5 USDT-M perpetual futures executor."""
+
+from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from execution.base_executor import BaseExecutor
-from models.schemas import Position, TradeSignal, AccountState, Side, BotMode, PositionStatus
+from models.schemas import (
+    AccountState,
+    BotMode,
+    ExecutionMode,
+    Position,
+    PositionStatus,
+    Side,
+    TradeSignal,
+)
 from risk.risk_manager import RiskManager
-from utils.helpers import gen_id, utcnow
 from utils.excel_logger import get_excel_logger
+from utils.helpers import gen_id, utcnow
 
-log = logging.getLogger('kara.bybit_exec')
+log = logging.getLogger("kara.bybit_exec")
 
 
 class BybitExecutor(BaseExecutor):
+    """Live executor for Bybit linear USDT perpetuals.
 
-    def __init__(self, chat_id, bybit_client, risk_manager: RiskManager, user_max_leverage: int = 20):
+    ExecutionEngine has already decided whether a signal deserves market,
+    aggressive limit, or passive limit handling. This class turns that intent
+    into actual Bybit orders and refuses stale passive limits instead of
+    silently chasing bad price.
+    """
+
+    PASSIVE_LIMIT_TYPES = {"limit", "passive_limit", "wait_retest", "wait_reclaim"}
+
+    def __init__(
+        self,
+        chat_id: str,
+        bybit_client,
+        risk_manager: RiskManager,
+        user_max_leverage: int = 20,
+    ):
         self.chat_id = chat_id
         self.client = bybit_client
         self.risk = risk_manager
-        self.max_leverage = user_max_leverage
+        self.max_leverage = max(1, int(user_max_leverage or 20))
         self._positions: Dict[str, Position] = {}
         self.excel = get_excel_logger()
 
     @property
     def open_positions(self) -> List[Position]:
-        return list(self._positions.values())
+        return [p for p in self._positions.values() if p.status == PositionStatus.OPEN]
 
     async def get_account_state(self) -> AccountState:
-        info = await self.client.get_account_info()
-        equity = float(info.get("totalEquity", 0))
-        available = float(info.get("availableBalance", 0))
+        try:
+            acct = await self.client.get_account()
+        except Exception as exc:
+            log.error(f"[BYBIT] get_account failed: {exc}")
+            raise RuntimeError(f"Failed to fetch Bybit account: {exc}") from exc
+
+        total_equity = float(acct.get("totalEquity") or 0.0)
+        available = float(
+            acct.get("totalAvailableBalance")
+            or acct.get("availableBalance")
+            or acct.get("availableToWithdraw")
+            or 0.0
+        )
+        unrealized = 0.0
+        wallet_balance = total_equity
+
+        for coin in acct.get("coin", []) or []:
+            if coin.get("coin") == "USDT":
+                wallet_balance = float(coin.get("walletBalance") or wallet_balance or 0.0)
+                unrealized = float(coin.get("unrealisedPnl") or coin.get("unrealizedPnl") or 0.0)
+                if available <= 0:
+                    available = float(coin.get("availableToWithdraw") or coin.get("availableBalance") or 0.0)
+                break
+
+        if total_equity <= 0:
+            total_equity = wallet_balance + unrealized
+        if available <= 0:
+            available = max(total_equity, 0.0)
+
+        try:
+            ex_positions = await self.client.get_open_positions()
+            by_symbol = {p.get("symbol", ""): p for p in ex_positions}
+            for pos in self.open_positions:
+                raw = by_symbol.get(f"{pos.asset}USDT")
+                if raw:
+                    pos.pnl_unrealized = float(raw.get("unrealisedPnl") or raw.get("unrealizedPnl") or 0.0)
+        except Exception:
+            pass
+
+        peak = float(self.risk.status.get("peak_balance") or 0.0)
+        if peak <= 0:
+            peak = total_equity
+            try:
+                self.risk._peak_balance = total_equity
+            except Exception:
+                pass
+        drawdown = (peak - total_equity) / max(peak, 1.0)
+
         return AccountState(
-            equity=equity,
-            available_balance=available,
-            positions=self.open_positions,
+            total_equity=round(total_equity, 2),
+            wallet_balance=round(wallet_balance, 2),
+            available=round(available, 2),
+            used_margin=0.0,
+            unrealized_pnl=round(unrealized, 2),
+            daily_pnl=round(float(self.risk.status.get("daily_pnl") or 0.0), 2),
+            daily_pnl_pct=round(float(self.risk.status.get("daily_pnl") or 0.0) / max(total_equity, 1.0), 4),
+            peak_balance=round(peak, 2),
+            current_drawdown_pct=round(drawdown, 4),
+            positions=list(self.open_positions),
+            mode=BotMode.LIVE,
+            execution_mode=ExecutionMode.SEMI_AUTO,
+            is_paused=bool(self.risk.status.get("paused")),
+            kill_switch_active=bool(self.risk.status.get("kill_switch")),
         )
 
     async def open_position(self, signal: TradeSignal) -> Optional[Position]:
         symbol = f"{signal.asset}USDT"
-        state = await self.get_account_state()
+        account = await self.get_account_state()
 
-        # 1. Pre-trade check
-        if not self.risk.pre_trade_check(state, signal, self.open_positions):
-            log.info(f"[{symbol}] Risk pre-trade check failed")
+        approved, reason = self.risk.pre_trade_check(signal, account, self.open_positions)
+        if not approved:
+            log.warning(f"[BYBIT] {signal.asset}: trade blocked: {reason}")
             return None
 
-        # 2. Position sizing
-        sizing = self.risk.calculate_position_size(state, signal)
-        if not sizing or sizing.get("qty", 0) <= 0:
-            log.warning(f"[{symbol}] Position size zero")
-            return None
+        if signal.suggested_leverage > self.max_leverage:
+            log.info(
+                f"[BYBIT] {signal.asset}: leverage capped "
+                f"{signal.suggested_leverage}x -> {self.max_leverage}x"
+            )
+            signal.suggested_leverage = self.max_leverage
 
-        qty = sizing["qty"]
-        leverage = min(sizing.get("leverage", 10), self.max_leverage)
-        sl_price = sizing.get("sl_price")
-        tp1_price = sizing.get("tp1_price")
-
-        # 3. Set leverage
         try:
-            await self.client.set_leverage(symbol=symbol, leverage=leverage)
-        except Exception as e:
-            log.error(f"[{symbol}] Set leverage failed: {e}")
+            size_usd, contracts, leverage = self.risk.calculate_position_size(signal, account.total_equity)
+        except Exception as exc:
+            log.error(f"[BYBIT] {signal.asset}: sizing failed: {exc}")
             return None
 
-        # 4. Place market order
+        leverage = min(max(1, int(leverage)), self.max_leverage)
+        if size_usd <= 0 or contracts <= 0:
+            log.warning(f"[BYBIT] {signal.asset}: zero size, skip")
+            return None
+
         side_str = "Buy" if signal.side == Side.LONG else "Sell"
+        qty = self._format_qty(contracts)
+        if float(qty) <= 0:
+            log.warning(f"[BYBIT] {signal.asset}: qty rounded to zero, skip")
+            return None
+
+        try:
+            await self.client.set_leverage(
+                symbol=symbol,
+                buy_leverage=leverage,
+                sell_leverage=leverage,
+            )
+        except Exception as exc:
+            code = str(getattr(exc, "code", ""))
+            msg = str(getattr(exc, "msg", exc)).lower()
+            already_set = code in {"110043", "110025"} or "not modified" in msg or "same leverage" in msg
+            if already_set:
+                log.info(f"[BYBIT] {signal.asset}: leverage already set at {leverage}x")
+            else:
+                log.error(f"[BYBIT] {signal.asset}: set leverage failed, abort live entry: {exc}")
+                return None
+
+        order_id, fill_price, fill_path = await self._execute_entry_order(
+            symbol=symbol,
+            side=side_str,
+            qty=qty,
+            signal=signal,
+        )
+        if not order_id or not fill_price:
+            return None
+
+        margin = (float(qty) * fill_price) / max(leverage, 1)
+        pos = Position(
+            position_id=gen_id("POS"),
+            asset=signal.asset,
+            side=signal.side,
+            entry_price=fill_price,
+            size_initial=float(qty),
+            size_current=float(qty),
+            leverage=leverage,
+            margin_usd=margin,
+            stop_loss=signal.stop_loss,
+            tp1=signal.tp1,
+            tp2=signal.tp2,
+            tp3=getattr(signal, "tp3", 0.0),
+            trailing_high=fill_price,
+            trailing_stop_price=0.0,
+            entry_atr=getattr(signal, "entry_atr", 0.0),
+            signal_id=signal.signal_id,
+            trade_mode=getattr(signal, "trade_mode", "scalper"),
+            is_paper=False,
+            entry_score=signal.score,
+            entry_tier=getattr(signal, "v10_tier", "B"),
+            entry_setup=getattr(signal, "v10_setup", "none"),
+            realized_vol=getattr(signal, "realized_vol", 0.02),
+            gate_expectancy_bucket=getattr(signal, "gate_expectancy_bucket", ""),
+            gate_quality_flags=list(getattr(signal, "gate_quality_flags", []) or []),
+            original_entry_price=fill_price,
+            entry_funding_rate=getattr(signal, "funding_rate", 0.0) or 0.0,
+            atr_pct=getattr(signal, "entry_atr", 0.0),
+        )
+        self._positions[pos.position_id] = pos
+
+        await self._place_exchange_tpsl(symbol, pos)
+        await self._place_exchange_trailing_stop(symbol, pos)
+
+        log_data = {
+            "type": "open",
+            "exchange": "bybit",
+            "fill_path": fill_path,
+            "execution_playbook": getattr(signal, "execution_playbook", "none"),
+            "execution_order_type": getattr(signal, "execution_order_type", "market"),
+            "gate_expectancy_bucket": getattr(signal, "gate_expectancy_bucket", ""),
+            "gate_quality_flags": ",".join(getattr(signal, "gate_quality_flags", []) or []),
+            "pos_id": pos.position_id,
+            "asset": signal.asset,
+            "symbol": symbol,
+            "side": signal.side.value,
+            "entry_price": fill_price,
+            "mark_price": signal.entry_price,
+            "contracts": float(qty),
+            "notional": float(qty) * fill_price,
+            "margin": margin,
+            "leverage": leverage,
+            "score": signal.score,
+            "timestamp": utcnow(),
+        }
+        self.excel.log_trade(self.chat_id, log_data)
+        self.risk.record_asset_trade(signal.asset)
+
+        log.info(
+            f"[BYBIT] OPEN {signal.asset} {signal.side.value.upper()} "
+            f"@ {fill_price:.8f} via {fill_path} | qty={qty} | lev={leverage}x | "
+            f"exec={getattr(signal, 'execution_playbook', 'none')}/"
+            f"{getattr(signal, 'execution_order_type', 'market')}"
+        )
+        return pos
+
+    async def _execute_entry_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: str,
+        signal: TradeSignal,
+    ) -> Tuple[Optional[str], Optional[float], str]:
+        exec_type = (getattr(signal, "execution_order_type", "") or "market").lower()
+        playbook = (getattr(signal, "execution_playbook", "") or "").lower()
+
+        if exec_type == "market":
+            return await self._place_and_wait(symbol, side, qty, "Market", "", 6.0, "market")
+
+        limit_price = self._limit_price(signal, exec_type)
+        tif = "IOC" if exec_type == "aggressive_limit" else "PostOnly"
+        wait_s = 4.0 if exec_type == "aggressive_limit" else 8.0
+        order_id, fill_price, path = await self._place_and_wait(
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            order_type="Limit",
+            price=limit_price,
+            wait_s=wait_s,
+            path=exec_type,
+            time_in_force=tif,
+        )
+
+        if fill_price:
+            return order_id, fill_price, path
+
+        if order_id:
+            await self._cancel_best_effort(symbol, order_id)
+
+        allow_market_fallback = exec_type == "aggressive_limit" and playbook == "short_momentum"
+        if allow_market_fallback:
+            log.info(f"[BYBIT] {symbol}: aggressive limit missed, market fallback for short_momentum")
+            return await self._place_and_wait(symbol, side, qty, "Market", "", 6.0, "market_fallback")
+
+        log.info(f"[BYBIT] {symbol}: {exec_type} not filled; no chase for playbook={playbook}")
+        return None, None, f"{exec_type}_miss"
+
+    async def _place_and_wait(
+        self,
+        symbol: str,
+        side: str,
+        qty: str,
+        order_type: str,
+        price: str,
+        wait_s: float,
+        path: str,
+        time_in_force: str = "",
+    ) -> Tuple[Optional[str], Optional[float], str]:
         try:
             order = await self.client.place_order(
                 symbol=symbol,
-                side=side_str,
+                side=side,
                 qty=qty,
-                order_type="Market",
+                order_type=order_type,
+                price=price,
+                time_in_force=time_in_force,
                 position_idx=0,
             )
-        except Exception as e:
-            log.error(f"[{symbol}] Order placement failed: {e}")
-            return None
+        except Exception as exc:
+            log.error(f"[BYBIT] {symbol}: {path} order placement failed: {exc}")
+            return None, None, f"{path}_error"
 
         order_id = order.get("orderId")
         if not order_id:
-            log.error(f"[{symbol}] No orderId returned")
-            return None
+            log.error(f"[BYBIT] {symbol}: no orderId returned for {path}")
+            return None, None, f"{path}_no_order_id"
 
-        # 5. Poll for fill (max 6s)
-        fill_price = None
-        for _ in range(12):
-            await asyncio.sleep(0.5)
+        filled_qty, fill_price = await self._wait_for_fill(symbol, order_id, wait_s)
+        if filled_qty > 0 and fill_price > 0:
+            return order_id, fill_price, path
+        return order_id, None, f"{path}_miss"
+
+    async def _wait_for_fill(
+        self,
+        symbol: str,
+        order_id: str,
+        max_wait_s: float = 6.0,
+    ) -> Tuple[float, float]:
+        deadline = asyncio.get_event_loop().time() + max_wait_s
+        last_detail: Dict = {}
+
+        while asyncio.get_event_loop().time() < deadline:
             try:
-                status = await self.client.get_order(symbol=symbol, order_id=order_id)
-                if status.get("orderStatus") == "Filled":
-                    fill_price = float(status.get("avgPrice", 0))
-                    break
+                detail = await self.client.get_order(symbol=symbol, order_id=order_id)
+                if detail:
+                    last_detail = detail
+                    status = (detail.get("orderStatus") or "").lower()
+                    filled = float(detail.get("cumExecQty") or detail.get("qtyFilled") or 0.0)
+                    avg_px = float(detail.get("avgPrice") or 0.0)
+                    if status == "filled" and filled > 0 and avg_px > 0:
+                        return filled, avg_px
+                    if status in {"cancelled", "canceled", "partiallyfilledcanceled"} and filled > 0 and avg_px > 0:
+                        return filled, avg_px
+                    if status in {"rejected", "deactivated"}:
+                        return 0.0, 0.0
             except Exception:
                 pass
+            await asyncio.sleep(0.3)
 
-        if not fill_price:
-            log.error(f"[{symbol}] Order not filled within 6s")
-            return None
+        try:
+            filled = float(last_detail.get("cumExecQty") or 0.0)
+            avg_px = float(last_detail.get("avgPrice") or 0.0)
+            if filled > 0 and avg_px > 0:
+                return filled, avg_px
+        except Exception:
+            pass
+        return 0.0, 0.0
 
-        # 6. Set SL/TP on exchange
+    async def _cancel_best_effort(self, symbol: str, order_id: str) -> None:
+        try:
+            await self.client.cancel_order(symbol=symbol, order_id=order_id)
+        except Exception as exc:
+            log.debug(f"[BYBIT] {symbol}: cancel {order_id} failed/non-critical: {exc}")
+
+    async def _place_exchange_tpsl(self, symbol: str, pos: Position) -> None:
         try:
             await self.client.place_tpsl_order(
                 symbol=symbol,
-                stop_loss=str(sl_price),
-                take_profit=str(tp1_price) if tp1_price else None,
+                sl_price=self._format_price(pos.stop_loss),
+                tp_price=self._format_price(pos.tp1) if pos.tp1 else "",
                 position_idx=0,
             )
-        except Exception as e:
-            log.warning(f"[{symbol}] SL/TP set failed: {e}")
+        except Exception as exc:
+            log.warning(f"[BYBIT] {symbol}: SL/TP set failed: {exc}")
 
-        # 7. [P1-5] Set Bybit Conditional Trailing Stop
-        # Aktivasi: saat harga naik +0.3% dari entry (scalper micro-move)
-        # Callback: 0.2% trailing distance
-        # Ini REAL-TIME di exchange, tidak tergantung bot polling interval
+    async def _place_exchange_trailing_stop(self, symbol: str, pos: Position) -> None:
         try:
-            if fill_price > 0:
-                trail_activate_pct = 0.003   # +0.3% dari entry
-                trail_callback_pct = 0.002   # 0.2% callback
+            if pos.entry_price <= 0:
+                return
+            activate_pct = 0.003
+            callback_pct = 0.002
+            active_price = (
+                pos.entry_price * (1 + activate_pct)
+                if pos.side == Side.LONG
+                else pos.entry_price * (1 - activate_pct)
+            )
+            trailing_distance = pos.entry_price * callback_pct
+            await self.client.set_trailing_stop(
+                symbol=symbol,
+                trailing_stop=self._format_price(trailing_distance),
+                active_price=self._format_price(active_price),
+                position_idx=0,
+            )
+            log.info(
+                f"[BYBIT] {symbol}: trailing stop set active@{active_price:.8f} "
+                f"distance={trailing_distance:.8f}"
+            )
+        except Exception as exc:
+            log.warning(f"[BYBIT] {symbol}: trailing stop set failed/non-critical: {exc}")
 
-                if signal.side == Side.LONG:
-                    active_price = fill_price * (1 + trail_activate_pct)
-                else:
-                    active_price = fill_price * (1 - trail_activate_pct)
-
-                trailing_distance = fill_price * trail_callback_pct
-
-                await self.client.set_trailing_stop(
-                    symbol=symbol,
-                    trailing_stop=str(round(trailing_distance, 6)),
-                    active_price=str(round(active_price, 6)),
-                    position_idx=0,
-                )
-                log.info(
-                    f"🎯 [{symbol}] Trailing stop set: activate@{active_price:.6f} "
-                    f"(+{trail_activate_pct*100:.1f}%), trail={trailing_distance:.6f} "
-                    f"({trail_callback_pct*100:.1f}% callback)"
-                )
-        except Exception as e:
-            log.warning(f"[{symbol}] Trailing stop set failed (non-critical): {e}")
-
-        # 7. Create Position object
-        pos = Position(
-            id=gen_id(),
-            chat_id=self.chat_id,
-            asset=signal.asset,
-            symbol=symbol,
-            side=signal.side,
-            entry_price=fill_price,
-            size=qty,
-            leverage=leverage,
-            sl_price=sl_price,
-            tp1_price=tp1_price,
-            tp2_price=sizing.get("tp2_price"),
-            status=PositionStatus.OPEN,
-            opened_at=utcnow(),
-            mode=signal.mode if hasattr(signal, "mode") else BotMode.STANDARD,
-            order_id=order_id,
-            score=signal.score if hasattr(signal, "score") else 0,
-            entry_tier=getattr(signal, 'v10_tier', 'B'),
+    def _limit_price(self, signal: TradeSignal, exec_type: str) -> str:
+        price = (
+            getattr(signal, "execution_intended_entry", None)
+            or getattr(signal, "execution_actual_entry", None)
+            or signal.entry_price
         )
-        self._positions[pos.id] = pos
-        log.info(f"[{symbol}] Opened {side_str} | qty={qty} @ {fill_price} | lev={leverage}x | SL={sl_price}")
-        return pos
+        price = float(price)
+        if exec_type == "aggressive_limit":
+            cross_bps = 2.0
+            if signal.side == Side.LONG:
+                price *= 1 + cross_bps / 10000.0
+            else:
+                price *= 1 - cross_bps / 10000.0
+        return self._format_price(price)
+
+    @staticmethod
+    def _format_qty(qty: float) -> str:
+        text = f"{float(qty):.6f}".rstrip("0").rstrip(".")
+        return text if text else "0"
+
+    @staticmethod
+    def _format_price(price: float) -> str:
+        text = f"{float(price):.8f}".rstrip("0").rstrip(".")
+        return text if text else "0"
 
     async def update_positions(self, prices: Dict[str, float]) -> List[Dict]:
         actions = []
-        for pos in list(self._positions.values()):
-            price = prices.get(pos.symbol) or prices.get(pos.asset)
+        for pos in list(self.open_positions):
+            price = prices.get(pos.asset) or prices.get(f"{pos.asset}USDT")
             if price is None:
                 continue
-
             action = self.risk.check_tp_trail(pos, price)
-            if not action:
-                continue
-
-            result = await self._do_close(pos, price, action)
-            if result:
-                actions.append(result)
+            if action:
+                result = await self._do_close(pos, price, action)
+                if result:
+                    actions.append(result)
         return actions
 
-    async def close_position(self, position_id: str, current_price: float, reason: str = "manual") -> Optional[Dict]:
+    async def close_position(
+        self,
+        position_id: str,
+        current_price: float,
+        reason: str = "manual",
+    ) -> Optional[Dict]:
         pos = self._positions.get(position_id)
-        if not pos:
-            log.warning(f"Position {position_id} not found")
+        if not pos or pos.status == PositionStatus.CLOSED:
+            log.warning(f"[BYBIT] position {position_id} not found/open")
             return None
         return await self._do_close(pos, current_price, {"action": "close", "reason": reason})
 
     async def _do_close(self, pos: Position, current_price: float, action: Dict) -> Optional[Dict]:
-        symbol = pos.symbol
+        symbol = f"{pos.asset}USDT"
         close_side = "Sell" if pos.side == Side.LONG else "Buy"
-        close_qty = action.get("qty", pos.size)
-        reason = action.get("reason", "unknown")
+        close_qty = float(action.get("qty", pos.size_current) or pos.size_current)
+        reason = action.get("reason") or action.get("action") or "unknown"
 
         try:
-            order = await self.client.place_order(
+            await self.client.place_order(
                 symbol=symbol,
                 side=close_side,
-                qty=close_qty,
+                qty=self._format_qty(close_qty),
                 order_type="Market",
-                position_idx=0,
                 reduce_only=True,
+                position_idx=0,
             )
-        except Exception as e:
-            log.error(f"[{symbol}] Close order failed: {e}")
+        except Exception as exc:
+            log.error(f"[BYBIT] {symbol}: close order failed: {exc}")
             return None
 
-        # PnL calculation
-        if pos.side == Side.LONG:
-            pnl = (current_price - pos.entry_price) / pos.entry_price * close_qty * pos.leverage
-        else:
-            pnl = (pos.entry_price - current_price) / pos.entry_price * close_qty * pos.leverage
-
-        is_partial = close_qty < pos.size
+        pnl = pos.floating_pct(current_price) * close_qty * pos.entry_price
+        is_partial = close_qty < pos.size_current
         if is_partial:
-            pos.size -= close_qty
+            pos.size_current -= close_qty
+            pos.pnl_realized += pnl
         else:
+            pos.pnl_realized += pnl
             pos.status = PositionStatus.CLOSED
             pos.closed_at = utcnow()
-            self._positions.pop(pos.id, None)
-
-            # [AUDIT FIX 2026-05-20] Learning engine was never called from bybit_executor
-            # → training_data always empty → ML model never activates
-            try:
-                from engine.learning_engine import learning_engine
-                _entry_minute = int(pos.opened_at.timestamp() // 60) if pos.opened_at else 0
-                _signal_key = f"{pos.asset}_{pos.side.value.lower()}_{_entry_minute}"
-                learning_engine.record_outcome(
-                    asset=pos.asset,
-                    side=pos.side.value.lower(),
-                    regime=getattr(pos, 'trade_mode', 'ranging'),
-                    score=getattr(pos, 'entry_score', 50),
-                    pnl_usd=pnl,
-                    pos_id=_signal_key,
-                    features={
-                        'oi_funding_score': 0,
-                        'orderbook_score': 0,
-                        'liquidation_score': 0,
-                        'displacement_5m': 0,
-                        'rsi': 50,
-                        'ema_freshness': 5,
-                        'atr_pct': getattr(pos, 'entry_atr', 0) or 0,
-                        'regime_code': 0,
-                        'hour_utc': pos.opened_at.hour if pos.opened_at else 0,
-                        'score': getattr(pos, 'entry_score', 50),
-                    }
-                )
-            except Exception as e:
-                log.debug(f"[LEARN] record_outcome failed: {e}")
+            if reason == "progress_stop" or action.get("action") == "progress_stop":
+                self.risk.record_progress_stop(pos)
 
         result = {
-            "position_id": pos.id,
+            "action": action.get("action", "close"),
+            "position_id": pos.position_id,
             "symbol": symbol,
             "side": pos.side.value,
             "reason": reason,
@@ -260,41 +490,42 @@ class BybitExecutor(BaseExecutor):
             "partial": is_partial,
             "closed_at": utcnow().isoformat(),
         }
-        log.info(f"[{symbol}] {'Partial' if is_partial else 'Full'} close | reason={reason} | PnL={pnl:.4f}")
+        log.info(f"[BYBIT] {symbol}: {'partial' if is_partial else 'full'} close | {reason} | pnl={pnl:.4f}")
         return result
 
     async def sync_positions_from_chain(self) -> None:
         try:
             positions = await self.client.get_open_positions()
-        except Exception as e:
-            log.error(f"Sync positions failed: {e}")
+        except Exception as exc:
+            log.error(f"[BYBIT] sync_positions failed: {exc}")
             return
 
         self._positions.clear()
-        for p in positions:
-            size = float(p.get("size", 0))
+        for raw in positions:
+            size = float(raw.get("size") or 0.0)
             if size <= 0:
                 continue
-
-            side = Side.LONG if p.get("side") == "Buy" else Side.SHORT
-            symbol = p.get("symbol", "")
+            symbol = raw.get("symbol", "")
             asset = symbol.replace("USDT", "")
-
+            side = Side.LONG if raw.get("side") == "Buy" else Side.SHORT
+            entry = float(raw.get("avgPrice") or 0.0)
+            lev = int(float(raw.get("leverage") or 1))
             pos = Position(
-                id=gen_id(),
-                chat_id=self.chat_id,
+                position_id=gen_id("POS"),
                 asset=asset,
-                symbol=symbol,
                 side=side,
-                entry_price=float(p.get("avgPrice", 0)),
-                size=size,
-                leverage=int(float(p.get("leverage", 1))),
-                sl_price=float(p.get("stopLoss", 0)) or None,
-                tp1_price=float(p.get("takeProfit", 0)) or None,
-                status=PositionStatus.OPEN,
-                opened_at=utcnow(),
-                mode=BotMode.STANDARD,
+                entry_price=entry,
+                size_initial=size,
+                size_current=size,
+                leverage=lev,
+                margin_usd=(size * entry) / max(lev, 1),
+                stop_loss=float(raw.get("stopLoss") or 0.0),
+                tp1=float(raw.get("takeProfit") or 0.0),
+                tp2=0.0,
+                trailing_high=entry,
+                signal_id=None,
+                is_paper=False,
             )
-            self._positions[pos.id] = pos
+            self._positions[pos.position_id] = pos
 
-        log.info(f"Synced {len(self._positions)} positions from Bybit")
+        log.info(f"[BYBIT] synced {len(self._positions)} open position(s)")

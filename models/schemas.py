@@ -192,6 +192,26 @@ class TradeSignal(BaseModel):
     gate_net_move:      float = 0.0              # [RANK] 5m net displacement (signed aligned) — untuk ranking
     gate_cvd_dir:       float = 0.0              # [RANK] CVD directional (signed aligned) — untuk ranking
 
+    gate_expectancy_bucket: str = ""             # [AUDIT] side/setup/tier bucket for PF tracking
+    gate_quality_flags: List[str] = Field(default_factory=list)
+
+    # Execution Engine telemetry
+    execution_playbook:       str = "none"       # short_momentum / long_reclaim / pullback_limit / etc.
+    execution_order_type:     str = "market"     # market / aggressive_limit / passive_limit / wait_retest / cancel
+    execution_status:         str = "ready"      # ready / pending / cancelled / shadow_ready
+    execution_trigger:        str = ""           # break_3bar_low / reclaim_ema13 / retest_level / etc.
+    execution_cancel_reason:  Optional[str] = None
+    execution_reference_level: Optional[float] = None
+    execution_invalidation_level: Optional[float] = None
+    execution_intended_entry: Optional[float] = None
+    execution_actual_entry:   Optional[float] = None
+    execution_ttl_sec:        int = 0
+    execution_wait_sec:       float = 0.0
+    execution_spread_bps:     float = 0.0
+    execution_cost_bps:       float = 0.0
+    execution_chase_pct:      float = 0.0
+    execution_notes:          List[str] = Field(default_factory=list)
+
     # Meta
     timestamp:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expiry:           Optional[datetime] = None   # signal expires if not acted on
@@ -340,7 +360,10 @@ class Position(BaseModel):
     is_paper:          bool = True
     entry_score:       int = 50
     entry_tier:        str = "B"          # [v10] gate entry quality S/A/B
+    entry_setup:       str = "none"       # [v10] setup label at entry
     realized_vol:      float = 0.02       # daily realized vol at entry — used for trail distance
+    gate_expectancy_bucket: str = ""      # side/tier/setup/rv bucket at entry
+    gate_quality_flags: List[str] = Field(default_factory=list)
 
     # [QUANT AGGRESSION] Partial exit & scale-in tracking
     partial_exits_done: List[str] = Field(default_factory=list)   # track which exits done: "tp1","tp2","tp3","breakeven"

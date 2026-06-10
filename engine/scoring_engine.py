@@ -631,6 +631,8 @@ class ScoringEngine:
                     _scalper_components["v10_size_mult"] = _v10_dec.size_mult
                     _scalper_components["v10_setup"] = _v10_dec.setup
                     _scalper_components["v10_tier"] = _v10_dec.tier
+                    _scalper_components["v10_expectancy_bucket"] = getattr(_v10_dec, "expectancy_bucket", "")
+                    _scalper_components["v10_quality_flags"] = list(getattr(_v10_dec, "quality_flags", []) or [])
                     # [RANK] Store signal quality metrics untuk multi-dimensi ranking
                     _scalper_components["v10_ob_dir"] = int(_v10_ob_dir)
                     _scalper_components["v10_net_move"] = _v10_net5m
@@ -1401,6 +1403,8 @@ class ScoringEngine:
                 "FUND": _scalper_components.get("oi_signed", 0),
                 "LIQ":  _scalper_components.get("liq_signed", 0),
                 "XAM":  _scalper_components.get("xam_pts", 0),
+                "V10_BUCKET": _scalper_components.get("v10_expectancy_bucket", ""),
+                "V10_FLAGS": ",".join(_scalper_components.get("v10_quality_flags", []) or []),
             },
             momentum_gate_passed=_mgp,
             momentum_move_pct=_mmove,
@@ -1424,6 +1428,8 @@ class ScoringEngine:
             signal.gate_ob_dir = int(_scalper_components.get("v10_ob_dir", 0))
             signal.gate_net_move = float(_scalper_components.get("v10_net_move", 0.0))
             signal.gate_cvd_dir = float(_scalper_components.get("v10_cvd", 0.0))
+            signal.gate_expectancy_bucket = str(_scalper_components.get("v10_expectancy_bucket", ""))
+            signal.gate_quality_flags = list(_scalper_components.get("v10_quality_flags", []) or [])
 
         # Attach last-known funding rate for Telegram warning
         _fr_cache = self.cache.funding_history.get(asset, []) if hasattr(self.cache, 'funding_history') else []

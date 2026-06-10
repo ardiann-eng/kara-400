@@ -36,6 +36,7 @@ from execution.paper_executor import PaperExecutor
 from execution.live_executor import LiveExecutor
 from execution.bitget_executor import BitgetExecutor
 from execution.bybit_executor import BybitExecutor
+from execution.execution_engine import ExecutionEngine
 from notify.telegram import KaraTelegram
 from dashboard.app import init_dashboard, run_dashboard, broadcast
 from core.mode_manager import mode_manager
@@ -106,6 +107,7 @@ class KaraBot:
 
         # Scoring engine (stateless regarding user risk)
         self.scorer     = ScoringEngine(self.hl_client, self.cache, mode_manager=self.mode_mgr)
+        self.exec_engine = ExecutionEngine(self.hl_client, config.EXECUTION)
 
         # Multi-user session store (chat_id -> UserSession)
         self.sessions: Dict[str, UserSession] = {}
@@ -1292,6 +1294,28 @@ class KaraBot:
                     )
                     continue
 
+            # ── Execution Engine: gate pass → tradeable execution intent ──
+            if getattr(config, 'EXECUTION', None) and getattr(config.EXECUTION, 'enabled', True):
+                try:
+                    intent = await self.exec_engine.resolve(user_signal)
+                    log.info(
+                        f"[EXEC-INTENT] {user_signal.asset} {user_signal.side.value.upper()} "
+                        f"playbook={intent.playbook} order={intent.order_type} status={intent.status} "
+                        f"trigger={intent.trigger or '-'} wait={intent.wait_sec:.1f}s "
+                        f"ref={intent.reference_level or 0:.8f} actual={intent.actual_entry or 0:.8f} "
+                        f"cancel={intent.cancel_reason or '-'}"
+                    )
+                    if not intent.can_enter:
+                        user_db.save_signal(user_signal)
+                        await self.telegram.send_execution_cancelled(user_signal, intent, target_chat_id=chat_id)
+                        continue
+                except Exception as _exec_e:
+                    log.error(
+                        f"[EXEC-INTENT] {user_signal.asset}: execution engine failed, skip trade for safety: {_exec_e}",
+                        exc_info=True,
+                    )
+                    continue
+
             acc = await session.get_account_state()
 
             # Inject user leverage ke signal SEBELUM calculate_position_size
@@ -1322,34 +1346,28 @@ class KaraBot:
                     self._blocked_log_buffer[key] = self._blocked_log_buffer.get(key, 0) + 1
                     continue
 
-                # If approved, proceed to auto-execution
-                # ── FIX 3: Entry confirmation — wait 5s, re-check price direction ──
-                # Prevents entering right at a micro-reversal point (4-min SL hits)
-                _entry_price_before = user_signal.entry_price
-                await asyncio.sleep(5)  # 5 second confirmation delay
-                
-                # Re-fetch current price
-                try:
-                    _confirm_price = await self.hl_client.get_mark_price(user_signal.asset)
-                    if _confirm_price and _confirm_price > 0:
-                        _price_delta_pct = (_confirm_price - _entry_price_before) / _entry_price_before
-                        # LONG: price should not have dropped >0.15% in 5s (reversal signal)
-                        # SHORT: price should not have risen >0.15% in 5s
-                        _reversal_threshold = -0.0015 if user_signal.side.value == 'long' else 0.0015
-                        _is_reversing = (
-                            (_price_delta_pct < _reversal_threshold) if user_signal.side.value == 'long'
-                            else (_price_delta_pct > _reversal_threshold)
-                        )
-                        if _is_reversing:
-                            log.info(
-                                f"[SKIP-CONFIRM] {user_signal.asset} {user_signal.side.value.upper()} | "
-                                f"Price moved {_price_delta_pct*100:.3f}% in 5s — reversal detected, skipping entry"
+                # If execution engine is disabled, keep legacy 5s confirmation.
+                if not (getattr(config, 'EXECUTION', None) and getattr(config.EXECUTION, 'enabled', True)):
+                    _entry_price_before = user_signal.entry_price
+                    await asyncio.sleep(5)
+                    try:
+                        _confirm_price = await self.hl_client.get_mark_price(user_signal.asset)
+                        if _confirm_price and _confirm_price > 0:
+                            _price_delta_pct = (_confirm_price - _entry_price_before) / _entry_price_before
+                            _reversal_threshold = -0.0015 if user_signal.side.value == 'long' else 0.0015
+                            _is_reversing = (
+                                (_price_delta_pct < _reversal_threshold) if user_signal.side.value == 'long'
+                                else (_price_delta_pct > _reversal_threshold)
                             )
-                            continue
-                        # Update entry price to current (more accurate fill)
-                        user_signal.entry_price = _confirm_price
-                except Exception as _e:
-                    log.debug(f"[CONFIRM] Price re-check failed for {user_signal.asset}: {_e}, proceeding anyway")
+                            if _is_reversing:
+                                log.info(
+                                    f"[SKIP-CONFIRM] {user_signal.asset} {user_signal.side.value.upper()} | "
+                                    f"Price moved {_price_delta_pct*100:.3f}% in 5s — reversal detected, skipping entry"
+                                )
+                                continue
+                            user_signal.entry_price = _confirm_price
+                    except Exception as _e:
+                        log.debug(f"[CONFIRM] Price re-check failed for {user_signal.asset}: {_e}, proceeding anyway")
 
                 user_signal.auto_executed = True
                 user_db.save_signal(user_signal) # v17 Sync

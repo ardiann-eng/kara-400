@@ -157,8 +157,8 @@ class UserSession:
             log.error(f"[SESSION {self.user.chat_id}] EXECUTION_EXCHANGE=bybit tapi bybit_client belum di-inject. Fallback ke paper.")
             return None
 
-        api_key    = config.BYBIT_API_KEY
-        api_secret = config.BYBIT_SECRET_KEY
+        api_key    = self.user.bitget_api_key or config.BYBIT_API_KEY
+        api_secret = self.user.bitget_api_secret or config.BYBIT_SECRET_KEY
 
         if not (api_key and api_secret):
             log.error(f"[SESSION {self.user.chat_id}] Bybit credentials kosong. Fallback ke paper.")

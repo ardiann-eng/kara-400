@@ -1,0 +1,55 @@
+nama,kategori,harga,stok
+Butter Croissant,PASTRY,25000,tersedia
+Cinnamon Sugar Bun,PASTRY,30000,tersedia
+Cheese Danish,PASTRY,30000,tersedia
+Cinnamon Roll,PASTRY,25000,tersedia
+Cheese Toast,PASTRY,25000,tersedia
+Nasi Goreng Telchan,MAIN COURSE,30000,tersedia
+Nasi Goreng Kampung,MAIN COURSE,28000,tersedia
+Nasi Goreng BangMoe,MAIN COURSE,40000,tersedia
+Ayam Geprek Sambal Ijo,MAIN COURSE,40000,tersedia
+Nasi Goreng MCH,MAIN COURSE,35000,tersedia
+Beef Lada Hitam,MAIN COURSE,40000,tersedia
+Nasi Goreng KIC,MAIN COURSE,35000,tersedia
+Telur MCH,MAIN COURSE,25000,tersedia
+Rice Bowl Chicken,RICE BOWL,34000,tersedia
+Rice Bowl Black Pepper,RICE BOWL,34000,tersedia
+Rice Bowl Salted Beef,RICE BOWL,40000,tersedia
+Rice Bowl Salted Egg,RICE BOWL,34000,tersedia
+Bakso MCH,SOUP,37000,tersedia
+Tomyum,SOUP,40000,tersedia
+Indomie Selection,SOUP,25000,tersedia
+Bakmie Ayam Charsiu,NOODLES,33000,tersedia
+Bakmie Spicy MOP,NOODLES,40000,tersedia
+Mie Goreng Daging Asap,NOODLES,46000,tersedia
+Mie Kuah MCH,NOODLES,33000,tersedia
+Chicken Wings MCH,CHICKEN WINGS,40000,tersedia
+Chicken Wings Salty Honey,CHICKEN WINGS,40000,tersedia
+Chicken Wings Spicy Bowl,CHICKEN WINGS,40000,tersedia
+Tahu Isi,FINGER FOOD,25000,tersedia
+French Fries,FINGER FOOD,22000,tersedia
+Sosis Bakar,FINGER FOOD,28000,tersedia
+Mix Platter,FINGER FOOD,35000,tersedia
+Chicken Pop,FINGER FOOD,25000,tersedia
+Tempura,FINGER FOOD,25000,tersedia
+Cireng,FINGER FOOD,25000,tersedia
+Tahu Walik,FINGER FOOD,22000,tersedia
+Lumpia,FINGER FOOD,28000,tersedia
+Pisang Coklat,FINGER FOOD,28000,tersedia
+Ice Coffee MCH,SIGNATURE COFFEE,30000,tersedia
+Ice Dirty Why,SIGNATURE COFFEE,30000,tersedia
+Ice Coffee Rose,SIGNATURE COFFEE,30000,tersedia
+Ice Coffee Banana,SIGNATURE COFFEE,30000,tersedia
+Ice Coffee Pandan,SIGNATURE COFFEE,30000,tersedia
+Espresso,COFFEE,18000,tersedia
+Americano,COFFEE,20000,tersedia
+White,COFFEE,28000,tersedia
+V60,COFFEE,28000,tersedia
+Dirty Latte,COFFEE,35000,tersedia
+Matcha Frosty,MATCHA,30000,tersedia
+Dirty Matcha,MATCHA,30000,tersedia
+Matcha Latte,MATCHA,30000,tersedia
+Matcha Pistachio,MATCHA,35000,tersedia
+Lemon Tea,TEA,20000,tersedia
+Lychee Tea,TEA,30000,tersedia
+Brown Sugar Tea,TEA,30000,tersedia

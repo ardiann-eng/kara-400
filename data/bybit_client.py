@@ -311,6 +311,7 @@ class BybitClient:
         qty: str,            # quantity string
         order_type: str = "Market",
         price: str = "",
+        time_in_force: str = "",
         reduce_only: bool = False,
         position_idx: int = 0,  # 0=one-way, 1=buy-side hedge, 2=sell-side hedge
     ) -> Dict[str, Any]:
@@ -325,6 +326,8 @@ class BybitClient:
         }
         if price and order_type == "Limit":
             body["price"] = price
+        if time_in_force:
+            body["timeInForce"] = time_in_force
         if reduce_only:
             body["reduceOnly"] = True
         return await self._request("POST", "/v5/order/create", body=body, auth=True)

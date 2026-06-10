@@ -215,7 +215,10 @@ class PaperExecutor(BaseExecutor):
             is_paper=True,
             entry_score=signal.score,
             entry_tier=getattr(signal, 'v10_tier', 'B'),
+            entry_setup=getattr(signal, 'v10_setup', 'none'),
             realized_vol=getattr(signal, 'realized_vol', 0.02),
+            gate_expectancy_bucket=getattr(signal, "gate_expectancy_bucket", ""),
+            gate_quality_flags=list(getattr(signal, "gate_quality_flags", []) or []),
             original_entry_price=signal.entry_price,  # [QUANT AGGRESSION] breakeven reference
             # [POST-MORTEM] Entry context for autopsy
             entry_funding_rate=getattr(signal, 'funding_rate', 0.0) or 0.0,
@@ -249,6 +252,14 @@ class PaperExecutor(BaseExecutor):
         slippage_bps = abs(fill_price - signal.entry_price) / signal.entry_price * 10000
         log_data = {
             "type":     "open",
+            "execution_playbook": getattr(signal, "execution_playbook", "none"),
+            "execution_order_type": getattr(signal, "execution_order_type", "market"),
+            "execution_status": getattr(signal, "execution_status", "ready"),
+            "execution_trigger": getattr(signal, "execution_trigger", ""),
+            "execution_wait_sec": getattr(signal, "execution_wait_sec", 0.0),
+            "execution_cost_bps": getattr(signal, "execution_cost_bps", 0.0),
+            "gate_expectancy_bucket": getattr(signal, "gate_expectancy_bucket", ""),
+            "gate_quality_flags": ",".join(getattr(signal, "gate_quality_flags", []) or []),
             "pos_id":   pos.position_id,
             "asset":    signal.asset,
             "side":     signal.side.value,
@@ -403,6 +414,8 @@ class PaperExecutor(BaseExecutor):
         # Total PnL for the record (cumulative)
         total_pnl = pos.pnl_realized
         self.risk.record_pnl(total_pnl, self._balance)
+        if reason == "progress_stop":
+            self.risk.record_progress_stop(pos)
 
         # [POST-MORTEM] Generate rule-based autopsy before position is finalized
         try:
@@ -449,6 +462,9 @@ class PaperExecutor(BaseExecutor):
             "pnl_pct":          pos.roe_pct(fill_price),
             "score":            pos.entry_score,
             "tier":             getattr(pos, 'entry_tier', 'B'),
+            "setup":            getattr(pos, 'entry_setup', 'none'),
+            "gate_expectancy_bucket": getattr(pos, 'gate_expectancy_bucket', ''),
+            "gate_quality_flags": ",".join(getattr(pos, 'gate_quality_flags', []) or []),
             "timestamp":        utcnow(),
             "autopsy":          pos.autopsy,
         }

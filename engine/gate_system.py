@@ -52,6 +52,8 @@ class GateDecision:
     has_liq_context: bool = False
     near_level: str = ""             # level mana yang dekat (session_high, range_low, dst)
     rv_tier: str = "full"
+    expectancy_bucket: str = ""
+    quality_flags: List[str] = field(default_factory=list)
 
 
 class GateSystem:
@@ -64,6 +66,7 @@ class GateSystem:
     RV_HARD_MAX        = 0.08    # >8% = hard reject (diturunkan dari 15%, RV r=-0.50 p=0.0005)
     RV_FULL_MAX        = 0.04    # <=4% = size penuh
     RV_REDUCED_MAX     = 0.06    # 4-6% = 0.75x
+    RV_NO_EDGE_MAX     = 0.06    # [AUDIT #21] 6-8% bucket PF 0.31 -> reject, not size down
     # 6-8% = 0.3x (damage control: vol tinggi tapi belum ekstrem, size dikecilkan drastis)
 
     # ── CVD — PREDICTIVE dengan EWMA + SLOPE (Fase 2.1) ──
@@ -91,6 +94,8 @@ class GateSystem:
     MIN_DISP_SHORT     = 0.0012  # 0.12% SHORT — [AUDIT #21] loosened from 0.0020
 
     # ── Scalp Regime (P1: scalping 5-13m, bukan 1h) ──
+    MAX_FRESH_SHORT_DISP = 0.0070  # >0.7% 5m short move = extended, require retest
+
     SCALP_EMA_FAST     = 5       # EMA period cepat untuk scalp regime
     SCALP_EMA_SLOW     = 13      # EMA period lambat untuk scalp regime
     SCALP_EMA_GAP      = 1.0005  # 0.05% gap — sensitif untuk 1m data
@@ -493,6 +498,10 @@ class GateSystem:
         # [FASE 2] OI $10M floor (turun dari $50M). $10-50M = reduced size (bukan reject).
         if realized_vol > self.RV_HARD_MAX:
             d.reject_reason = f"rv_extreme_{realized_vol*100:.0f}pct"; return d
+        if realized_vol > self.RV_NO_EDGE_MAX:
+            d.reject_reason = f"rv_no_edge_{realized_vol*100:.1f}pct"
+            d.reasons.append("rv_0.3x_bucket_blocked_pf031")
+            return d
         if spread_pct > 0.0015:
             d.reject_reason = "spread_too_wide"; return d
         # [FASE 2] OI hard floor: hanya reject di <$10M (bukan $50M)
@@ -564,6 +573,24 @@ class GateSystem:
 
         d.near_level = lvl_name
 
+        # [AUDIT #21] OB/CVD must be directional. Strong evidence against the
+        # chosen side is adverse selection, not "mixed confirmation".
+        _flow_conflict = False
+        if ob_dir <= -max(4, _ob_threshold // 2):
+            if cvd_dir < 0.15:
+                d.passed = False
+                d.reject_reason = "ob_against_side"
+                return d
+            _flow_conflict = True
+            multipliers_note.append("ob_conflict=0.75")
+        if cvd_dir <= -0.25:
+            if ob_dir < max(4, _ob_threshold // 2):
+                d.passed = False
+                d.reject_reason = "cvd_against_side"
+                return d
+            _flow_conflict = True
+            multipliers_note.append("cvd_conflict=0.75")
+
         # [v10 OB EDGE + Opsi A] OB strong wall + searah SCALP regime = Grade S
         # Scalp regime (EMA5/13 dari 1m) sinkron dengan timeframe trading 15m.
         # HTF 1h masih di-log tapi tidak dipakai untuk grade — terlalu lambat.
@@ -609,6 +636,49 @@ class GateSystem:
         else:
             d.setup = "momentum"
 
+        # [AUDIT #21] g1_ct=0.75 bucket PF 0.36. Counter-trend needs
+        # real reversal evidence, not just a smaller size.
+        _reversal_evidence = (
+            d.setup == "sweep"
+            and d.has_liq_context
+            and cvd_dir >= 0.30
+        )
+        if _g1_ct and not _reversal_evidence:
+            d.passed = False
+            d.reject_reason = "countertrend_no_reversal_evidence"
+            d.reasons.append("g1_ct_bucket_blocked_pf036")
+            return d
+
+        # [AUDIT #21] LONG PF 0.64. Keep only premium LONGs until OOS PF recovers.
+        if side == "long":
+            _premium_long = (
+                (d.tier == "S" and d.setup == "momentum" and cvd_dir >= 0.15)
+                or (d.tier == "S" and d.setup == "sweep" and d.has_liq_context and cvd_dir >= 0.30)
+            )
+            if not _premium_long:
+                d.passed = False
+                d.reject_reason = f"long_not_premium_{d.tier}_{d.setup}"
+                d.reasons.append("long_side_quarantine_pf064")
+                return d
+
+        # [AUDIT #21] SHORT momentum PF 1.70 / SHORT A momentum PF 1.90.
+        _short_momentum_fresh = (
+            side == "short"
+            and d.setup == "momentum"
+            and net_move_5m < 0
+            and abs(net_move_5m) <= self.MAX_FRESH_SHORT_DISP
+            and cvd_dir >= 0.10
+        )
+        if _short_momentum_fresh:
+            if d.tier == "B":
+                d.tier = "A"
+            _partial_mults["short_momo"] = 1.20
+            multipliers_note.append("short_momo=1.2")
+        else:
+            _partial_mults["short_momo"] = 1.0
+
+        _partial_mults["flow_conflict"] = 0.75 if _flow_conflict else 1.0
+
         # ═══════════════════════════════════════════
         # [P3] DIVERSITY — dihitung SETELAH setup final diketahui
         # ═══════════════════════════════════════════
@@ -620,11 +690,25 @@ class GateSystem:
         d.size_mult = round(max(0.3,
             _partial_mults["g1"] * _partial_mults["vol"] *
             _partial_mults["oi"] * _partial_mults["liq"] *
-            _partial_mults["ob"] * diversity_mult
+            _partial_mults["ob"] * _partial_mults["short_momo"] *
+            _partial_mults["flow_conflict"] * diversity_mult
         ), 3)
 
         # [P3] Mark passed dengan key lengkap (asset+side+setup)
         self._mark_passed(asset, side, d.setup)
+
+        d.expectancy_bucket = f"{side}_{d.tier}_{d.setup}_{d.rv_tier}"
+        d.quality_flags = []
+        if _short_momentum_fresh:
+            d.quality_flags.append("short_momentum_edge")
+        if side == "long":
+            d.quality_flags.append("long_quarantine_pass")
+        if _flow_conflict:
+            d.quality_flags.append("flow_conflict_haircut")
+        if _reversal_evidence:
+            d.quality_flags.append("reversal_evidence")
+        if _g1_ct:
+            d.quality_flags.append("countertrend_exception")
 
         # [P1] Log scalp regime juga
         _mult_str = "×".join(multipliers_note) if multipliers_note else "1.0"
