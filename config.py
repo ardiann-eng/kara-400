@@ -340,7 +340,7 @@ ALLOW_SHORT = True   # Re-enabled dengan tesis SHORT terpisah: breakdown continu
 #   - Trained Intelligence model    (kara_intelligence.pkl dihapus)
 # Yang TIDAK dihapus: konfigurasi user, wallet address, akses Telegram.
 # PENTING: Ubah kembali ke false setelah deploy agar tidak reset terus!
-HARD_RESET_ON_DEPLOY = os.getenv("KARA_HARD_RESET", "false").lower() == "true"
+HARD_RESET_ON_DEPLOY = False
 
 # Intelligence ML Layer kill switch
 # Set env KARA_INTELLIGENCE=false untuk matikan tanpa redeploy.

@@ -141,6 +141,9 @@ class ScoreBreakdown(BaseModel):
     # Raw
     raw_score:             int = 0
     final_score:           int = 0
+    direction_score:       int = 0   # directional evidence before quality gates
+    trade_quality_score:   int = 0   # entry/location/confirmation quality adjustment
+    failure_risk_score:    int = 0   # penalty bucket for noisy/inverse conditions
 
     # Meta Learning data
     meta_pattern_key:      Optional[str] = None

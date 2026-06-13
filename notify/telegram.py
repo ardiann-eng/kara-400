@@ -2065,13 +2065,52 @@ class KaraTelegram:
                 emoji = "🔒"
 
             outcome = "Profit" if pnl_usd >= 0 else "Loss"
-            caption = (
-                f"{emoji} <b>KARA menutup posisi {position.asset} {position.side.value.upper()}</b>\n"
-                f"<i>{trigger_label} — posisi ditutup otomatis oleh bot.</i>\n\n"
-                f"{'✅' if pnl_usd >= 0 else '❌'} <b>{outcome}: {sign}{pct_display:.2f}%</b>\n"
-                f"💵 <code>{sign}${abs(pnl_usd):.2f} USD</code>  •  "
-                f"🇮🇩 <code>{pnl_idr_str}</code>"
-            )
+            if reason_lower == "time_exit":
+                entry_price = float(getattr(position, "entry_price", 0) or 0)
+                exit_price = float(close_data.get("exit_price", 0) or close_data.get("price", 0) or entry_price)
+                if entry_price > 0 and exit_price > 0:
+                    if position.side == Side.LONG:
+                        move_pct = (exit_price - entry_price) / entry_price * 100
+                    else:
+                        move_pct = (entry_price - exit_price) / entry_price * 100
+                else:
+                    move_pct = 0.0
+
+                hold_minutes = None
+                try:
+                    opened_at = getattr(position, "opened_at", None)
+                    closed_at = getattr(position, "closed_at", None) or utcnow()
+                    if opened_at:
+                        hold_minutes = max(0, round((closed_at - opened_at).total_seconds() / 60))
+                except Exception:
+                    hold_minutes = None
+
+                hold_text = f"{hold_minutes} menit" if hold_minutes is not None else "batas hold"
+                action_text = (
+                    "Momentum mulai decay, jadi profit diamankan."
+                    if pnl_usd >= 0
+                    else "Setup tidak memberi follow-through, jadi risiko dipotong."
+                )
+                money_sign = "+" if pnl_usd >= 0 else "-"
+                pnl_money = f"{money_sign}${abs(pnl_usd):.2f}"
+                caption = (
+                    "🌸 <b>KARA UPDATE: Time Exit</b>\n\n"
+                    f"Saya menutup <b>{position.side.value.upper()} {position.asset}</b> karena {hold_text} tercapai.\n"
+                    f"{action_text}\n\n"
+                    "📊 <b>Result</b>\n"
+                    f"  • {outcome:<6}: <b>{pnl_money} ({sign}{pct_display:.2f}% ROI)</b>\n"
+                    f"  • Move   : <b>{move_pct:+.2f}%</b>\n"
+                    f"  • Price  : <code>${format_price(entry_price)}</code> → <code>${format_price(exit_price)}</code>\n\n"
+                    "KARA lanjut mencari setup dengan EV lebih bersih. ✨"
+                )
+            else:
+                caption = (
+                    f"{emoji} <b>KARA menutup posisi {position.asset} {position.side.value.upper()}</b>\n"
+                    f"<i>{trigger_label} — posisi ditutup otomatis oleh bot.</i>\n\n"
+                    f"{'✅' if pnl_usd >= 0 else '❌'} <b>{outcome}: {sign}{pct_display:.2f}%</b>\n"
+                    f"💵 <code>{sign}${abs(pnl_usd):.2f} USD</code>  •  "
+                    f"🇮🇩 <code>{pnl_idr_str}</code>"
+                )
 
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("📊 Detail Posisi", callback_data=f"card_detail:{position.position_id}"),

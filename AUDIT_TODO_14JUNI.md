@@ -242,6 +242,70 @@ Expected Impact:
 - Pattern dengan WR tinggi tapi EV negatif tidak lagi di-boost.
 - Audit meta berikutnya bisa membaca outcome lebih bersih.
 
+### 10. Indicator Causality + Score Split
+
+Metric:
+- Audit komponen menunjukkan beberapa indikator tidak lagi diskriminatif jika dipakai mentah:
+  - `sig_has_strong_imbalance=1`: PF sekitar `0.59`, WR sekitar `33%`.
+  - SHORT dengan orderbook score negatif: PF sekitar `0.10`.
+  - Raw score bucket tinggi: PF sekitar `0.44`.
+  - CVD bullish sebelumnya terlalu sering muncul, sehingga menjadi noise.
+  - MTF 15m align sebelumnya negatif pada score rendah.
+
+Pattern:
+- Score tinggi bisa terbentuk dari akumulasi indikator yang membaca kejadian sama.
+- Orderbook wall/imbalance bisa menjadi trap jika price tidak bereaksi.
+- CVD tanpa price follow-through tidak cukup sebagai sinyal arah.
+- RSI oversold pada futures altcoin rawan menjadi catch-knife.
+- MTF 15m lebih cocok sebagai konteks, bukan alasan utama entry scalper 1m.
+
+Root Cause:
+- Bot mencampur directional evidence dan trade quality dalam satu angka score.
+- Beberapa indikator diperlakukan sebagai booster arah, padahal secara futures mereka harus dibaca secara kausal:
+  - siapa yang agresif,
+  - apakah harga merespons,
+  - apakah orderflow benar-benar follow-through,
+  - apakah entry punya invalidation yang masuk akal.
+
+Action:
+- `models/schemas.py`
+  - Tambah `direction_score`, `trade_quality_score`, dan `failure_risk_score` ke `ScoreBreakdown`.
+- `engine/scoring_engine.py`
+  - Orderbook imbalance tidak langsung menjadi booster arah.
+  - Bid/ask wall hanya memberi poin jika ada price reaction searah.
+  - Jika orderbook kuat tapi price melawan, masuk `failure_risk_score`.
+  - CVD bullish/bearish wajib punya price follow-through.
+  - CVD bullish + price turun atau CVD bearish + price naik dianggap absorption risk.
+  - RSI oversold tanpa orderflow confirmation menambah failure risk.
+  - RSI overbought dipakai sebagai continuation context, bukan blind SHORT.
+  - MTF align masuk `trade_quality_score`; MTF discord masuk `failure_risk_score`.
+  - Final scalper score menjadi:
+
+```text
+final_score = direction_score + trade_quality_score - failure_risk_score
+```
+
+- `dashboard/app.py`
+  - API `/api/trades` mengirim `direction_score`, `trade_quality_score`, dan `failure_risk_score`.
+
+Expected Impact:
+- Mengurangi false confidence dari orderbook/CVD mentah.
+- Mengurangi LONG catch-knife dari RSI oversold.
+- Membuat score tinggi lebih bermakna secara EV, bukan sekadar indikator menumpuk.
+- Audit berikutnya bisa membedakan:
+  - arah benar tapi entry buruk,
+  - entry bagus tapi orderflow lemah,
+  - setup kuat tapi failure risk tinggi.
+
+Validation:
+- Pastikan log signal berisi alasan `Score split`.
+- Bandingkan sebelum vs sesudah:
+  - PF orderbook-confirmed vs orderbook-unconfirmed,
+  - CVD follow-through vs CVD absorption,
+  - avg loss pada RSI oversold LONG,
+  - distribusi `direction_score` vs `final_score`,
+  - apakah stop loss rate turun tanpa membunuh EV.
+
 ## Pending / Belum Selesai
 
 ### 1. Format Telegram Time Exit
@@ -314,6 +378,9 @@ TODO:
 - [ ] Review diff agar tidak ada encoding/mojibake churn.
 - [ ] Commit perubahan dengan pesan jelas.
 - [ ] Deploy ke Railway test service.
+- [ ] Cek log Railway apakah alasan `Score split` muncul pada signal baru.
+- [ ] Audit EV per `direction_score`, `trade_quality_score`, dan `failure_risk_score`.
+- [ ] Audit orderbook confirmed vs unconfirmed setelah minimal 30-50 signal.
 - [ ] Ambil data baru setelah bot berjalan.
 - [ ] Audit apakah perubahan meningkatkan EV, bukan hanya win rate.
 

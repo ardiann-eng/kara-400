@@ -129,44 +129,6 @@ class KaraBot:
         if changed:
             log.info(f"🔒 Locked score thresholds enforced for {changed} user(s).")
 
-    def _run_one_time_release_reset(self, release_tag: str) -> bool:
-        """
-        One-time reset per release_tag:
-        - clear all open paper positions/state/risk state
-        - reset user paper balance to default
-        """
-        marker_path = os.path.join(config.STORAGE_DIR, f"release_reset_{release_tag}.done")
-        if os.path.exists(marker_path):
-            return False
-
-        users_to_reset = user_db.get_all_users()
-        if not users_to_reset:
-            return False
-
-        reset_count = 0
-        for u in users_to_reset:
-            try:
-                user_db.clear_paper_positions(u.chat_id)
-                user_db.clear_paper_state(u.chat_id)
-                user_db.clear_risk_state(u.chat_id)
-                u.paper_balance_usd = config.PAPER_BALANCE_USD
-                user_db.update_user(u)
-                reset_count += 1
-            except Exception as e:
-                log.error(f"Failed one-time reset for {u.chat_id}: {e}")
-
-        if reset_count:
-            try:
-                with open(marker_path, "w", encoding="utf-8") as f:
-                    f.write(utcnow().isoformat())
-            except Exception as e:
-                log.warning(f"Could not write release reset marker: {e}")
-            log.warning(f"🧹 One-time release reset applied for {reset_count} user(s) [{release_tag}]")
-            return True
-        return False
-
-
-
     # ──────────────────────────────────────────
     # STARTUP
     # ──────────────────────────────────────────
@@ -183,27 +145,6 @@ class KaraBot:
 
         # Connect to Hyperliquid
         await self.hl_client.connect()
-
-        # ── ONE-TIME HARD RESET ──────────────────────────────────────────
-        # Set env var KARA_HARD_RESET=true sebelum deploy untuk wipe semua data.
-        # Setelah reset, ubah kembali ke false agar tidak reset di deploy berikutnya.
-        # Yang dihapus: posisi, balance, journal, ML data, trained model, meta stats.
-        if config.HARD_RESET_ON_DEPLOY:
-            log.warning("=" * 60)
-            log.warning("🧹 KARA_HARD_RESET=true — memulai full data wipe...")
-            log.warning("=" * 60)
-            result = user_db.hard_reset_all_data()
-            if result.get("status") == "ok":
-                log.warning(
-                    f"✨ [RESET SELESAI] "
-                    f"users={result.get('users_reset', 0)} | "
-                    f"ML={result.get('kara_ml.db')} | "
-                    f"model={result.get('kara_intelligence.pkl')} | "
-                    f"trades_deleted={result.get('trade_history', 0)}"
-                )
-                log.warning("⚠️  Ingat: ubah KARA_HARD_RESET=false di env setelah ini!")
-            else:
-                log.error(f"❌ [RESET GAGAL] {result.get('error', 'unknown error')}")
 
         # Load market list (always top volume as requested)
         log.info("Loading top volume markets...")
@@ -264,9 +205,6 @@ class KaraBot:
             if u.is_authorized and u.last_seen_version != release_tag
         ]
 
-        # Reset saldo/posisi on deploy is disabled by user request.
-        did_release_reset = False
-
         # Initialize User Sessions from DB
         self._enforce_locked_score_thresholds()
         for u in user_db.get_all_users():
@@ -306,15 +244,10 @@ class KaraBot:
                     f"(release={release_tag}, deploy_id={'yes' if short_dep else 'no'}, sha={'yes' if short_sha else 'no'})"
                 )
                 for chat_id in target_chat_ids:
-                    extra_notes = []
-                    if did_release_reset:
-                        extra_notes.append(
-                            "Reset khusus update ini: semua posisi sebelumnya dikosongkan dan saldo dikembalikan ke saldo normal."
-                        )
                     success = await self.telegram.send_update_notification(
                         chat_id,
                         release_tag=release_tag,
-                        extra_notes=extra_notes
+                        extra_notes=[]
                     )
                     if success:
                         u = user_db.get_user(chat_id)
@@ -1254,19 +1187,6 @@ class KaraBot:
 # ──────────────────────────────────────────────
 
 async def main():
-    # Force-hapus model pkl jika DB training belum cukup — cegah model stale dari volume Railway
-    try:
-        import joblib as _jl
-        from intelligence.experience_buffer import experience_buffer as _eb
-        from intelligence.intelligence_model import MODEL_PATH as _MP
-        _n = len(_eb.get_training_data())
-        _min = getattr(config, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 100)
-        if os.path.exists(_MP) and _n < _min:
-            os.remove(_MP)
-            log.info(f"[Intelligence] Startup: hapus model stale (DB={_n} < {_min}). Mulai fresh.")
-    except Exception as _e:
-        log.debug(f"[Intelligence] Startup check skip: {_e}")
-
     bot = KaraBot()
 
     # 1. Start Dashboard FIRST in background to pass Railway Health Checks

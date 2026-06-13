@@ -478,6 +478,7 @@ class ScoringEngine:
                 signal.score = score
                 signal.breakdown.raw_score = score
                 signal.breakdown.final_score = score
+                signal.breakdown.failure_risk_score += penalty
                 signal.breakdown.reasons.append(f"{loc_reason}; score -{penalty}")
             elif loc["quality"] == "excellent":
                 bonus = getattr(config.SCALPER, "entry_location_excellent_bonus", 3)
@@ -485,6 +486,7 @@ class ScoringEngine:
                 signal.score = score
                 signal.breakdown.raw_score = score
                 signal.breakdown.final_score = score
+                signal.breakdown.trade_quality_score += bonus
                 signal.breakdown.reasons.append(f"{loc_reason}; score +{bonus}")
             else:
                 signal.breakdown.reasons.append(loc_reason)
@@ -582,11 +584,14 @@ class ScoringEngine:
         Fast scalper scoring using technical indicators on 1m candles.
         Returns (score: int, side: Side, reasons: List[str])
         """
-        score = 0
         bull_pts = 0
         bear_pts = 0
+        quality_pts = 0
+        failure_risk_pts = 0
         reasons = []
         ob_imb = 0.0
+        ob_signal = "neutral"
+        ob_raw_pts = 0
 
         # ── Orderbook Imbalance (from cache) ─────────────────────────
         ob = self.cache.orderbook.get(asset) if hasattr(self.cache, 'orderbook') else None
@@ -636,6 +641,31 @@ class ScoringEngine:
                 bear_pts += 8
                 reasons.append(f"🔴 Mild ask pressure ({imb:.2f})")
 
+        if ob:
+            # Audit fix: raw OB imbalance was inverse/noisy in futures.
+            # Neutralize the legacy direct points; OB becomes pending evidence
+            # until candle price reaction confirms support/resistance.
+            if ob_imb > 0.60:
+                bull_pts = max(0, bull_pts - 20)
+                ob_signal = "strong_bid"
+                ob_raw_pts = 12
+                reasons.append(f"Orderbook strong bid wall ({ob_imb:.2f}) -> pending price reaction")
+            elif ob_imb < -0.60:
+                bear_pts = max(0, bear_pts - 20)
+                ob_signal = "strong_ask"
+                ob_raw_pts = 12
+                reasons.append(f"Orderbook strong ask wall ({ob_imb:.2f}) -> pending price reaction")
+            elif ob_imb > 0.40:
+                bull_pts = max(0, bull_pts - 8)
+                ob_signal = "mild_bid"
+                ob_raw_pts = 5
+                reasons.append(f"Orderbook mild bid pressure ({ob_imb:.2f}) -> context only")
+            elif ob_imb < -0.40:
+                bear_pts = max(0, bear_pts - 8)
+                ob_signal = "mild_ask"
+                ob_raw_pts = 5
+                reasons.append(f"Orderbook mild ask pressure ({ob_imb:.2f}) -> context only")
+
         if len(candles) < 10:
             # Cannot compute EMA/RSI without data — use only OB score
             total = bull_pts + bear_pts
@@ -670,9 +700,12 @@ class ScoringEngine:
         # ── Momentum Confirmation (Institutional Filter) ─────────────────
         bull_candles = 0
         bear_candles = 0
+        price_move_3m = 0.0
+        price_move_5m = 0.0
         if len(closes) >= 3:
             bull_candles = sum(1 for c, o in zip(closes[-3:], opens[-3:]) if c > o)
             bear_candles = sum(1 for c, o in zip(closes[-3:], opens[-3:]) if c < o)
+            price_move_3m = (closes[-1] - closes[-3]) / closes[-3] if closes[-3] > 0 else 0.0
             
             if bull_candles >= 2:
                 bull_pts += 10
@@ -690,6 +723,34 @@ class ScoringEngine:
             for v in data[1:]:
                 e = v * k + e * (1 - k)
             return e
+
+        if len(closes) >= 5 and closes[-5] > 0:
+            price_move_5m = (closes[-1] - closes[-5]) / closes[-5]
+
+        if ob_signal in ("strong_bid", "mild_bid"):
+            if price_move_3m > 0.0008 and bull_candles >= 2:
+                bull_pts += ob_raw_pts
+                quality_pts += 2 if ob_signal == "strong_bid" else 1
+                reasons.append(f"Orderbook bid confirmed by price reaction ({price_move_3m*100:.2f}%) -> LONG +{ob_raw_pts}")
+            elif price_move_3m < -0.0008:
+                bear_pts += 2
+                failure_risk_pts += 6 if ob_signal == "strong_bid" else 3
+                reasons.append(f"Orderbook bid failed; price fell {price_move_3m*100:.2f}% -> absorption risk")
+            else:
+                quality_pts -= 1
+                reasons.append("Orderbook bid unconfirmed -> no direction boost")
+        elif ob_signal in ("strong_ask", "mild_ask"):
+            if price_move_3m < -0.0008 and bear_candles >= 2:
+                bear_pts += ob_raw_pts
+                quality_pts += 2 if ob_signal == "strong_ask" else 1
+                reasons.append(f"Orderbook ask confirmed by price reaction ({price_move_3m*100:.2f}%) -> SHORT +{ob_raw_pts}")
+            elif price_move_3m > 0.0008:
+                bull_pts += 2
+                failure_risk_pts += 6 if ob_signal == "strong_ask" else 3
+                reasons.append(f"Orderbook ask failed; price rose {price_move_3m*100:.2f}% -> squeeze/absorption risk")
+            else:
+                quality_pts -= 1
+                reasons.append("Orderbook ask unconfirmed -> no direction boost")
 
         ema8  = ema(closes[-21:], 8)  if len(closes) >= 8  else closes[-1]
         ema21 = ema(closes[-21:], 21) if len(closes) >= 21 else closes[-1]
@@ -737,20 +798,26 @@ class ScoringEngine:
                 if cvd_ratio > 0.20:
                     if price_move_5m > 0.001 and bull_candles >= 2:
                         bull_pts += 10
+                        quality_pts += 3
                         reasons.append(f"CVD bullish + price follow-through ({cvd_ratio*100:.0f}%, {price_move_5m*100:.2f}%)")
                     elif price_move_5m < -0.001:
                         bear_pts += 4
+                        failure_risk_pts += 5
                         reasons.append(f"CVD bullish but price falling ({price_move_5m*100:.2f}%) -> sell absorption risk")
                     else:
+                        failure_risk_pts += 2
                         reasons.append(f"CVD bullish without follow-through ({cvd_ratio*100:.0f}%) -> no boost")
                 elif cvd_ratio < -0.20:
                     if price_move_5m < -0.001 and bear_candles >= 2:
                         bear_pts += 10
+                        quality_pts += 3
                         reasons.append(f"CVD bearish + price follow-through ({cvd_ratio*100:.0f}%, {price_move_5m*100:.2f}%)")
                     elif price_move_5m > 0.001:
                         bull_pts += 4
+                        failure_risk_pts += 5
                         reasons.append(f"CVD bearish but price rising ({price_move_5m*100:.2f}%) -> buy absorption risk")
                     else:
+                        failure_risk_pts += 2
                         reasons.append(f"CVD bearish without follow-through ({cvd_ratio*100:.0f}%) -> no boost")
 
         # Audit-driven RSI handling:
@@ -767,9 +834,11 @@ class ScoringEngine:
 
             if reversal_checks >= 2:
                 bull_pts += 8
+                quality_pts += 2
                 reasons.append(f"RSI oversold confirmed by orderflow ({reversal_checks}/3) -> cautious LONG +8")
             else:
                 bull_pts = max(0, bull_pts - 10)
+                failure_risk_pts += 8
                 reasons.append(f"RSI oversold unconfirmed ({reversal_checks}/3) -> LONG catch-knife penalty -10")
         elif rsi is not None and rsi > 65:
             trend_continuation = ema8 > ema21 * 1.0005 and bull_candles >= 2
@@ -781,9 +850,11 @@ class ScoringEngine:
 
             if trend_continuation:
                 bull_pts += 10
+                quality_pts += 2
                 reasons.append("RSI overbought + bullish EMA/momentum -> LONG continuation +10")
             elif short_exhaustion:
                 bear_pts += 10
+                quality_pts += 2
                 reasons.append("RSI overbought + bearish orderflow -> SHORT exhaustion +10")
             else:
                 reasons.append("RSI overbought without exhaustion -> no SHORT boost")
@@ -821,7 +892,8 @@ class ScoringEngine:
         if bull_pts == bear_pts:
             return 0, Side.LONG, reasons + ["REJECT: bull/bear tie - no directional edge"]
         side = Side.LONG if bull_pts > bear_pts else Side.SHORT
-        raw = (bull_pts if side == Side.LONG else bear_pts)
+        direction_score = (bull_pts if side == Side.LONG else bear_pts)
+        raw = direction_score
         
         # ── MTF Confirmation (15m Trend Alignment) ──────────────────
         import config
@@ -834,9 +906,10 @@ class ScoringEngine:
                     mtf_bonus = min(getattr(scfg, "mtf_mid_bonus", 4), scfg.mtf_score_bonus)
                 else:
                     mtf_bonus = min(getattr(scfg, "mtf_high_bonus", 6), scfg.mtf_score_bonus)
-                raw += mtf_bonus
+                quality_pts += mtf_bonus
                 reasons.append(f"📡 15m MTF Align ({mtf_trend}) -> +{mtf_bonus} context bonus")
             else:
+                failure_risk_pts += abs(scfg.mtf_score_penalty)
                 raw += scfg.mtf_score_penalty
                 reasons.append(f"📡 15m MTF Discord ({mtf_trend}) → {scfg.mtf_score_penalty}")
                 # Hard reject for scalper if 15m trend is strongly against us
@@ -853,7 +926,13 @@ class ScoringEngine:
             log.debug(f"[{asset}] SCALPER REJECT: SHORT signal blocked by 1m Bullish Momentum")
             return 0, side, reasons + ["REJECT: Momentum against trade"]
             
-        score = min(raw, 100)
+        trade_quality_score = max(-20, min(25, quality_pts))
+        failure_risk_score = max(0, min(35, failure_risk_pts))
+        score = min(max(direction_score + trade_quality_score - failure_risk_score, 0), 100)
+        reasons.append(
+            f"Score split: direction={direction_score}, quality={trade_quality_score:+d}, "
+            f"failure_risk=-{failure_risk_score}, final={score}"
+        )
         return score, side, reasons
 
     def _infer_hh_hl_structure(self, closes: list) -> str:
@@ -1081,10 +1160,31 @@ class ScoringEngine:
             tp1       = round(mark_price * (1 - tp1_pct), 8)
             tp2       = round(mark_price * (1 - tp2_pct), 8)
 
+        direction_score = score
+        trade_quality_score = 0
+        failure_risk_score = 0
+        for reason in reversed(reasons):
+            if reason.startswith("Score split:"):
+                try:
+                    parts = {
+                        item.split("=")[0].strip(): item.split("=")[1].strip()
+                        for item in reason.replace("Score split:", "").split(",")
+                        if "=" in item
+                    }
+                    direction_score = int(parts.get("direction", direction_score))
+                    trade_quality_score = int(parts.get("quality", "0").replace("+", ""))
+                    failure_risk_score = abs(int(parts.get("failure_risk", "0").replace("+", "")))
+                except Exception:
+                    pass
+                break
+
         strength = SignalStrength.STRONG if score >= 70 else SignalStrength.MODERATE
         breakdown = ScoreBreakdown(
             raw_score=score,
             final_score=score,
+            direction_score=direction_score,
+            trade_quality_score=trade_quality_score,
+            failure_risk_score=failure_risk_score,
             session_bonus=session_bonus,
             reasons=reasons
         )
@@ -1499,6 +1599,9 @@ class ScoringEngine:
             total_bear=int(total_bear),
             raw_score=int(raw_score),
             final_score=int(final_score),
+            direction_score=int(raw_score),
+            trade_quality_score=int(final_score - raw_score) if final_score >= raw_score else 0,
+            failure_risk_score=int(raw_score - final_score) if final_score < raw_score else 0,
             reasons=all_reasons,
             warnings=all_warnings,
         )
