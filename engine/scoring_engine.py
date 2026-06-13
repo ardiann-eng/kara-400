@@ -131,6 +131,38 @@ class ScoringEngine:
         key = f"{mode.lower()}_{asset}"
         self._asset_signal_history.setdefault(key, []).append(time.time())
 
+    def _infer_setup_type(self, signal: TradeSignal) -> str:
+        reasons = " | ".join(getattr(signal.breakdown, "reasons", []) or []).lower()
+        if signal.side == Side.SHORT:
+            if "crowded-long reversal" in reasons:
+                return "short_crowded_reversal"
+            if "breakdown continuation" in reasons or "downtrend" in reasons or "bearish" in reasons:
+                return "short_breakdown"
+            return "no_trade_unclear"
+
+        if "reversal" in reasons or "oversold" in reasons or "support" in reasons or "reclaim" in reasons:
+            return "long_reversal"
+        return "long_continuation"
+
+    def _log_signal_marker(
+        self,
+        mode: str,
+        signal: TradeSignal,
+        *,
+        entry_location_quality: str = "na",
+        concentration_delta: int = 0,
+    ):
+        setup_type = self._infer_setup_type(signal)
+        log.info(
+            "[SIGNAL-MARKER] "
+            f"mode={mode} asset={signal.asset} side={signal.side.value.upper()} "
+            f"score={signal.score} setup_type={setup_type} "
+            f"meta_pattern_key={signal.meta_pattern_key or '-'} "
+            f"meta_delta={getattr(signal, 'meta_score_delta', 0):+d} "
+            f"entry_location_quality={entry_location_quality} "
+            f"concentration_delta={concentration_delta:+d}"
+        )
+
     def _load_vol_cache_from_db(self):
         """Load volatility cache dari SQLite saat startup — cegah 100 candleSnapshot sekaligus."""
         from core.db import user_db
@@ -425,8 +457,10 @@ class ScoringEngine:
         vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
         signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol, trend_pct)
 
+        entry_location_quality = "disabled"
         if getattr(config.SCALPER, "entry_location_gate_enabled", True):
             loc = self._validate_entry_location(signal, candles, vol_regime, realized_vol)
+            entry_location_quality = loc["quality"]
             loc_reason = (
                 f"Entry location {loc['quality']}: {loc['location_type']} "
                 f"(risk={loc['distance_pct']*100:.2f}%, room/risk={loc['room_risk']:.2f}) - {loc['reason']}"
@@ -457,6 +491,12 @@ class ScoringEngine:
 
         signal.meta_pattern_key = pattern_key
         signal.meta_score_delta = meta_delta
+        self._log_signal_marker(
+            "scalper",
+            signal,
+            entry_location_quality=entry_location_quality,
+            concentration_delta=concentration_add,
+        )
         return signal, score
 
     async def _fetch_scalper_mtf_candles(self, asset: str) -> list:
@@ -1512,6 +1552,12 @@ class ScoringEngine:
             trend_pct=trend_pct,
         )
 
+        self._log_signal_marker(
+            "standard",
+            signal,
+            entry_location_quality="na",
+            concentration_delta=concentration_add,
+        )
         return signal, final_score
 
     # ──────────────────────────────────────────
