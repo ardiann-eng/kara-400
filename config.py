@@ -200,9 +200,9 @@ class ScalperConfig:
     # [SL FIX 2026-04-28] Data: scalper SL WR rendah — 0.65% kena noise sebelum bergerak.
     # Dinaikkan ke 0.80% (+23%) supaya SL di luar zona noise 25x leverage.
     sl_pct:                  float = 0.0080   # 0.80% stop loss (was 0.65% — terlalu sempit)
-    tp1_pct:                 float = 0.0090   # 0.90% TP1 — close 60% (was 1.00%, RR 1.125x vs SL 0.80%)
-    tp2_pct:                 float = 0.0120   # 1.20% TP2 — close 40% (was 1.60%, RR 1.5x)
-    trailing_pct:            float = 0.0040   # 0.40% trailing on remainder
+    tp1_pct:                 float = 0.0050   # 0.50% TP1 — audit p75 winner ~0.57%
+    tp2_pct:                 float = 0.0090   # 0.90% TP2 — audit p90 winner ~1.02%
+    trailing_pct:            float = 0.0030   # 0.30% trailing after TP1; lock profits sooner
 
     # Timing
     max_hold_minutes:        float = 12.0     # force close after 12min if no TP hit
@@ -235,6 +235,16 @@ class ScalperConfig:
     # MTF Score weights
     mtf_score_bonus:         int = 12        # bonus if 1m aligns with 15m trend
     mtf_score_penalty:       int = -15       # penalty if counter-trend
+    mtf_bonus_floor_score:   int = 65        # audit: MTF align + score <65 had negative EV
+    mtf_bonus_high_score:    int = 72        # audit: 72+ bucket had positive EV
+    mtf_mid_bonus:           int = 4         # small confirmation only
+    mtf_high_bonus:          int = 6         # confirmation, not primary edge
+
+    # Entry location quality gate (adaptive, soft gate)
+    entry_location_gate_enabled: bool = True
+    entry_location_weak_penalty: int = 8
+    entry_location_excellent_bonus: int = 3
+    entry_location_weak_min_score: int = 72
 
 SCALPER = ScalperConfig()
 
@@ -253,9 +263,9 @@ class SignalConfig:
     min_bull_bear_gap_short: int   = 20       # SHORT: slightly higher than LONG (was 28 — too restrictive)
 
     # SHORT-specific filters (aktif saat ALLOW_SHORT = True)
-    # Solusi 2: Funding rate confirmation
-    # Real HL funding rates are typically +-0.00002; threshold must match that range
-    short_min_funding_rate:  float = 0.00001  # SHORT valid if funding >= +0.00001 (longs paying)
+    # Funding dipakai per tesis: breakdown continuation boleh funding negatif,
+    # crowded-long reversal butuh longs paying.
+    short_min_funding_rate:  float = 0.00001  # Reversal SHORT threshold: funding >= +0.00001
                                                # Previously 0.0002 which is 10x too high — blocked all SHORTs
     # Solusi 3: Anti-trend filter
     short_max_uptrend_pct:   float = 0.03     # Block SHORT jika 24h trend > +3% (jangan lawan trend)
@@ -294,7 +304,16 @@ class SignalConfig:
     meta_min_samples:        int = 3          # need at least 3 trades to trust winrate
     meta_boost_threshold:    float = 0.62     # winrate > 62% = +8 pts
     meta_penalty_threshold:  float = 0.40     # winrate < 40% = -12 pts
+    meta_min_pnl_ema_for_boost: float = 0.0   # boost only if EV proxy is positive
+    meta_penalty_pnl_ema:    float = 0.0      # penalize if rolling pnl is negative
     meta_max_delta:          int = 15         # absolute max cap for adj
+
+    # Asset concentration guard: avoid repeated trades on same coin unless score is stronger
+    asset_concentration_enabled: bool = True
+    asset_concentration_window_minutes: int = 60
+    asset_concentration_max_signals: int = 2
+    asset_concentration_threshold_step: int = 4
+    asset_concentration_max_threshold_add: int = 12
 
 
 SIGNAL = SignalConfig()
@@ -305,7 +324,7 @@ SIGNAL = SignalConfig()
 # [FIX 3 - 2026-04-22] SHORT disabled - WR hanya 31.4%, total loss -$9.15
 # SHORT stop_loss WR: 20%, total -$20.07
 # Re-enable ONLY when paper trade menunjukkan SHORT WR > 50% untuk 30+ trades
-ALLOW_SHORT = True   # Re-enabled dengan 3 filter proteksi: funding >= +0.0002, anti-trend > 2%, gap >= 28
+ALLOW_SHORT = True   # Re-enabled dengan tesis SHORT terpisah: breakdown continuation atau crowded-long reversal
 
 # ── HARD RESET ON DEPLOY ──────────────────────────────────────────────────────
 # Set KARA_HARD_RESET=true di env variable Railway/Docker sebelum deploy.

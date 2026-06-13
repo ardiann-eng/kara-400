@@ -278,6 +278,8 @@ class LiveExecutor:
             tp2=signal.tp2,
             trailing_high=signal.entry_price,
             signal_id=signal.signal_id,
+            meta_pattern_key=getattr(signal, 'meta_pattern_key', None),
+            meta_score_delta=getattr(signal, 'meta_score_delta', 0),
             is_paper=False,
             entry_score=signal.score,
         )
@@ -292,6 +294,8 @@ class LiveExecutor:
             "contracts": contracts,
             "notional":  contracts * pos.entry_price,
             "score":     signal.score,
+            "meta_boost": getattr(signal, "meta_score_delta", 0),
+            "meta_pattern_key": getattr(signal, "meta_pattern_key", ""),
             "timestamp": utcnow(),
         }
         get_excel_logger().log_trade(self.chat_id, log_data)
@@ -426,6 +430,8 @@ class LiveExecutor:
                 "pnl":       pnl,
                 "pnl_pct":   pos.floating_pct(current_price),
                 "score":     getattr(pos, 'entry_score', 0),
+                "meta_boost": getattr(pos, "meta_score_delta", 0),
+                "meta_pattern_key": getattr(pos, "meta_pattern_key", ""),
                 "timestamp": utcnow(),
             }
             from core.db import user_db

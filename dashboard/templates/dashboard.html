@@ -204,6 +204,56 @@
       border: 1px solid rgba(148, 163, 184, .15)
     }
 
+    .meta-card {
+      min-width: 156px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, rgba(255,255,255,.075), rgba(255,255,255,.025));
+      border: 1px solid rgba(196,181,253,.14);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .meta-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      border: 1px solid rgba(196,181,253,.14);
+      background: rgba(196,181,253,.08);
+      color: rgba(226,232,240,.82);
+      white-space: nowrap;
+    }
+
+    .decision-card {
+      display: grid;
+      grid-template-columns: 42px minmax(92px, 130px) 1fr minmax(78px, auto);
+      gap: 14px;
+      align-items: center;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, rgba(196,181,253,.07), rgba(255,255,255,.025));
+      border: 1px solid rgba(196,181,253,.10);
+    }
+
+    @media(max-width:767px) {
+      .decision-card {
+        grid-template-columns: 42px 1fr;
+      }
+      .decision-card .decision-pnl {
+        grid-column: 2;
+        text-align: left !important;
+      }
+      .decision-card .decision-reason {
+        grid-column: 1 / -1;
+      }
+    }
+
     .badge-amber {
       background: rgba(251, 191, 36, .1);
       color: #fbbf24;
@@ -1690,13 +1740,30 @@
         if (!trades.length) { tbody.innerHTML = `<tr><td colspan="11" class="text-center py-10 text-sm" style="color:rgba(196,181,253,.3)">No trades yet.</td></tr>`; return }
         const sideBadge = s => s === 'long' ? 'badge-green' : 'badge-red';
         const strBadge = s => s === 'strong' ? 'badge-green' : s === 'moderate' ? 'badge-amber' : 'badge-gray';
+        const metaTradeHtml = t => {
+          const delta = Number(t.meta_score_delta || 0);
+          const sign = delta > 0 ? '+' : '';
+          const color = delta > 0 ? '#34d399' : delta < 0 ? '#f87171' : 'rgba(226,232,240,.62)';
+          const key = t.meta_pattern_key || 'meta_pending';
+          const guards = (t.guard_reasons || []).slice(0, 2).map(r =>
+            `<div style="margin-top:6px;color:rgba(226,232,240,.58);font-size:10px;line-height:1.35">${r}</div>`
+          ).join('');
+          return `<div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;max-width:240px">
+            <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+              <span class="meta-chip">META</span>
+              <span class="meta-chip" style="color:${color}">${sign}${delta}</span>
+            </div>
+            <div style="color:rgba(196,181,253,.46);font-size:10px;line-height:1.35;word-break:break-word">${key}</div>
+            ${guards}
+          </div>`;
+        };
         // Desktop
         tbody.innerHTML = trades.map((t, i) => `
       <tr>
         <td class="font-mono text-xs" style="color:rgba(196,181,253,.3)">${i + 1}</td>
         <td class="font-mono font-semibold text-white">${t.asset}</td>
         <td><span class="badge ${sideBadge(t.side)}">${t.side.toUpperCase()}</span></td>
-        <td class="font-mono" style="color:#c4b5fd">${t.score}</td>
+        <td class="font-mono" style="color:#c4b5fd">${t.score}${metaTradeHtml(t)}</td>
         <td class="font-mono text-white">${fPrice(t.entry_price)}</td>
         <td class="font-mono" style="color:#f87171">${fPrice(t.stop_loss)}</td>
         <td class="font-mono" style="color:#34d399">${fPrice(t.tp1)}</td>
@@ -1722,6 +1789,7 @@
           <div><div class="text-xs mb-0.5" style="color:rgba(196,181,253,.4)">SL</div><div class="font-mono text-sm" style="color:#f87171">${fPrice(t.stop_loss)}</div></div>
           <div><div class="text-xs mb-0.5" style="color:rgba(196,181,253,.4)">TP1</div><div class="font-mono text-sm" style="color:#34d399">${fPrice(t.tp1)}</div></div>
         </div>
+        ${metaTradeHtml(t)}
       </div>`).join('');
       } catch (e) { tbody.innerHTML = `<tr><td colspan="11" class="text-center py-10 text-sm" style="color:#f87171">Error: ${e.message}</td></tr>` }
     }
@@ -1825,6 +1893,39 @@
     }
 
     // ── Meta Pattern Heatmap ─────────────────────────────────────────────────
+    function renderMetaPatternCard(p) {
+      const status = p.ev_status || 'watch';
+      const statusColor = status === 'boost' ? '#34d399' : status === 'penalty' ? '#f87171' : '#fbbf24';
+      const sideColor = p.side === 'LONG' ? '#34d399' : '#f87171';
+      const pnl = Number(p.pnl_ema || 0);
+      const pnlSign = pnl >= 0 ? '+' : '';
+      const bucket = p.score_bucket ? p.score_bucket.toUpperCase() : 'LEGACY';
+      const wr = Number(p.winrate || 0);
+      return `<div class="meta-card" title="${p.key}">
+        <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+          <div>
+            <div style="font-size:12px;font-weight:800;color:#f8fafc;font-family:JetBrains Mono,monospace">${p.asset}</div>
+            <div style="margin-top:3px;font-size:10px;color:${sideColor};font-weight:700">${p.side} / ${p.mode}</div>
+          </div>
+          <span class="meta-chip">${bucket}</span>
+        </div>
+        <div style="display:flex;align-items:end;justify-content:space-between;gap:12px">
+          <div>
+            <div style="font-size:10px;color:rgba(196,181,253,.48);margin-bottom:2px">Win rate</div>
+            <div style="font-size:22px;font-weight:900;color:${wr >= 55 ? '#34d399' : wr >= 45 ? '#fbbf24' : '#f87171'};font-family:JetBrains Mono,monospace">${wr}%</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:10px;color:rgba(196,181,253,.48);margin-bottom:2px">PnL EMA</div>
+            <div style="font-size:13px;font-weight:800;color:${pnl >= 0 ? '#34d399' : '#f87171'};font-family:JetBrains Mono,monospace">${pnlSign}$${Math.abs(pnl).toFixed(2)}</div>
+          </div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          <span class="meta-chip" style="color:${statusColor};border-color:${statusColor}55">${status.toUpperCase()}</span>
+          <span class="meta-chip">${p.samples} samples</span>
+        </div>
+      </div>`;
+    }
+
     async function loadMetaPatterns() {
       try {
         const d = await api('/api/ml_meta_patterns');
@@ -1841,6 +1942,7 @@
         count.textContent = `${d.patterns.length} pola`;
 
         grid.innerHTML = d.patterns.map(p => {
+          return renderMetaPatternCard(p);
           const wr = p.winrate;
           const bg = wr >= 70
             ? 'rgba(52,211,153,.15)'
@@ -1876,6 +1978,37 @@
     }
 
     // ── Live Decision Feed ────────────────────────────────────────────────────
+    function renderDecisionCard(f) {
+      const pnlColor = f.win ? '#34d399' : '#f87171';
+      const pnlSign = Number(f.pnl_usd || 0) >= 0 ? '+' : '';
+      const sideColor = f.side === 'LONG' ? '#34d399' : '#f87171';
+      const ts = f.created_at ? new Date(f.created_at * 1000).toLocaleTimeString('id-ID', {hour:'2-digit',minute:'2-digit'}) : '--:--';
+      const bucket = f.score_bucket ? f.score_bucket.toUpperCase() : 'LEGACY';
+      const status = f.ev_status || 'watch';
+      const statusColor = status === 'boost' ? '#34d399' : status === 'penalty' ? '#f87171' : '#fbbf24';
+      const boost = f.meta_boost !== null && f.meta_boost !== undefined ? Number(f.meta_boost) : null;
+      const boostText = boost === null ? 'META --' : `META ${boost >= 0 ? '+' : ''}${boost}`;
+      return `<div class="decision-card">
+        <div style="font-size:10px;color:rgba(196,181,253,.36);font-family:JetBrains Mono,monospace">${ts}</div>
+        <div>
+          <div style="font-size:12px;font-weight:800;color:#e2e8f0;font-family:JetBrains Mono,monospace">${f.asset}</div>
+          <div style="margin-top:3px;font-size:10px;color:${sideColor};font-weight:800">${f.side}</div>
+        </div>
+        <div class="decision-reason" style="min-width:0">
+          <div style="font-size:11px;color:rgba(226,232,240,.72);line-height:1.4">Score ${f.score}/100</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:7px">
+            <span class="meta-chip">${bucket}</span>
+            <span class="meta-chip" style="color:${statusColor};border-color:${statusColor}55">${status.toUpperCase()}</span>
+            <span class="meta-chip">${boostText}</span>
+          </div>
+          <div style="margin-top:7px;font-size:10px;color:rgba(196,181,253,.42);line-height:1.35;word-break:break-word">${f.meta_key || 'meta_pending'}</div>
+        </div>
+        <div class="decision-pnl" style="font-size:12px;font-weight:800;color:${pnlColor};font-family:JetBrains Mono,monospace;text-align:right">
+          ${pnlSign}$${Math.abs(Number(f.pnl_usd || 0)).toFixed(2)}
+        </div>
+      </div>`;
+    }
+
     async function loadDecisionFeed() {
       try {
         const d = await api('/api/ml_decision_feed');
@@ -1890,6 +2023,7 @@
         empty.style.display = 'none';
 
         feed.innerHTML = d.feed.map(f => {
+          return renderDecisionCard(f);
           const pnlColor  = f.win ? '#34d399' : '#f87171';
           const pnlSign   = f.pnl_usd >= 0 ? '+' : '';
           const sideColor = f.side === 'LONG' ? '#34d399' : '#f87171';

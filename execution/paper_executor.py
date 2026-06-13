@@ -173,6 +173,8 @@ class PaperExecutor:
             trailing_high=fill_price,
             liquidation_price=liq_price,
             signal_id=signal.signal_id,
+            meta_pattern_key=getattr(signal, 'meta_pattern_key', None),
+            meta_score_delta=getattr(signal, 'meta_score_delta', 0),
             trade_mode=getattr(signal, 'trade_mode', 'standard'),
             is_paper=True,
             entry_score=signal.score,
@@ -201,6 +203,8 @@ class PaperExecutor:
             "notional": contracts * fill_price,
             "margin":   margin,
             "score":    signal.score,
+            "meta_boost": getattr(signal, "meta_score_delta", 0),
+            "meta_pattern_key": getattr(signal, "meta_pattern_key", ""),
             "timestamp":utcnow(),
         }
         self._trade_log.append(log_data)

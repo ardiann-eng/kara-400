@@ -47,6 +47,12 @@ class OIFundingAnalyzer:
         warnings = []
 
         fr = funding.funding_rate
+        oi_chg = oi.oi_change_pct
+        oi_expanding = oi_chg > SIGNAL.oi_change_threshold_pct
+        price_up = price_change_1h > 0.002
+        price_down = price_change_1h < -0.002
+        price_failed_up = price_change_1h <= 0.001
+        price_failed_down = price_change_1h >= -0.001
         log.debug(f"[FUNDING] {asset}: rate={fr:.6f} (is this 0.0? then API fetch failed)")
 
         # ── 1. Funding Rate Analysis ──────────────────────────────────
@@ -54,47 +60,51 @@ class OIFundingAnalyzer:
         # Extreme is around 0.0001+ (0.01%/8h)
         # Very extreme is 0.0003+ (0.03%/8h)
         
-        # POSITIVE funding = extreme momentum = LONG signal
-        if fr > SIGNAL.funding_extreme_threshold * 2:     # > 0.0006
-            bull += 18  # reduced from 20 to temper inflation
-            reasons.append(
-                f"EXTREME positive funding {fr*100:.4f}%/8h - massive upside momentum -> LONG"
-            )
-        elif fr > SIGNAL.funding_extreme_threshold:        # > 0.0003
-            bull += 12  # reduced from 14
-            reasons.append(
-                f"HIGH positive funding {fr*100:.4f}%/8h -> STRONG LONG momentum"
-            )
-        elif fr > 0.00005:                                 # > 0.005%/8h - meaningful positive
-            bull += 6   # reduced from 8
-            reasons.append(
-                f"Moderate positive funding {fr*100:.4f}%/8h -> LONG tilt"
-            )
-        elif fr < -SIGNAL.funding_extreme_threshold * 2:   # < -0.0006
-            bear += 18  # reduced from 20 to temper inflation
-            reasons.append(
-                f"EXTREME negative funding {fr*100:.4f}%/8h - massive downside momentum -> SHORT"
-            )
-        elif fr < -SIGNAL.funding_extreme_threshold:       # < -0.0003
-            bear += 12  # reduced from 14
-            reasons.append(
-                f"HIGH negative funding {fr*100:.4f}%/8h -> STRONG SHORT momentum"
-            )
-        elif fr < -0.00005:                                # < -0.005%/8h - meaningful negative
-            bear += 6   # reduced from 8
-            reasons.append(
-                f"Moderate negative funding {fr*100:.4f}%/8h -> SHORT tilt"
-            )
-        elif fr > 0.00001:                                 # slightly positive
-            bull += 3
-            reasons.append(
-                f"Slight positive funding {fr*100:.4f}%/8h -> minor LONG lean"
-            )
-        elif fr < -0.00001:                                # slightly negative
-            bear += 3
-            reasons.append(
-                f"Slight negative funding {fr*100:.4f}%/8h -> minor SHORT lean"
-            )
+        def funding_tier_points(rate_abs: float) -> int:
+            if rate_abs > SIGNAL.funding_extreme_threshold * 2:
+                return 18
+            if rate_abs > SIGNAL.funding_extreme_threshold:
+                return 12
+            if rate_abs > 0.00005:
+                return 6
+            if rate_abs > 0.00001:
+                return 3
+            return 0
+
+        funding_pts = funding_tier_points(abs(fr))
+
+        if fr > 0.00001:
+            if price_up and oi_expanding:
+                bull += funding_pts
+                reasons.append(
+                    f"Positive funding {fr*100:.4f}%/8h + price/OI expansion -> LONG continuation (+{funding_pts})"
+                )
+            elif price_failed_up:
+                reversal_pts = max(3, funding_pts // 2)
+                bear += reversal_pts
+                reasons.append(
+                    f"Positive funding {fr*100:.4f}%/8h + failed upside -> crowded-long reversal risk (+{reversal_pts} SHORT)"
+                )
+            else:
+                reasons.append(
+                    f"Positive funding {fr*100:.4f}%/8h but no price/OI thesis -> no directional boost"
+                )
+        elif fr < -0.00001:
+            if price_down and oi_expanding:
+                bear += funding_pts
+                reasons.append(
+                    f"Negative funding {fr*100:.4f}%/8h + price/OI expansion -> SHORT breakdown continuation (+{funding_pts})"
+                )
+            elif price_failed_down:
+                reversal_pts = max(3, funding_pts // 2)
+                bull += reversal_pts
+                reasons.append(
+                    f"Negative funding {fr*100:.4f}%/8h + failed downside -> crowded-short squeeze risk (+{reversal_pts} LONG)"
+                )
+            else:
+                reasons.append(
+                    f"Negative funding {fr*100:.4f}%/8h but no price/OI thesis -> no directional boost"
+                )
         else:
             # Truly flat funding — follow price momentum
             if price_change_1h > 0.001:
@@ -126,18 +136,30 @@ class OIFundingAnalyzer:
                 trend_str = "rising" if slope > 0 else "falling"
                 log.debug(f"[FTRD] {asset}: funding_slope={slope:.6f}, trend={trend_str}")
                 
-                # Positive slope = strong upside momentum = LONG pressure
                 if slope > 0.000005:
                     pts = min(int(slope * 400000), 8)
                     pts = max(pts, 1)
-                    bull += pts
-                    reasons.append(f"• Funding trend: 📈 RISING (slope {slope:.6f}) -> LONG pressure")
-                # Negative slope = strong downside momentum = SHORT pressure
+                    if price_up:
+                        bull += pts
+                        reasons.append(f"• Funding trend: RISING (slope {slope:.6f}) + price up -> LONG continuation")
+                    elif price_failed_up:
+                        rev_pts = max(1, pts // 2)
+                        bear += rev_pts
+                        reasons.append(f"• Funding trend: RISING (slope {slope:.6f}) + failed upside -> crowded-long reversal (+{rev_pts} SHORT)")
+                    else:
+                        reasons.append(f"• Funding trend: RISING (slope {slope:.6f}) but no price thesis -> Neutral")
                 elif slope < -0.000005:
                     pts = min(int(abs(slope) * 400000), 8)
                     pts = max(pts, 1)
-                    bear += pts
-                    reasons.append(f"• Funding trend: 📉 FALLING (slope {slope:.6f}) -> SHORT pressure")
+                    if price_down:
+                        bear += pts
+                        reasons.append(f"• Funding trend: FALLING (slope {slope:.6f}) + price down -> SHORT continuation")
+                    elif price_failed_down:
+                        rev_pts = max(1, pts // 2)
+                        bull += rev_pts
+                        reasons.append(f"• Funding trend: FALLING (slope {slope:.6f}) + failed downside -> crowded-short squeeze (+{rev_pts} LONG)")
+                    else:
+                        reasons.append(f"• Funding trend: FALLING (slope {slope:.6f}) but no price thesis -> Neutral")
                 else:
                     reasons.append(f"• Funding trend: ⚖️ STABLE (slope {slope:.6f}) -> Neutral")
 
@@ -146,19 +168,25 @@ class OIFundingAnalyzer:
             pred_diff = funding.predicted_rate - fr
             if abs(pred_diff) > 0.00005:  # lowered from 0.0003
                 if pred_diff > 0:
-                    # Predicted funding more positive = momentum confirming LONG
-                    bull += 3
-                    reasons.append(
-                        f"Predicted funding shifting positive -> LONG pressure building"
-                    )
+                    if price_up:
+                        bull += 3
+                        reasons.append("Predicted funding shifting positive + price up -> LONG continuation")
+                    elif price_failed_up:
+                        bear += 2
+                        reasons.append("Predicted funding shifting positive + failed upside -> crowded-long reversal")
+                    else:
+                        reasons.append("Predicted funding shifting positive but no price thesis -> Neutral")
                 else:
-                    bear += 3
-                    reasons.append(
-                        f"Predicted funding shifting negative -> SHORT pressure building"
-                    )
+                    if price_down:
+                        bear += 3
+                        reasons.append("Predicted funding shifting negative + price down -> SHORT continuation")
+                    elif price_failed_down:
+                        bull += 2
+                        reasons.append("Predicted funding shifting negative + failed downside -> crowded-short squeeze")
+                    else:
+                        reasons.append("Predicted funding shifting negative but no price thesis -> Neutral")
 
         # ── 4. OI Change Analysis ─────────────────────────────────────
-        oi_chg = oi.oi_change_pct
         if price_change_1h > 0.002 and oi_chg > SIGNAL.oi_change_threshold_pct:
             bull += 22  # increased from 18
             reasons.append(
