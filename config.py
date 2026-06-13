@@ -357,7 +357,7 @@ INTELLIGENCE_RETRAIN_INTERVAL_HOURS = 12  # retrain max 2x per hari
 # 08:00 UTC: WR 7.1%, -$7.81 | 09:00 UTC: WR 21.4%, -$7.85
 # Total 2 jam: -$15.66 = hampir seluruh account loss
 # Volatilitas London open menyebabkan SL langsung kena opening spike
-BLOCKED_HOURS_UTC = [8, 9]
+BLOCKED_HOURS_UTC = []
 
 # ──────────────────────────────────────────────
 # MARKET SCANNING (smart selection filter)
