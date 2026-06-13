@@ -389,11 +389,19 @@ async def get_recent_trades(limit: int = 20):
         signals = user_db.load_signals(limit=limit)
         result = []
         for s in signals:
+            reasons = list(getattr(s.breakdown, "reasons", []) or [])
+            guard_reasons = [
+                r for r in reasons
+                if "Entry location" in r or "Asset concentration guard" in r
+            ]
             result.append({
                 "signal_id":  s.signal_id,
                 "asset":      s.asset,
                 "side":       s.side.value,
                 "score":      s.score,
+                "meta_pattern_key": getattr(s, "meta_pattern_key", None) or getattr(s.breakdown, "meta_pattern_key", None),
+                "meta_score_delta": getattr(s, "meta_score_delta", 0) or getattr(s.breakdown, "meta_score_delta", 0),
+                "guard_reasons": guard_reasons[-2:],
                 "entry_price": s.entry_price,
                 "stop_loss":  s.stop_loss,
                 "tp1":        s.tp1,
@@ -481,20 +489,44 @@ async def get_ml_meta_patterns():
         ).fetchall()
         conn.close()
 
+        def parse_meta_key(key: str):
+            parts = (key or "").split("_")
+            buckets = {"s60_64", "s65_71", "s72p", "sub60"}
+            score_bucket = ""
+            if len(parts) >= 4 and "_".join(parts[-2:]) in buckets:
+                score_bucket = "_".join(parts[-2:])
+                parts = parts[:-2]
+            elif parts and parts[-1] in buckets:
+                score_bucket = parts[-1]
+                parts = parts[:-1]
+
+            mode = parts[0] if len(parts) >= 3 else "?"
+            side = parts[-1] if len(parts) >= 3 else "?"
+            asset = "_".join(parts[1:-1]) if len(parts) >= 3 else key
+            return mode, asset, side, score_bucket
+
         patterns = []
         for r in rows:
-            key = r["pattern_key"]          # e.g. "scalper_APE_long"
-            parts = key.split("_")
-            mode  = parts[0] if len(parts) >= 3 else "?"
-            side  = parts[-1] if len(parts) >= 3 else "?"
-            asset = "_".join(parts[1:-1])   # handles multi-underscore assets
+            key = r["pattern_key"]
+            mode, asset, side, score_bucket = parse_meta_key(key)
+            wr = float(r["winrate_ema"] or 0)
+            pnl_ema = float(r["pnl_ema"] or 0)
+            ev_status = "boost" if (
+                wr >= config.SIGNAL.meta_boost_threshold
+                and pnl_ema > config.SIGNAL.meta_min_pnl_ema_for_boost
+            ) else "penalty" if (
+                wr <= config.SIGNAL.meta_penalty_threshold
+                or pnl_ema < config.SIGNAL.meta_penalty_pnl_ema
+            ) else "watch"
             patterns.append({
                 "key":       key,
                 "mode":      mode,
                 "asset":     asset.upper(),
                 "side":      side.upper(),
-                "winrate":   round(r["winrate_ema"] * 100, 1),
-                "pnl_ema":   round(r["pnl_ema"], 2),
+                "score_bucket": score_bucket,
+                "ev_status": ev_status,
+                "winrate":   round(wr * 100, 1),
+                "pnl_ema":   round(pnl_ema, 2),
                 "samples":   r["samples"],
                 "updated_at": int(r["updated_at"] or 0),
             })
@@ -517,6 +549,18 @@ async def get_ml_decision_feed():
         conn.close()
 
         import json as _json
+        def parse_meta_key(key: str):
+            parts = (key or "").split("_")
+            buckets = {"s60_64", "s65_71", "s72p", "sub60"}
+            score_bucket = ""
+            if len(parts) >= 4 and "_".join(parts[-2:]) in buckets:
+                score_bucket = "_".join(parts[-2:])
+                parts = parts[:-2]
+            elif parts and parts[-1] in buckets:
+                score_bucket = parts[-1]
+                parts = parts[:-1]
+            return score_bucket
+
         feed = []
         for r in rows:
             try:
@@ -526,6 +570,8 @@ async def get_ml_decision_feed():
             meta_key   = d.get("meta_pattern_key", "")
             meta_boost = d.get("meta_boost", None)
             score      = d.get("score", d.get("entry_score", 0))
+            score_bucket = parse_meta_key(meta_key)
+            ev_status = "boost" if (meta_boost or 0) > 0 else "penalty" if (meta_boost or 0) < 0 else "watch"
             feed.append({
                 "asset":      r["asset"],
                 "side":       r["side"].upper(),
@@ -534,6 +580,8 @@ async def get_ml_decision_feed():
                 "score":      score,
                 "meta_key":   meta_key,
                 "meta_boost": meta_boost,
+                "score_bucket": score_bucket,
+                "ev_status": ev_status,
                 "created_at": int(r["created_at"] or 0),
                 "win":        (r["pnl_usd"] or 0) > 0,
             })

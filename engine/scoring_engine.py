@@ -93,10 +93,43 @@ class ScoringEngine:
         # MTF Trend Cache: asset -> (timestamp, trend_string)
         self._mtf_cache: Dict[str, Tuple[float, str]] = {}
 
+        # Recent accepted signal timestamps per asset/mode for concentration control.
+        self._asset_signal_history: Dict[str, List[float]] = {}
+
+    @staticmethod
+    def _ema(data: list, period: int) -> float:
+        if not data:
+            return 0.0
+        k = 2 / (period + 1)
+        value = data[0]
+        for item in data[1:]:
+            value = item * k + value * (1 - k)
+        return value
+
     def dump_oi_state(self):
         """Persist OI snapshots to database to prevent amnesia on restart."""
         from core.db import user_db
         user_db.save_oi_snapshots_batch(self._oi_snapshots)
+
+    def _asset_concentration_threshold_add(self, asset: str, mode: str) -> int:
+        if not getattr(config.SIGNAL, "asset_concentration_enabled", True):
+            return 0
+
+        window_sec = getattr(config.SIGNAL, "asset_concentration_window_minutes", 60) * 60
+        max_signals = getattr(config.SIGNAL, "asset_concentration_max_signals", 2)
+        step = getattr(config.SIGNAL, "asset_concentration_threshold_step", 4)
+        max_add = getattr(config.SIGNAL, "asset_concentration_max_threshold_add", 12)
+        now = time.time()
+        key = f"{mode.lower()}_{asset}"
+        recent = [ts for ts in self._asset_signal_history.get(key, []) if now - ts <= window_sec]
+        self._asset_signal_history[key] = recent
+
+        excess = max(0, len(recent) - max_signals + 1)
+        return min(excess * step, max_add)
+
+    def _record_asset_signal(self, asset: str, mode: str):
+        key = f"{mode.lower()}_{asset}"
+        self._asset_signal_history.setdefault(key, []).append(time.time())
 
     def _load_vol_cache_from_db(self):
         """Load volatility cache dari SQLite saat startup — cegah 100 candleSnapshot sekaligus."""
@@ -205,7 +238,7 @@ class ScoringEngine:
             raw_score = total_bear + confidence_bonus
         else:
             side = Side.LONG
-            raw_score = total_bull
+            raw_score = 0
 
         # Session bonus
         session_bonus = params.get("session_bonus", 0)
@@ -260,6 +293,7 @@ class ScoringEngine:
                 if sig and (now_ts - last_ts >= cooldown_secs):
                     signals["scalper"] = sig
                     self._last_signal_ts[f"{asset}_scalper"] = now_ts
+                    self._record_asset_signal(asset, "scalper")
                     log.info(f"⚡ SCALPER SIGNAL: {asset} {sig.side.value.upper()} score={score_scl} (Meta: {getattr(sig, 'meta_score_delta', 0):+d})")
                 elif sig:
                     log.debug(f"{asset} [SCALPER]: cooldown active (score={score_scl} blocked)")
@@ -286,6 +320,7 @@ class ScoringEngine:
                 if sig and (now_ts - last_ts >= cooldown_secs):
                     signals["standard"] = sig
                     self._last_signal_ts[f"{asset}_standard"] = now_ts
+                    self._record_asset_signal(asset, "standard")
             except RuntimeError as e:
                 if "backoff" in str(e):
                     log.debug(f"[SCAN] {asset}: skipped (API backoff)")
@@ -368,9 +403,58 @@ class ScoringEngine:
             reasons.append(meta_reason)
         score = max(0, min(score, 100))
 
+        if score < config.SCALPER.min_score_to_enter:
+            log.debug(
+                f"[SCALPER] {asset}: score {score} < {config.SCALPER.min_score_to_enter} after meta-learning"
+            )
+            return None, score
+
+        concentration_add = self._asset_concentration_threshold_add(asset, "scalper")
+        if concentration_add > 0:
+            required_score = min(100, config.SCALPER.min_score_to_enter + concentration_add)
+            reasons.append(
+                f"Asset concentration guard: {asset} requires {required_score}+ after recent repeats"
+            )
+            if score < required_score:
+                log.debug(
+                    f"[SCALPER] {asset}: score {score} < concentration threshold {required_score}"
+                )
+                return None, score
+
         # 4. Build signal with scalper TP/SL (now dynamic based on Volatility)
         vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
         signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol, trend_pct)
+
+        if getattr(config.SCALPER, "entry_location_gate_enabled", True):
+            loc = self._validate_entry_location(signal, candles, vol_regime, realized_vol)
+            loc_reason = (
+                f"Entry location {loc['quality']}: {loc['location_type']} "
+                f"(risk={loc['distance_pct']*100:.2f}%, room/risk={loc['room_risk']:.2f}) - {loc['reason']}"
+            )
+            if loc["quality"] == "invalid":
+                log.debug(f"[SCALPER] {asset}: REJECT {loc_reason}")
+                return None, score
+            if loc["quality"] == "weak":
+                weak_min = getattr(config.SCALPER, "entry_location_weak_min_score", 72)
+                if score < weak_min:
+                    log.debug(f"[SCALPER] {asset}: REJECT weak location score {score} < {weak_min} | {loc_reason}")
+                    return None, score
+                penalty = getattr(config.SCALPER, "entry_location_weak_penalty", 8)
+                score = max(0, score - penalty)
+                signal.score = score
+                signal.breakdown.raw_score = score
+                signal.breakdown.final_score = score
+                signal.breakdown.reasons.append(f"{loc_reason}; score -{penalty}")
+            elif loc["quality"] == "excellent":
+                bonus = getattr(config.SCALPER, "entry_location_excellent_bonus", 3)
+                score = min(100, score + bonus)
+                signal.score = score
+                signal.breakdown.raw_score = score
+                signal.breakdown.final_score = score
+                signal.breakdown.reasons.append(f"{loc_reason}; score +{bonus}")
+            else:
+                signal.breakdown.reasons.append(loc_reason)
+
         signal.meta_pattern_key = pattern_key
         signal.meta_score_delta = meta_delta
         return signal, score
@@ -462,6 +546,7 @@ class ScoringEngine:
         bull_pts = 0
         bear_pts = 0
         reasons = []
+        ob_imb = 0.0
 
         # ── Orderbook Imbalance (from cache) ─────────────────────────
         ob = self.cache.orderbook.get(asset) if hasattr(self.cache, 'orderbook') else None
@@ -487,6 +572,7 @@ class ScoringEngine:
                 ask_liq = sum(px * sz for px, sz in asks if px > 0 and sz > 0)
                 if (bid_liq + ask_liq) > 0:
                     imb = (bid_liq - ask_liq) / (bid_liq + ask_liq)
+                    ob_imb = imb
                 
                 # Spread Filter (Institutional Filter)
                 if bids and asks and bids[0][0] > 0:
@@ -513,7 +599,9 @@ class ScoringEngine:
         if len(candles) < 10:
             # Cannot compute EMA/RSI without data — use only OB score
             total = bull_pts + bear_pts
-            side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
+            if bull_pts == bear_pts:
+                return 0, Side.LONG, reasons + ["REJECT: bull/bear tie - no directional edge"]
+            side = Side.LONG if bull_pts > bear_pts else Side.SHORT
             # Skip setting bull_candles/bear_candles — default 0
             bull_candles = 0
             bear_candles = 0
@@ -534,7 +622,9 @@ class ScoringEngine:
                     pass
 
         if len(closes) < 10:
-            side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
+            if bull_pts == bear_pts:
+                return 0, Side.LONG, reasons + ["REJECT: bull/bear tie - no directional edge"]
+            side = Side.LONG if bull_pts > bear_pts else Side.SHORT
             return min(bull_pts + bear_pts, 100), side, reasons
 
         # ── Momentum Confirmation (Institutional Filter) ─────────────────
@@ -572,6 +662,7 @@ class ScoringEngine:
             reasons.append(f"📉 EMA8 ({ema8:.4f}) < EMA21 ({ema21:.4f}) → bearish")
 
         # ── RSI 14 (1m) ──────────────────────────────────────────────
+        rsi = None
         if len(closes) >= 15:
             gains = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
             losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
@@ -584,16 +675,17 @@ class ScoringEngine:
                 rsi = 100.0
 
             if rsi < 35:
-                bull_pts += 15
+                # Audit: oversold LONG was negative EV; confirm after CVD/orderbook.
                 reasons.append(f"📊 RSI oversold ({rsi:.1f}) → buy signal")
             elif rsi > 65:
-                bear_pts += 15
+                # Audit: overbought often worked as LONG continuation, not blind SHORT.
                 reasons.append(f"📊 RSI overbought ({rsi:.1f}) → sell signal")
             else:
                 reasons.append(f"📊 RSI neutral ({rsi:.1f})")
 
         # ── Short-term CVD (last 80 trades from cache) ────────────────
         recent_trades = self.cache.trades.get(asset, []) if hasattr(self.cache, 'trades') else []
+        cvd_ratio = None
         if len(recent_trades) >= 20:
             sample = recent_trades[-80:]
             buy_vol = sum(float(t.get('sz', 0)) for t in sample if t.get('side', '') in ('B', 'buy', 'Ask'))
@@ -601,12 +693,60 @@ class ScoringEngine:
             total_vol = buy_vol + sell_vol
             if total_vol > 0:
                 cvd_ratio = (buy_vol - sell_vol) / total_vol
+                price_move_5m = (closes[-1] - closes[-5]) / closes[-5] if len(closes) >= 5 and closes[-5] > 0 else 0.0
                 if cvd_ratio > 0.20:
-                    bull_pts += 12
-                    reasons.append(f"💚 CVD bullish ({cvd_ratio*100:.0f}% net buy pressure)")
+                    if price_move_5m > 0.001 and bull_candles >= 2:
+                        bull_pts += 10
+                        reasons.append(f"CVD bullish + price follow-through ({cvd_ratio*100:.0f}%, {price_move_5m*100:.2f}%)")
+                    elif price_move_5m < -0.001:
+                        bear_pts += 4
+                        reasons.append(f"CVD bullish but price falling ({price_move_5m*100:.2f}%) -> sell absorption risk")
+                    else:
+                        reasons.append(f"CVD bullish without follow-through ({cvd_ratio*100:.0f}%) -> no boost")
                 elif cvd_ratio < -0.20:
-                    bear_pts += 12
-                    reasons.append(f"❤️ CVD bearish ({cvd_ratio*100:.0f}% net sell pressure)")
+                    if price_move_5m < -0.001 and bear_candles >= 2:
+                        bear_pts += 10
+                        reasons.append(f"CVD bearish + price follow-through ({cvd_ratio*100:.0f}%, {price_move_5m*100:.2f}%)")
+                    elif price_move_5m > 0.001:
+                        bull_pts += 4
+                        reasons.append(f"CVD bearish but price rising ({price_move_5m*100:.2f}%) -> buy absorption risk")
+                    else:
+                        reasons.append(f"CVD bearish without follow-through ({cvd_ratio*100:.0f}%) -> no boost")
+
+        # Audit-driven RSI handling:
+        # Oversold LONG was the worst RSI bucket, so it needs orderflow confirmation.
+        # Overbought worked better as continuation context than as automatic SHORT.
+        if rsi is not None and rsi < 35:
+            reversal_checks = 0
+            if cvd_ratio is not None and cvd_ratio > 0.20:
+                reversal_checks += 1
+            if ob_imb > 0.60:
+                reversal_checks += 1
+            if bull_candles >= 2 and closes[-1] > closes[-2]:
+                reversal_checks += 1
+
+            if reversal_checks >= 2:
+                bull_pts += 8
+                reasons.append(f"RSI oversold confirmed by orderflow ({reversal_checks}/3) -> cautious LONG +8")
+            else:
+                bull_pts = max(0, bull_pts - 10)
+                reasons.append(f"RSI oversold unconfirmed ({reversal_checks}/3) -> LONG catch-knife penalty -10")
+        elif rsi is not None and rsi > 65:
+            trend_continuation = ema8 > ema21 * 1.0005 and bull_candles >= 2
+            short_exhaustion = (
+                ema8 < ema21 * 0.9995
+                and bear_candles >= 2
+                and (ob_imb < -0.40 or (cvd_ratio is not None and cvd_ratio < -0.20))
+            )
+
+            if trend_continuation:
+                bull_pts += 10
+                reasons.append("RSI overbought + bullish EMA/momentum -> LONG continuation +10")
+            elif short_exhaustion:
+                bear_pts += 10
+                reasons.append("RSI overbought + bearish orderflow -> SHORT exhaustion +10")
+            else:
+                reasons.append("RSI overbought without exhaustion -> no SHORT boost")
 
         # ── Volume Surge (2min vs 10min average) ──────────────────────
         if len(volumes) >= 10:
@@ -618,25 +758,29 @@ class ScoringEngine:
                     # High volume surge — follow the direction
                     extra = min(int((surge - 2.5) * 5), 10)
                     reasons.append(f"🔥 Volume surge {surge:.1f}x avg (+{extra} pts momentum)")
-                    if bull_pts >= bear_pts:
+                    if bull_pts > bear_pts:
                         bull_pts += extra
-                    else:
+                    elif bear_pts > bull_pts:
                         bear_pts += extra
+                    else:
+                        reasons.append("Volume surge ignored on bull/bear tie")
 
         # ── Market Structure HH/HL (cache-first: reuse existing 1m candles) ──
         trend_state = self._infer_hh_hl_structure(closes)
         import config
         if trend_state == "bull":
             bull_pts += config.SIGNAL.structure_scalper_bonus
-            reasons.append(f"🧩 1m structure HH/HL (+{config.SIGNAL.structure_scalper_bonus})")
+            reasons.append(f"🧩 1m bullish break + follow-through (+{config.SIGNAL.structure_scalper_bonus})")
         elif trend_state == "bear":
             bear_pts += config.SIGNAL.structure_scalper_bonus
-            reasons.append(f"🧩 1m structure LH/LL (+{config.SIGNAL.structure_scalper_bonus})")
+            reasons.append(f"🧩 1m bearish break + follow-through (+{config.SIGNAL.structure_scalper_bonus})")
         else:
             reasons.append("🧩 1m structure neutral")
 
         # ── Final tally & Consensus Filter ────────────────────────────
-        side = Side.LONG if bull_pts >= bear_pts else Side.SHORT
+        if bull_pts == bear_pts:
+            return 0, Side.LONG, reasons + ["REJECT: bull/bear tie - no directional edge"]
+        side = Side.LONG if bull_pts > bear_pts else Side.SHORT
         raw = (bull_pts if side == Side.LONG else bear_pts)
         
         # ── MTF Confirmation (15m Trend Alignment) ──────────────────
@@ -644,8 +788,14 @@ class ScoringEngine:
         scfg = config.SCALPER
         if mtf_trend != "neutral":
             if (side == Side.LONG and mtf_trend == "bull") or (side == Side.SHORT and mtf_trend == "bear"):
-                raw += scfg.mtf_score_bonus
-                reasons.append(f"📡 15m MTF Align ({mtf_trend}) → +{scfg.mtf_score_bonus}")
+                if raw < getattr(scfg, "mtf_bonus_floor_score", 65):
+                    mtf_bonus = 0
+                elif raw < getattr(scfg, "mtf_bonus_high_score", 72):
+                    mtf_bonus = min(getattr(scfg, "mtf_mid_bonus", 4), scfg.mtf_score_bonus)
+                else:
+                    mtf_bonus = min(getattr(scfg, "mtf_high_bonus", 6), scfg.mtf_score_bonus)
+                raw += mtf_bonus
+                reasons.append(f"📡 15m MTF Align ({mtf_trend}) -> +{mtf_bonus} context bonus")
             else:
                 raw += scfg.mtf_score_penalty
                 reasons.append(f"📡 15m MTF Discord ({mtf_trend}) → {scfg.mtf_score_penalty}")
@@ -669,23 +819,181 @@ class ScoringEngine:
     def _infer_hh_hl_structure(self, closes: list) -> str:
         """
         Lightweight structure inference from close sequence.
+        Requires break of prior range plus follow-through, not just many up/down closes.
         Returns: bull | bear | neutral
         """
-        if len(closes) < 12:
+        if len(closes) < 16:
             return "neutral"
-        w = closes[-12:]
-        hh = 0
-        ll = 0
-        for i in range(1, len(w)):
-            if w[i] > w[i - 1]:
-                hh += 1
-            elif w[i] < w[i - 1]:
-                ll += 1
-        if hh >= 8:
+
+        prior = closes[-16:-4]
+        recent = closes[-4:]
+        if not prior or not recent:
+            return "neutral"
+
+        prior_high = max(prior)
+        prior_low = min(prior)
+        recent_change = (recent[-1] - recent[0]) / recent[0] if recent[0] > 0 else 0.0
+        broke_up = recent[-1] > prior_high * 1.0005
+        broke_down = recent[-1] < prior_low * 0.9995
+        follow_up = recent_change > 0.001 and recent[-1] > recent[-2]
+        follow_down = recent_change < -0.001 and recent[-1] < recent[-2]
+
+        if broke_up and follow_up:
             return "bull"
-        if ll >= 8:
+        if broke_down and follow_down:
             return "bear"
         return "neutral"
+
+    def _validate_entry_location(
+        self,
+        signal: TradeSignal,
+        candles: list,
+        regime: MarketRegime,
+        realized_vol: float = 0.0,
+    ) -> dict:
+        """
+        Adaptive entry-location gate for scalping.
+        It validates whether entry has a nearby market-structure invalidation and enough room to TP1.
+        """
+        fallback = {
+            "quality": "valid",
+            "location_type": "insufficient_data",
+            "invalidation_price": signal.stop_loss,
+            "distance_pct": abs(signal.entry_price - signal.stop_loss) / max(signal.entry_price, 1e-12),
+            "room_to_tp1_pct": abs(signal.tp1 - signal.entry_price) / max(signal.entry_price, 1e-12),
+            "room_risk": 1.0,
+            "reason": "location gate skipped; not enough candle structure",
+        }
+
+        if not candles or len(candles) < 16 or signal.entry_price <= 0:
+            return fallback
+
+        highs, lows, closes = [], [], []
+        for c in candles:
+            if not isinstance(c, dict):
+                continue
+            try:
+                highs.append(float(c.get("h", c.get("c", 0))))
+                lows.append(float(c.get("l", c.get("c", 0))))
+                closes.append(float(c.get("c", 0)))
+            except (TypeError, ValueError):
+                continue
+
+        if len(closes) < 16:
+            return fallback
+
+        entry = signal.entry_price
+        side = signal.side
+        prior_high = max(highs[-16:-4])
+        prior_low = min(lows[-16:-4])
+        recent_high = max(highs[-8:])
+        recent_low = min(lows[-8:])
+        ema21 = self._ema(closes[-21:], 21) if len(closes) >= 21 else closes[-1]
+
+        # Regime-aware thresholds. Wider in trend/high vol, stricter in range/extreme.
+        thresholds = {
+            MarketRegime.RANGING:  (0.0025, 0.0055, 0.0025, 1.00),
+            MarketRegime.TRENDING: (0.0025, 0.0080, 0.0040, 0.75),
+            MarketRegime.HIGH_VOL: (0.0035, 0.0095, 0.0035, 0.90),
+            MarketRegime.EXTREME:  (0.0045, 0.0110, 0.0025, 1.20),
+            MarketRegime.VOLATILE: (0.0035, 0.0095, 0.0035, 0.90),
+            MarketRegime.NORMAL:   (0.0025, 0.0080, 0.0035, 0.85),
+            MarketRegime.LOW_VOL:  (0.0020, 0.0060, 0.0030, 0.85),
+            MarketRegime.UNKNOWN:  (0.0025, 0.0080, 0.0035, 0.85),
+        }
+        min_dist, max_dist, max_extension, min_room_risk = thresholds.get(
+            regime, thresholds[MarketRegime.UNKNOWN]
+        )
+
+        # Let realized volatility widen distance a bit, but keep scalper bounds controlled.
+        if realized_vol > 0.06:
+            max_dist = min(max_dist + 0.0015, 0.0120)
+            min_dist = min_dist + 0.0005
+
+        candidates = []
+
+        def add_candidate(location_type: str, level: float, extension: float):
+            if level > 0:
+                candidates.append((extension, location_type, level))
+
+        if side == Side.LONG:
+            if entry > prior_high:
+                add_candidate("breakout_retest", prior_high, (entry - prior_high) / entry)
+            if entry > ema21:
+                add_candidate("ema_reclaim", ema21, abs(entry - ema21) / entry)
+            if entry > recent_low:
+                add_candidate("support_reclaim", recent_low, (entry - recent_low) / entry)
+        else:
+            if entry < prior_low:
+                add_candidate("breakdown_retest", prior_low, (prior_low - entry) / entry)
+            if entry < ema21:
+                add_candidate("ema_rejection", ema21, abs(entry - ema21) / entry)
+            if entry < recent_high:
+                add_candidate("resistance_rejection", recent_high, (recent_high - entry) / entry)
+
+        candidates = [c for c in candidates if c[0] >= 0]
+        if not candidates:
+            quality = "weak" if regime == MarketRegime.TRENDING else "invalid"
+            return {
+                "quality": quality,
+                "location_type": "unclear",
+                "invalidation_price": signal.stop_loss,
+                "distance_pct": abs(signal.entry_price - signal.stop_loss) / entry,
+                "room_to_tp1_pct": abs(signal.tp1 - entry) / entry,
+                "room_risk": 0.0,
+                "reason": "no nearby support/rejection/breakout level",
+            }
+
+        extension, location_type, level = min(candidates, key=lambda x: x[0])
+        buffer_pct = max(0.0015, min_dist * 0.50)
+        if side == Side.LONG:
+            invalidation = level * (1 - buffer_pct)
+            distance_pct = (entry - invalidation) / entry
+            room_to_tp1_pct = max((signal.tp1 - entry) / entry, 0.0)
+        else:
+            invalidation = level * (1 + buffer_pct)
+            distance_pct = (invalidation - entry) / entry
+            room_to_tp1_pct = max((entry - signal.tp1) / entry, 0.0)
+
+        room_risk = room_to_tp1_pct / max(distance_pct, 1e-9)
+        problems = []
+
+        if extension > max_extension:
+            problems.append(f"entry extended {extension*100:.2f}% from {location_type}")
+        if distance_pct < min_dist:
+            problems.append(f"invalidation too close {distance_pct*100:.2f}%")
+        if distance_pct > max_dist:
+            problems.append(f"invalidation too far {distance_pct*100:.2f}%")
+        if room_risk < min_room_risk:
+            problems.append(f"room/risk {room_risk:.2f} below {min_room_risk:.2f}")
+
+        if not problems:
+            excellent = extension <= max_extension * 0.60 and room_risk >= min_room_risk * 1.25
+            quality = "excellent" if excellent else "valid"
+            reason = "clean entry location"
+        else:
+            severe_room = room_risk < min_room_risk * 0.55
+            severe_extension = extension > max_extension * 1.75
+            severe_distance = distance_pct > max_dist * 1.35
+            too_close_extreme = distance_pct < min_dist * 0.60
+            hard_regime = regime in (MarketRegime.RANGING, MarketRegime.EXTREME)
+            if hard_regime and (severe_room or severe_extension or severe_distance or too_close_extreme):
+                quality = "invalid"
+            elif len(problems) >= 3 and regime != MarketRegime.TRENDING:
+                quality = "invalid"
+            else:
+                quality = "weak"
+            reason = "; ".join(problems)
+
+        return {
+            "quality": quality,
+            "location_type": location_type,
+            "invalidation_price": invalidation,
+            "distance_pct": distance_pct,
+            "room_to_tp1_pct": room_to_tp1_pct,
+            "room_risk": room_risk,
+            "reason": reason,
+        }
 
     def _build_scalper_signal(
         self,
@@ -1019,17 +1327,39 @@ class ScoringEngine:
             side = Side.SHORT
             raw_score = total_bear + confidence_bonus
 
-            # ── SHORT Quality Filters (berlaku saat ALLOW_SHORT = True) ──────
-            # Solusi 2: Funding Rate Confirmation
-            # SHORT valid HANYA jika longs paying aggressively (crowded long → reversal).
-            # Jika funding negatif = market sudah short-biased = SHORT sangat berbahaya.
+            # SHORT Quality Filters (berlaku saat ALLOW_SHORT = True)
+            # Funding is thesis-dependent:
+            # 1) Breakdown continuation: negative funding + price down + OI expanding.
+            # 2) Crowded-long reversal: positive funding + price failed up + bearish flow.
             fr = getattr(funding, 'funding_rate', 0.0)
             min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', 0.0002)
-            if fr < 0:
-                log.debug(f"[{asset}] SHORT BLOCKED: Funding negatif ({fr:.6f}) = shorts already paying, berbahaya")
-                return None, 0
-            elif fr < min_fr:
-                log.debug(f"[{asset}] SHORT BLOCKED: Funding {fr:.6f} < {min_fr} (tidak cukup crowded long untuk reversal)")
+            oi_chg = getattr(oi, 'oi_change_pct', 0.0)
+            oi_expanding = oi_chg > getattr(config.SIGNAL, 'oi_change_threshold_pct', 0.008)
+            price_down = price_change_1h < -0.002
+            price_failed_up = price_change_1h <= 0.001
+            cvd_bearish = cvd_val < 0
+            ob_bearish = ob_bear > ob_bull
+
+            breakdown_short = fr < 0 and price_down and oi_expanding
+            crowded_long_reversal = fr >= min_fr and price_failed_up and (cvd_bearish or ob_bearish)
+
+            if breakdown_short:
+                oi_reasons.append(
+                    f"SHORT setup: breakdown continuation "
+                    f"(funding={fr:.6f}, price_1h={price_change_1h*100:.2f}%, OI={oi_chg*100:.2f}%)"
+                )
+            elif crowded_long_reversal:
+                oi_reasons.append(
+                    f"SHORT setup: crowded-long reversal "
+                    f"(funding={fr:.6f}, price_1h={price_change_1h*100:.2f}%, "
+                    f"cvd_bear={cvd_bearish}, ob_bear={ob_bearish})"
+                )
+            else:
+                log.debug(
+                    f"[{asset}] SHORT BLOCKED: no valid funding/flow thesis "
+                    f"(fr={fr:.6f}, price_1h={price_change_1h:.4f}, oi_chg={oi_chg:.4f}, "
+                    f"cvd_bear={cvd_bearish}, ob_bear={ob_bearish})"
+                )
                 return None, 0
 
             # Solusi 3: Anti-Trend Filter
@@ -1165,6 +1495,10 @@ class ScoringEngine:
         # [FIX 2] Threshold dinaikkan dari 30 ke 62 berdasarkan data 124 trades
         # Score 55-59: WR 18.4% (-$19.80) | Score 60-64: WR 41.7% (+$10.75)
         threshold = getattr(config.SIGNAL, 'min_score_to_signal', 62)
+        concentration_add = self._asset_concentration_threshold_add(asset, "standard")
+        if concentration_add > 0:
+            threshold = min(100, threshold + concentration_add)
+            all_reasons.append(f"Asset concentration guard: {asset} requires {threshold}+ after recent repeats")
         if final_score < threshold:
             log.debug(f"[{asset}] STANDARD: score {final_score} < threshold {threshold}, skipping")
             return None, final_score
@@ -1488,20 +1822,40 @@ class ScoringEngine:
             return 0, "", None
             
         from core.db import user_db
-        pattern_key = f"{mode.lower()}_{asset}_{side.value}"
+        if raw_score >= 72:
+            score_bucket = "s72p"
+        elif raw_score >= 65:
+            score_bucket = "s65_71"
+        elif raw_score >= 60:
+            score_bucket = "s60_64"
+        else:
+            score_bucket = "sub60"
+
+        legacy_pattern_key = f"{mode.lower()}_{asset}_{side.value}"
+        pattern_key = f"{legacy_pattern_key}_{score_bucket}"
         stats = user_db.get_meta_pattern_stats(pattern_key)
-        
+
         if not stats or stats["samples"] < config.SIGNAL.meta_min_samples:
+            legacy_stats = user_db.get_meta_pattern_stats(legacy_pattern_key)
+            if legacy_stats and legacy_stats["samples"] >= config.SIGNAL.meta_min_samples:
+                legacy_wr = float(legacy_stats["winrate_ema"])
+                legacy_pnl = float(legacy_stats.get("pnl_ema", 0.0))
+                if legacy_wr <= config.SIGNAL.meta_penalty_threshold or legacy_pnl < config.SIGNAL.meta_penalty_pnl_ema:
+                    return -12, (
+                        f"Meta-learning: legacy LOW-EV asset-side pattern "
+                        f"(WR {legacy_wr*100:.0f}%, pnl_ema {legacy_pnl:+.2f}) -> -12"
+                    ), pattern_key
             return 0, "", pattern_key
             
         wr = stats["winrate_ema"]
+        pnl_ema = float(stats.get("pnl_ema", 0.0))
         delta = 0
         reason = ""
         
-        if wr >= config.SIGNAL.meta_boost_threshold:
+        if wr >= config.SIGNAL.meta_boost_threshold and pnl_ema > config.SIGNAL.meta_min_pnl_ema_for_boost:
             delta = 8
             reason = f"🧠 Meta-learning: HI-WR pattern ({wr*100:.0f}%) → +8"
-        elif wr <= config.SIGNAL.meta_penalty_threshold:
+        elif wr <= config.SIGNAL.meta_penalty_threshold or pnl_ema < config.SIGNAL.meta_penalty_pnl_ema:
             delta = -12
             reason = f"🧠 Meta-learning: LO-WR pattern ({wr*100:.0f}%) → -12"
             

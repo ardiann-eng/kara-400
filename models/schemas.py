@@ -303,6 +303,8 @@ class Position(BaseModel):
 
     # Meta
     signal_id:        Optional[str] = None
+    meta_pattern_key: Optional[str] = None
+    meta_score_delta: int = 0
     trade_mode:       str = "standard"   # "scalper" | "standard"
     opened_at:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at:        Optional[datetime] = None
