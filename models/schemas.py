@@ -168,6 +168,8 @@ class TradeSignal(BaseModel):
     meta_score_delta: int = 0                # score adj from meta winrate
     expected_edge:    Optional[float] = None # ML predicted probability of win (0.0-1.0)
     trade_mode:       str = "standard"       # "scalper" | "standard"
+    funding_rate:     float = 0.0            # point-in-time funding used by ML audit
+    trend_pct:        float = 0.0            # 24h trend estimate used by ML audit
 
     # Levels
     entry_price:      float

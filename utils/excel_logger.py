@@ -19,9 +19,12 @@ class TradeExcelLogger:
     def __init__(self, file_path: str = None):
         self.file_path = file_path or config.EXCEL_LOG_PATH
         self._columns = [
-            "Timestamp", "Chat ID", "Asset", "Side", "Action", 
-            "Price", "Size", "Notional (USD)", "PnL ($)", 
-            "PnL (%)", "Score", "Reason", "Mode", "Position ID"
+            "Timestamp", "Chat ID", "Asset", "Side", "Action",
+            "Price", "Size", "Notional (USD)", "PnL ($)",
+            "PnL (%)", "Score", "Reason", "Mode", "Position ID",
+            # Weekly review context (all optional — filled when caller passes them)
+            "Entry Time", "Exit Time", "Hold Minutes",
+            "Session", "Regime", "CVD Snapshot", "RSI Snapshot",
         ]
         self._ensure_file_exists()
 
@@ -53,13 +56,24 @@ class TradeExcelLogger:
                 "Score": data.get("score", 0),
                 "Reason": data.get("reason", ""),
                 "Mode": config.TRADE_MODE.upper(),
-                "Position ID": data.get("pos_id", "")
+                "Position ID": data.get("pos_id", ""),
+                "Entry Time": data.get("entry_time", ""),
+                "Exit Time": data.get("exit_time", ""),
+                "Hold Minutes": data.get("hold_minutes", ""),
+                "Session": data.get("session", ""),
+                "Regime": data.get("regime", ""),
+                "CVD Snapshot": data.get("cvd_snapshot", ""),
+                "RSI Snapshot": data.get("rsi_snapshot", ""),
             }
 
             # Read, append, write
             if os.path.exists(self.file_path):
                 # Ensure we specify that header is on row 0
                 df = pd.read_excel(self.file_path, engine='openpyxl', header=0)
+                # Backfill any newly-added columns for old files
+                for col in self._columns:
+                    if col not in df.columns:
+                        df[col] = ""
             else:
                 df = pd.DataFrame(columns=self._columns)
             

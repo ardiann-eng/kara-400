@@ -205,6 +205,10 @@ class PaperExecutor:
             "score":    signal.score,
             "meta_boost": getattr(signal, "meta_score_delta", 0),
             "meta_pattern_key": getattr(signal, "meta_pattern_key", ""),
+            "expected_edge": getattr(signal, "expected_edge", None),
+            "funding_rate": getattr(signal, "funding_rate", 0.0),
+            "realized_vol": getattr(signal, "realized_vol", 0.0),
+            "trend_pct": getattr(signal, "trend_pct", 0.0),
             "timestamp":utcnow(),
         }
         self._trade_log.append(log_data)
@@ -221,15 +225,16 @@ class PaperExecutor:
         from intelligence.experience_buffer import experience_buffer
         
         bd = getattr(signal, 'breakdown', None)
-        fr = float(getattr(getattr(signal, 'raw_data', None), 'funding_rate', 0.0))  # Best effort if raw_data is available
-        vol = 0.0  # Ideally passed from kwargs, but 0.0 acts as baseline gracefully
+        fr = float(getattr(signal, 'funding_rate', 0.0) or 0.0)
+        vol = float(getattr(signal, 'realized_vol', 0.0) or 0.0)
+        trend = float(getattr(signal, 'trend_pct', 0.0) or 0.0)
         
         loop = asyncio.get_event_loop()
         loop.run_in_executor(None, 
                              experience_buffer.record_entry,
                              self.chat_id, pos.position_id, signal.asset, signal.side.value,
                              signal.score, getattr(signal, 'meta_score_delta', 0),
-                             bd, fr, vol, 0.0, getattr(signal, 'expected_edge', 0.0)
+                             bd, fr, vol, trend, getattr(signal, 'expected_edge', 0.0)
                             )
                             
         return pos

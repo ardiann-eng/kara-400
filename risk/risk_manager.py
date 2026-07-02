@@ -176,21 +176,16 @@ class RiskManager:
         if self._kill_switch or account.kill_switch_active:
             return False, "🚨 KILL SWITCH ACTIVE - trading stopped (max drawdown hit)"
             
-        # ── Intelligence Filter (ML Expected Edge) ────────────────────
-        import config as _cfg
-        from intelligence.intelligence_model import intelligence_model as _im
+        # AI expected_edge is observe-only until it proves positive OOS expectancy.
         edge = getattr(signal, 'expected_edge', None)
-        # Hanya block jika: intelligence aktif DAN model sudah is_ready (dilatih session ini)
-        # is_ready=False berarti model dari disk stale atau belum ada data cukup
-        if edge is not None and edge < 0.45 and _cfg.ENABLE_INTELLIGENCE and _im.is_ready:
-            return False, f"🤖 [AI ABORT] Expected Edge too low ({edge*100:.1f}% win prob < 45%)"
-        elif edge is not None and edge < 0.45:
-            log.debug(
-                f"[AI] {getattr(signal, 'asset', '?')}: low edge ({edge*100:.1f}%) "
-                f"— passing through (is_ready={getattr(_im, 'is_ready', False)})"
-            )
 
         # ── Paused ────────────────────────────────────────────────────
+        if edge is not None and edge < 0.45:
+            log.debug(
+                f"[AI OBSERVE] {getattr(signal, 'asset', '?')}: low edge "
+                f"({edge*100:.1f}%) - no risk gate applied"
+            )
+
         if self._paused or account.is_paused:
             return False, "⏸️  Bot is paused by user"
 
@@ -287,14 +282,14 @@ class RiskManager:
             sl_pct = RISK.default_sl_pct
 
         # ── Leverage: Triple-Cap (Signal vs User vs Exchange) ──────────
-        # Dynamic Risk Sizing using Intelligence Model
-        import config as _cfg
-        if _cfg.ENABLE_INTELLIGENCE:
-            from intelligence.dynamic_risk import calculate_risk_multiplier
-            edge = getattr(signal, 'expected_edge', None)
-            multiplier = calculate_risk_multiplier(edge)
-        else:
-            multiplier = 1.0
+        # AI edge is audit-only until it proves positive out-of-sample expectancy.
+        multiplier = 1.0
+        edge = getattr(signal, 'expected_edge', None)
+        if edge is not None:
+            log.debug(
+                f"[AI OBSERVE] {getattr(signal, 'asset', '?')}: edge={edge*100:.1f}% "
+                f"- risk multiplier fixed at 1.00x"
+            )
 
         # Scale leverage and risk parameter
         cfg = self._cfg()
@@ -329,7 +324,7 @@ class RiskManager:
         score = getattr(signal, 'score', 0)
         risk_pct = self.get_risk_pct(score, account_balance)
         
-        # Apply AI Multiplier to Risk!
+        # Keep risk sizing deterministic; ML predictions are logged for audit only.
         risk_pct = min(risk_pct * multiplier, cfg.max_risk_per_trade_pct)
 
         # Compound sizing

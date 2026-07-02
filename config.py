@@ -419,3 +419,21 @@ EXCEL_LOG_PATH = os.getenv("EXCEL_LOG_PATH", os.path.join(STORAGE_DIR, "trade_hi
 BACKTEST_START = "2024-01-01"
 BACKTEST_END   = "2024-12-31"
 BACKTEST_INITIAL_CAPITAL = 1000.0   # USD (realistic for students)
+
+# ──────────────────────────────────────────────
+# WEEKLY AI REVIEW (analyst → human approver)
+# ──────────────────────────────────────────────
+@dataclass
+class WeeklyReviewConfig:
+    """Weekly LLM strategy review — AI proposes, human applies."""
+    enabled: bool = True
+    lookback_days: int = 7
+    min_samples_for_significance: int = 30
+    output_dir: str = os.path.join(STORAGE_BASE, "reviews")
+    schedule_hour_utc: int = 6           # Monday 06:00 UTC
+    model_id: str = "mistral-medium-3-5"
+    model_fallback: str = "mistral-large"
+    min_confidence_to_suggest: str = "medium"  # low/medium/high
+    max_relative_delta_pct: float = 0.50       # >50% Δ auto-flags "large_change"
+
+WEEKLY_REVIEW = WeeklyReviewConfig()

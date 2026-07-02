@@ -648,35 +648,27 @@ class ScoringEngine:
             if ob_imb > 0.60:
                 bull_pts = max(0, bull_pts - 20)
                 ob_signal = "strong_bid"
-                ob_raw_pts = 12
+                ob_raw_pts = 6
                 reasons.append(f"Orderbook strong bid wall ({ob_imb:.2f}) -> pending price reaction")
             elif ob_imb < -0.60:
                 bear_pts = max(0, bear_pts - 20)
                 ob_signal = "strong_ask"
-                ob_raw_pts = 12
+                ob_raw_pts = 6
                 reasons.append(f"Orderbook strong ask wall ({ob_imb:.2f}) -> pending price reaction")
             elif ob_imb > 0.40:
                 bull_pts = max(0, bull_pts - 8)
                 ob_signal = "mild_bid"
-                ob_raw_pts = 5
+                ob_raw_pts = 2
                 reasons.append(f"Orderbook mild bid pressure ({ob_imb:.2f}) -> context only")
             elif ob_imb < -0.40:
                 bear_pts = max(0, bear_pts - 8)
                 ob_signal = "mild_ask"
-                ob_raw_pts = 5
+                ob_raw_pts = 2
                 reasons.append(f"Orderbook mild ask pressure ({ob_imb:.2f}) -> context only")
 
-        if len(candles) < 10:
-            # Cannot compute EMA/RSI without data — use only OB score
-            total = bull_pts + bear_pts
-            if bull_pts == bear_pts:
-                return 0, Side.LONG, reasons + ["REJECT: bull/bear tie - no directional edge"]
-            side = Side.LONG if bull_pts > bear_pts else Side.SHORT
-            # Skip setting bull_candles/bear_candles — default 0
-            bull_candles = 0
-            bear_candles = 0
-            score = min(total, 100)
-            return score, side, reasons
+        if len(candles) < 21:
+            log.debug(f"[{asset}] SCALPER REJECT: insufficient 1m candles for EMA21/RSI14 ({len(candles)}/21)")
+            return 0, Side.LONG, reasons + ["REJECT: insufficient candle data for EMA21/RSI14"]
 
         # Extract OHLCV
         closes = []
@@ -691,11 +683,9 @@ class ScoringEngine:
                 except (ValueError, TypeError):
                     pass
 
-        if len(closes) < 10:
-            if bull_pts == bear_pts:
-                return 0, Side.LONG, reasons + ["REJECT: bull/bear tie - no directional edge"]
-            side = Side.LONG if bull_pts > bear_pts else Side.SHORT
-            return min(bull_pts + bear_pts, 100), side, reasons
+        if len(closes) < 21:
+            log.debug(f"[{asset}] SCALPER REJECT: insufficient parsed candles for EMA21/RSI14 ({len(closes)}/21)")
+            return 0, Side.LONG, reasons + ["REJECT: insufficient parsed candle data for EMA21/RSI14"]
 
         # ── Momentum Confirmation (Institutional Filter) ─────────────────
         bull_candles = 0
@@ -892,6 +882,14 @@ class ScoringEngine:
         if bull_pts == bear_pts:
             return 0, Side.LONG, reasons + ["REJECT: bull/bear tie - no directional edge"]
         side = Side.LONG if bull_pts > bear_pts else Side.SHORT
+
+        if side == Side.LONG and trend_state != "bull":
+            log.debug(f"[{asset}] SCALPER REJECT: LONG requires 1m bullish structure (got {trend_state})")
+            return 0, side, reasons + ["REJECT: LONG requires 1m bullish structure"]
+        if side == Side.SHORT and trend_state != "bear":
+            log.debug(f"[{asset}] SCALPER REJECT: SHORT requires 1m bearish structure (got {trend_state})")
+            return 0, side, reasons + ["REJECT: SHORT requires 1m bearish structure"]
+
         direction_score = (bull_pts if side == Side.LONG else bear_pts)
         raw = direction_score
         
@@ -1219,7 +1217,10 @@ class ScoringEngine:
             suggested_leverage=leverage,
             meta_pattern_key=getattr(breakdown, 'meta_pattern_key', None),
             meta_score_delta=getattr(breakdown, 'meta_score_delta', 0),
-            expected_edge=edge
+            expected_edge=edge,
+            funding_rate=0.0,
+            trend_pct=trend_pct,
+            realized_vol=realized_vol
         )
 
     # ──────────────────────────────────────────
@@ -1901,7 +1902,10 @@ class ScoringEngine:
             suggested_leverage=leverage,
             meta_pattern_key=getattr(breakdown, 'meta_pattern_key', None),
             meta_score_delta=getattr(breakdown, 'meta_score_delta', 0),
-            expected_edge=expected_edge
+            expected_edge=expected_edge,
+            funding_rate=funding_rate,
+            trend_pct=trend_pct,
+            realized_vol=realized_vol
         )
 
     # ──────────────────────────────────────────

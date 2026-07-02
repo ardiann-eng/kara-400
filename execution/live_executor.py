@@ -280,8 +280,10 @@ class LiveExecutor:
             signal_id=signal.signal_id,
             meta_pattern_key=getattr(signal, 'meta_pattern_key', None),
             meta_score_delta=getattr(signal, 'meta_score_delta', 0),
+            trade_mode=getattr(signal, 'trade_mode', 'standard'),
             is_paper=False,
             entry_score=signal.score,
+            realized_vol=getattr(signal, 'realized_vol', 0.02),
         )
         self._positions[pos.position_id] = pos
 
@@ -296,9 +298,28 @@ class LiveExecutor:
             "score":     signal.score,
             "meta_boost": getattr(signal, "meta_score_delta", 0),
             "meta_pattern_key": getattr(signal, "meta_pattern_key", ""),
+            "expected_edge": getattr(signal, "expected_edge", None),
+            "funding_rate": getattr(signal, "funding_rate", 0.0),
+            "realized_vol": getattr(signal, "realized_vol", 0.0),
+            "trend_pct": getattr(signal, "trend_pct", 0.0),
             "timestamp": utcnow(),
         }
         get_excel_logger().log_trade(self.chat_id, log_data)
+
+        # Intelligence experience hook: record features only, never gate live risk.
+        from intelligence.experience_buffer import experience_buffer
+        bd = getattr(signal, 'breakdown', None)
+        fr = float(getattr(signal, 'funding_rate', 0.0) or 0.0)
+        vol = float(getattr(signal, 'realized_vol', 0.0) or 0.0)
+        trend = float(getattr(signal, 'trend_pct', 0.0) or 0.0)
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(
+            None,
+            experience_buffer.record_entry,
+            self.chat_id, pos.position_id, signal.asset, signal.side.value,
+            signal.score, getattr(signal, 'meta_score_delta', 0),
+            bd, fr, vol, trend, getattr(signal, 'expected_edge', 0.0)
+        )
 
         log.info(
             f" [LIVE] Opened {signal.asset} {signal.side.value.upper()} "
@@ -437,6 +458,23 @@ class LiveExecutor:
             from core.db import user_db
             user_db.save_trade(self.chat_id, log_data)
             get_excel_logger().log_trade(self.chat_id, log_data)
+
+            if pos.status == PositionStatus.CLOSED:
+                from intelligence.experience_buffer import experience_buffer
+                pnl_pct_final = (
+                    pos.pnl_realized / (pos.size_initial * pos.entry_price)
+                    if pos.size_initial > 0 and pos.entry_price > 0
+                    else pos.floating_pct(current_price)
+                )
+                duration_sec = (pos.closed_at - pos.opened_at).total_seconds()
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(
+                    None,
+                    experience_buffer.update_label,
+                    position_id,
+                    pnl_pct_final,
+                    duration_sec,
+                )
 
             log.info(
                 f" [LIVE] Closed {close_ratio*100:.0f}% of {pos.asset} "

@@ -50,3 +50,6 @@ gunicorn>=21.2.0
 
 # === Security & Encryption ===
 cryptography>=41.0.0
+
+# === Weekly AI Review (analyst LLM) ===
+# Uses OpenAI-compatible HTTP router via requests/httpx above.
