@@ -26,7 +26,7 @@ from .prompt_builder import SYSTEM_PROMPT, REVIEW_TOOL_SCHEMA, build_user_messag
 log = logging.getLogger("kara.weekly_review.llm")
 
 _DEFAULT_BASE_URL = "https://router.bynara.id/v1"
-_DEFAULT_MODELS = ("mistral-medium-3-5", "mistral-large", "claude-haiku-4.5", "claude-sonnet-4.5")
+_DEFAULT_MODELS = ("mimo-v2.5-pro",)
 
 
 def _env_first(*names: str) -> str:
@@ -100,8 +100,7 @@ def _resolve_models(base_url: str, explicit_model: Optional[str] = None) -> list
     if not available:
         return preferred
     matched = [m for m in preferred if m in available]
-    extras = [m for m in sorted(available) if m not in matched]
-    return matched + extras
+    return matched or preferred
 
 
 def _extract_json(text: str) -> dict:

@@ -431,8 +431,8 @@ class WeeklyReviewConfig:
     min_samples_for_significance: int = 30
     output_dir: str = os.path.join(STORAGE_BASE, "reviews")
     schedule_hour_utc: int = 6           # Monday 06:00 UTC
-    model_id: str = "mistral-medium-3-5"
-    model_fallback: str = "mistral-large"
+    model_id: str = "mimo-v2.5-pro"
+    model_fallback: str = ""
     min_confidence_to_suggest: str = "medium"  # low/medium/high
     max_relative_delta_pct: float = 0.50       # >50% Δ auto-flags "large_change"
 
