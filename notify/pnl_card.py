@@ -111,20 +111,23 @@ def _fmt_hold(minutes: float) -> str:
 
 
 def _exit_reason_label(reason: str) -> str:
+    # Card only on FULL close — label is final exit path (totals include all partials)
     return {
-        "trailing_stop": "TRAILING STOP",
-        "tp1":           "TAKE PROFIT 1",
-        "tp2":           "TAKE PROFIT 2",
-        "stop_loss":     "STOP LOSS",
-        "time_exit":     "TIME EXIT",
-        "manual_close":  "MANUAL CLOSE",
-    }.get(reason.lower(), reason.upper())
+        "trailing_stop": "FULL · TRAIL",
+        "tp1":           "FULL CLOSE",
+        "tp2":           "FULL CLOSE",
+        "stop_loss":     "FULL · STOP",
+        "time_exit":     "FULL · TIME",
+        "manual_close":  "FULL · MANUAL",
+        "close_all":     "FULL · CLOSE ALL",
+        "manual":        "FULL · MANUAL",
+    }.get(reason.lower(), "FULL CLOSE")
 
 
 def _exit_reason_color(reason: str) -> tuple:
     r = reason.lower()
     if r == "trailing_stop": return (45, 212, 191)
-    if r in ("tp1", "tp2"):  return C_PROFIT
+    if r in ("tp1", "tp2", "time_exit"):  return C_PROFIT
     return C_LOSS
 
 
@@ -286,7 +289,11 @@ def generate_pnl_card(
     # ═══════════════════════════════════════════════════════════════════════
     # ROW 2 — PNL % HERO (y=102)
     # ═══════════════════════════════════════════════════════════════════════
-    pct_val = pnl_pct * 100 if abs(pnl_pct) < 10 else pnl_pct
+    # pnl_pct is ROE fraction (0.14 = 14%) or already percent; normalize to %
+    if abs(pnl_pct) < 10:
+        pct_val = pnl_pct * 100.0
+    else:
+        pct_val = pnl_pct
     if abs(pct_val) >= 100:
         pct_text = f"{sign}{abs(pct_val):.0f}%"
     elif abs(pct_val) >= 10:

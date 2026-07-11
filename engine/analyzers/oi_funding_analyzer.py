@@ -73,17 +73,26 @@ class OIFundingAnalyzer:
 
         funding_pts = funding_tier_points(abs(fr))
 
+        # Crowded-long short boost only when funding is meaningful (not micro-noise).
+        # Audit: +3pts on fr≈0.0013% spam false "crowded long" shorts.
+        min_crowd_fr = getattr(SIGNAL, "short_min_funding_rate", 0.00003)
+
         if fr > 0.00001:
             if price_up and oi_expanding:
                 bull += funding_pts
                 reasons.append(
                     f"Positive funding {fr*100:.4f}%/8h + price/OI expansion -> LONG continuation (+{funding_pts})"
                 )
-            elif price_failed_up:
+            elif price_failed_up and abs(fr) >= min_crowd_fr:
+                # Need stalled/failed upside AND non-micro funding
                 reversal_pts = max(3, funding_pts // 2)
                 bear += reversal_pts
                 reasons.append(
                     f"Positive funding {fr*100:.4f}%/8h + failed upside -> crowded-long reversal risk (+{reversal_pts} SHORT)"
+                )
+            elif price_failed_up:
+                reasons.append(
+                    f"Positive funding {fr*100:.4f}%/8h micro — no crowded-long SHORT boost"
                 )
             else:
                 reasons.append(

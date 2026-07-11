@@ -397,7 +397,13 @@ class LiveExecutor:
         else:
             pos.trailing_high = min(pos.trailing_high, current_price)
 
-        return {**action, "pnl": res.get("pnl", 0), "position_id": pos.position_id}
+        return {
+            **action,
+            "pnl": res.get("pnl", 0),
+            "pnl_pct": res.get("pnl_pct", 0),
+            "close_ratio": close_ratio,
+            "position_id": pos.position_id,
+        }
 
     # ──────────────────────────────────────────
     # CLOSE POSITION
@@ -427,8 +433,12 @@ class LiveExecutor:
         )
 
         if filled:
-            # Estimate PnL
-            pnl = pos.floating_pct(current_price) * close_size * pos.entry_price
+            from utils.helpers import pnl_roe_fraction
+            price_move = pos.floating_pct(current_price)
+            notional_closed = close_size * pos.entry_price
+            pnl = price_move * notional_closed
+            lev = max(int(getattr(pos, "leverage", 1) or 1), 1)
+            slice_roe = pnl_roe_fraction(pnl, notional_closed, lev)
             pos.pnl_realized  += pnl
             pos.size_current  -= close_size
 
@@ -447,9 +457,10 @@ class LiveExecutor:
                 "exit_price": current_price,
                 "reason":    reason,
                 "size":      close_size,
-                "notional":  close_size * pos.entry_price,
+                "notional":  notional_closed,
                 "pnl":       pnl,
-                "pnl_pct":   pos.floating_pct(current_price),
+                # ROE fraction on closed slice margin
+                "pnl_pct":   slice_roe,
                 "score":     getattr(pos, 'entry_score', 0),
                 "meta_boost": getattr(pos, "meta_score_delta", 0),
                 "meta_pattern_key": getattr(pos, "meta_pattern_key", ""),
@@ -461,11 +472,8 @@ class LiveExecutor:
 
             if pos.status == PositionStatus.CLOSED:
                 from intelligence.experience_buffer import experience_buffer
-                pnl_pct_final = (
-                    pos.pnl_realized / (pos.size_initial * pos.entry_price)
-                    if pos.size_initial > 0 and pos.entry_price > 0
-                    else pos.floating_pct(current_price)
-                )
+                full_notional = pos.size_initial * pos.entry_price if pos.size_initial > 0 else 0.0
+                pnl_pct_final = pnl_roe_fraction(pos.pnl_realized, full_notional, lev)
                 duration_sec = (pos.closed_at - pos.opened_at).total_seconds()
                 loop = asyncio.get_event_loop()
                 loop.run_in_executor(
@@ -478,9 +486,16 @@ class LiveExecutor:
 
             log.info(
                 f" [LIVE] Closed {close_ratio*100:.0f}% of {pos.asset} "
-                f"@ {current_price} | PnL est: {format_usd(pnl)} ({reason})"
+                f"@ {current_price} | PnL est: {format_usd(pnl)} "
+                f"move={price_move*100:.2f}% ROE={slice_roe*100:.2f}% @{lev}x ({reason})"
             )
-            return {"position_id": position_id, "pnl": pnl, "reason": reason}
+            return {
+                "position_id": position_id,
+                "pnl": pnl,
+                "pnl_pct": slice_roe,
+                "close_ratio": close_ratio,
+                "reason": reason,
+            }
         else:
             log.error(f" Failed to close position {position_id}")
             return None

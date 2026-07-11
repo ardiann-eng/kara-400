@@ -665,24 +665,47 @@ class UserDB:
                 log.error(f"Failed to save trade to DB: {e}")
 
     def get_trade_history(self, chat_id: str, limit: int = 100) -> List[Dict[str, Any]]:
-        """Fetch historical trades for a specific user."""
+        """Fetch historical trades for a specific user (includes created_at)."""
         trades = []
         with self._lock:
             try:
                 conn = self._get_conn()
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT data FROM trade_history
+                    SELECT data, created_at, pnl_usd, pnl_pct, asset, side
+                    FROM trade_history
                     WHERE chat_id = ?
                     ORDER BY created_at DESC LIMIT ?
                 """, (str(chat_id), limit))
                 rows = cursor.fetchall()
-                for (data_str,) in rows:
-                    trades.append(json.loads(data_str))
+                for data_str, created_at, pnl_usd, pnl_pct, asset, side in rows:
+                    try:
+                        t = json.loads(data_str) if data_str else {}
+                    except Exception:
+                        t = {}
+                    if not isinstance(t, dict):
+                        t = {}
+                    # Normalize fields for daily report / analytics
+                    t.setdefault("type", "close")
+                    t.setdefault("asset", asset)
+                    t.setdefault("side", side)
+                    if t.get("pnl") is None and pnl_usd is not None:
+                        t["pnl"] = float(pnl_usd)
+                    if t.get("pnl_pct") is None and pnl_pct is not None:
+                        t["pnl_pct"] = float(pnl_pct)
+                    t["created_at"] = created_at
+                    # Keep both keys: many callers filter on timestamp
+                    if "timestamp" not in t or t.get("timestamp") is None:
+                        t["timestamp"] = created_at
+                    trades.append(t)
                 log.debug(f"get_trade_history: chat_id={chat_id!r} → {len(trades)} trades from DB at {self.db_path}")
             except Exception as e:
                 log.error(f"Error fetching trade history for {chat_id}: {e}")
         return trades
+
+    # Alias used by older callers (daily report, telegram)
+    def load_trade_history(self, chat_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        return self.get_trade_history(chat_id, limit=limit)
 
     def load(self):
         with self._lock:
@@ -755,7 +778,7 @@ class UserDB:
             username=username,
             paper_balance_usd=init_usd,
             config=UserConfig(
-                trading_mode="standard",
+                trading_mode="scalper",
                 bot_mode=BotMode.PAPER,
                 risk_pct=0.02
             )

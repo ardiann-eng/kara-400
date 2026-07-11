@@ -106,11 +106,17 @@ class KaraBot:
           std_min_score_to_signal:     58 → 62  (Score 55-59 WR=18.4%, -$19.80)
           std_min_score_to_auto_trade: 65 → 68  (Score 60-64 WR=41.7%, +$10.75)
         These are LOCKED — cannot be changed by user via Telegram settings.
+
+        Also migrates all users to scalper when FORCE_SCALPER_ONLY is on.
         """
         changed = 0
+        force_scl = bool(getattr(config, "FORCE_SCALPER_ONLY", False))
         for u in user_db.get_all_users():
             cfg = u.config
             dirty = False
+            if force_scl and cfg.trading_mode != "scalper":
+                cfg.trading_mode = "scalper"
+                dirty = True
             if cfg.std_min_score_to_signal != 55:
                 cfg.std_min_score_to_signal = 55
                 dirty = True
@@ -128,6 +134,12 @@ class KaraBot:
                 changed += 1
         if changed:
             log.info(f"🔒 Locked score thresholds enforced for {changed} user(s).")
+        if force_scl:
+            log.info(
+                "⚡ FORCE_SCALPER_ONLY=ON — all execution uses scalper hold/risk; "
+                f"standard scorer fallback="
+                f"{'ON' if getattr(config, 'STANDARD_SIGNAL_AS_SCALPER_FALLBACK', True) else 'OFF'}"
+            )
 
     # ──────────────────────────────────────────
     # STARTUP
@@ -597,7 +609,8 @@ class KaraBot:
         while self._running:
             try:
                 now = asyncio.get_event_loop().time()
-                any_scalper = any(
+                # FORCE_SCALPER_ONLY → always fast scalper scan cadence
+                any_scalper = bool(getattr(config, "FORCE_SCALPER_ONLY", False)) or any(
                     getattr(s.user.config, 'trading_mode', 'standard') == 'scalper'
                     for s in self.sessions.values()
                 )
@@ -689,14 +702,24 @@ class KaraBot:
             # Gather active modes across all authorized users
             target_ids = list(self.telegram._authorized_chat_ids)
             active_modes = set()
-            for cid in target_ids:
-                session = await self.get_session(cid)
-                if session and session.user and hasattr(session.user.config, 'trading_mode'):
-                    active_modes.add(session.user.config.trading_mode)
+            force_scl = bool(getattr(config, "FORCE_SCALPER_ONLY", False))
+            std_fallback = bool(getattr(config, "STANDARD_SIGNAL_AS_SCALPER_FALLBACK", True))
 
-            # If no authorized users yet, default to standard to keep cache warm
+            if force_scl:
+                # Always score scalper. Optionally keep standard scorer as a
+                # signal source only — execution remaps to scalper hold/risk.
+                active_modes.add("scalper")
+                if std_fallback:
+                    active_modes.add("standard")
+            else:
+                for cid in target_ids:
+                    session = await self.get_session(cid)
+                    if session and session.user and hasattr(session.user.config, 'trading_mode'):
+                        active_modes.add(session.user.config.trading_mode)
+
+            # If no authorized users yet, default to scalper (or legacy standard)
             if not active_modes:
-                active_modes.add("standard")
+                active_modes.add("scalper" if force_scl else "standard")
 
             active_modes_list = list(active_modes)
 
@@ -845,18 +868,25 @@ class KaraBot:
                 user = user_db.create_user(chat_id, "Master", init_usd=config.PAPER_BALANCE_USD)
                 session = await self.get_session(chat_id)
                 
-            user_mode = getattr(session.user.config, 'trading_mode', 'standard')
-            base_signal = signals_dict.get(user_mode)
+            # Effective mode: FORCE_SCALPER_ONLY always executes as scalper
+            # (hold time, risk, thresholds) even if user config still says standard.
+            stored_mode = getattr(session.user.config, 'trading_mode', 'standard')
+            user_mode = config.effective_trading_mode(stored_mode)
+
+            # Prefer native scalper signal; optional standard scorer as fallback
+            # source — still executed under scalper rules below.
+            base_signal = signals_dict.get("scalper") if user_mode == "scalper" else signals_dict.get(user_mode)
             fallback_from_standard = False
 
-            # If user is in scalper but dedicated scalper signal is not produced,
-            # allow standard signal as fallback so opportunities are not missed.
             if user_mode == "scalper" and not base_signal:
-                std_fallback = signals_dict.get("standard")
-                if std_fallback:
-                    base_signal = std_fallback
-                    fallback_from_standard = True
-            
+                allow_std_fb = bool(getattr(config, "STANDARD_SIGNAL_AS_SCALPER_FALLBACK", True))
+                # Also allow fallback when FORCE_SCALPER_ONLY (same intent)
+                if allow_std_fb or getattr(config, "FORCE_SCALPER_ONLY", False):
+                    std_fallback = signals_dict.get("standard")
+                    if std_fallback:
+                        base_signal = std_fallback
+                        fallback_from_standard = True
+
             if not base_signal:
                 continue
 
@@ -875,7 +905,10 @@ class KaraBot:
             user_signal = base_signal.model_copy(deep=True)
             user_signal.signal_id = f"{base_signal.signal_id[:4]}{uuid.uuid4().hex[:4].upper()}"
             if fallback_from_standard:
-                log.debug(f"[SCALPER] {chat_id}: no dedicated scalper signal this cycle, using standard signal as fallback.")
+                log.info(
+                    f"[SCALPER-FALLBACK] {chat_id}: no scalper signal — using standard "
+                    f"scorer hit for {user_signal.asset} under SCALPER hold/risk rules"
+                )
 
 
             # ATR dihitung untuk localize_for_user saja.
@@ -890,8 +923,11 @@ class KaraBot:
                         atr_value = session.risk_mgr.calculate_atr(candles)
                 except Exception as e:
                     log.debug(f"ATR calc skipped for {user_signal.asset}: {e}")
-                
+
+            # Always localize as scalper when forced — sets trade_mode + scalper levels
             user_signal.localize_for_user(user_mode, atr_value=atr_value)
+            if is_scl:
+                user_signal.trade_mode = "scalper"
 
             # ── Vol-aware SL/TP recalculation (Fix 1 + Fix 4) ────────────────
             # calculate_levels() pakai vol_cache dari scorer — zero API calls.
@@ -930,10 +966,13 @@ class KaraBot:
             if user_mode != 'scalper':
                 sl_pct_check  = abs(user_signal.entry_price - user_signal.stop_loss) / user_signal.entry_price
                 tp2_pct_check = abs(user_signal.tp2 - user_signal.entry_price) / user_signal.entry_price
+                tp1_pct_check = abs(user_signal.tp1 - user_signal.entry_price) / user_signal.entry_price
                 ev_ok, ev_val = session.risk_mgr.check_expected_value(
                     score=user_signal.score,
                     sl_pct=sl_pct_check,
                     tp2_pct=tp2_pct_check,
+                    side=user_signal.side.value,
+                    tp1_pct=tp1_pct_check,
                 )
                 if not ev_ok:
                     log.info(
@@ -1069,37 +1108,10 @@ class KaraBot:
                 continue
 
             actions = await session.executor.update_positions(prices)
-            time_exit_actions = [a for a in actions if a.get("action") == "time_exit"]
-            other_actions = [a for a in actions if a.get("action") != "time_exit"]
 
-            # Kirim notifikasi personal per posisi (KARA style)
-            if time_exit_actions:
-                from datetime import timezone as _tz, datetime as _dt
-                for a in time_exit_actions:
-                    pos = session.executor._positions.get(a.get("position_id", "")) if hasattr(session.executor, "_positions") else None
-                    if not pos:
-                        continue
-                    pnl      = float(a.get("pnl", 0.0))
-                    price    = float(a.get("price", pos.entry_price))
-                    lev      = getattr(pos, "leverage", 1) or 1
-                    pnl_pct  = pos.floating_pct(price) * lev * 100
-                    opened   = pos.opened_at
-                    if opened.tzinfo is None:
-                        opened = opened.replace(tzinfo=_tz.utc)
-                    hold_min = int((_dt.now(_tz.utc) - opened).total_seconds() / 60)
-                    pct_sign = "+" if pnl_pct >= 0 else ""
-                    pnl_sign = "+" if pnl >= 0 else ""
-
-                    outcome   = "✅ Profit" if pnl >= 0 else "❌ Loss"
-                    await self.telegram.send_text(
-                        f"⏱ <b>{pos.asset} {pos.side.value.upper()} {lev}x — Time Exit</b>\n"
-                        f"<i>Batas waktu {hold_min} menit tercapai, posisi ditutup otomatis.</i>\n\n"
-                        f"{outcome}  <code>{pct_sign}{pnl_pct:.2f}%  |  {pnl_sign}${abs(pnl):.2f}</code>\n"
-                        f"<code>${pos.entry_price:.5g} → ${price:.5g}</code>",
-                        target_chat_id=chat_id
-                    )
-
-            for action in other_actions:
+            # All position events (incl. time_exit full close) go through one path.
+            # PnL card is generated only on FULL close with cumulative totals.
+            for action in actions:
                 await self.telegram.send_position_event(action, prices, target_chat_id=chat_id)
             
             # Save user state after positional update to persist PnL changes

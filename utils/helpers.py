@@ -46,8 +46,53 @@ def format_price(value: float) -> str:
 
 
 def format_pct(value: float, show_sign: bool = True) -> str:
+    """Format a *fraction* (0.05 → +5.00%)."""
     sign = "+" if value >= 0 and show_sign else ""
     return f"{sign}{value*100:.2f}%"
+
+
+def price_move_pct(entry: float, exit_px: float, side: str) -> float:
+    """Signed price move as fraction (LONG up = +, SHORT down = +)."""
+    if entry <= 0:
+        return 0.0
+    side_l = (side or "long").lower()
+    if side_l in ("short", "sell", "s"):
+        return (entry - exit_px) / entry
+    return (exit_px - entry) / entry
+
+
+def pnl_roe_fraction(
+    pnl_usd: float,
+    notional_usd: float,
+    leverage: float,
+) -> float:
+    """
+    Return ROE as fraction of *margin* used (0.24 = +24% on margin).
+
+    Futures convention: ROE ≈ price_move × leverage.
+    notional_usd = contracts * entry (for the closed slice, not full book if partial).
+    """
+    if notional_usd <= 0 or leverage <= 0:
+        return 0.0
+    margin = notional_usd / float(leverage)
+    if margin <= 0:
+        return 0.0
+    return pnl_usd / margin
+
+
+def normalize_pct_display(pnl_pct: float) -> float:
+    """
+    Accept ROE as fraction (0.14) or already percent (14.0).
+    Returns a percent number for UI (14.0 means 14%).
+    Heuristic: |x| < 10 → treat as fraction (covers ±1000% ROE edge).
+    """
+    try:
+        v = float(pnl_pct)
+    except (TypeError, ValueError):
+        return 0.0
+    if abs(v) < 10.0:
+        return v * 100.0
+    return v
 
 
 def clamp(value: float, min_val: float, max_val: float) -> float:

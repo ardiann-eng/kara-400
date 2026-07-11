@@ -22,9 +22,29 @@ FULL_AUTO   = True  # Force auto execution mode as requested
 # ── Trading Strategy Mode ──────────────────────────────────────────────────
 # Switch between "standard" (swing/positional) and "scalper" (ultra-aggressive)
 # Change at runtime via Telegram /scalper or /standard, or via Dashboard.
-TRADING_MODE = os.getenv("KARA_TRADING_MODE", "standard").lower()
+#
+# FORCE_SCALPER_ONLY (audit 1435 trades 13–18 Jun):
+#   standard mode was net −EV (long −$30 + short −$47); scalper long +$149.
+#   When True: ALL execution uses scalper rules (hold, risk, SL, thresholds).
+#   Standard scorer may still run only as a SIGNAL SOURCE; any hit is executed
+#   under scalper params (hold time, etc. stay scalper).
+TRADING_MODE = os.getenv("KARA_TRADING_MODE", "scalper").lower()
+FORCE_SCALPER_ONLY = os.getenv("KARA_FORCE_SCALPER_ONLY", "true").lower() == "true"
+# When FORCE_SCALPER_ONLY: still score standard path so opportunities are not
+# dropped if pure-scalper score fails; execution always remaps to scalper.
+STANDARD_SIGNAL_AS_SCALPER_FALLBACK = (
+    os.getenv("KARA_STD_SIGNAL_FALLBACK", "true").lower() == "true"
+)
 
 MODE = TRADE_MODE  # alias for backward compatibility
+
+
+def effective_trading_mode(user_mode: str | None = None) -> str:
+    """Resolve trading mode for execution. FORCE_SCALPER_ONLY always wins."""
+    if FORCE_SCALPER_ONLY:
+        return "scalper"
+    mode = (user_mode or TRADING_MODE or "scalper").lower()
+    return mode if mode in ("scalper", "standard") else "scalper"
 
 # ──────────────────────────────────────────────
 # CURRENCY & MULTI-USER PAPER DEFAULTS
@@ -166,11 +186,40 @@ class RiskConfig:
     atr_multiplier:          float = 2.0      # ATR lookback buffer
     atr_lookback:            int   = 14       # candles for calculation
 
-    # Momentum-based time exit thresholds (Fix 6)
+    # Momentum-based time exit thresholds (Fix 6) — LONG defaults
     time_exit_pullback_pct:  float = 0.20     # if price retraces 20% of TP1 distance, exit
     time_exit_flatline_pct:  float = 0.0015   # < 0.15% move in 30min = dead market
     time_exit_flatline_mins: int   = 30       # window for flatline check
     time_exit_hard_hours:    float = 6.0      # safety net: force-exit after 6h below TP1
+
+    # ── SHORT-specific levels & exit (audit 206 shorts) ────────────────
+    # Wins averaged ~0.34% move; theoretical TP1 3.8%+ never hit → trail dead.
+    # Keep SHORT quantity: moderate TP (hit-able), not ultra-tight scalp-only.
+    short_sl_floor:          float = 0.018    # 1.8% min SL (above ~0.9% noise ATR traps)
+    short_sl_floor_high_vol: float = 0.022    # 2.2% high vol
+    short_sl_floor_extreme:  float = 0.028    # 2.8% extreme/volatile
+    short_sl_cap:            float = 0.045    # don't over-widen short SL
+    short_tp1_pct:           float = 0.0060   # 0.60% — near p75 win move, still frequent hits
+    short_tp2_pct:           float = 0.0110   # 1.10% — room for runners without fantasy 7% TP
+    short_tp1_vol_scale:     float = 0.12     # mild vol widen of TP (capped)
+    short_tp1_max:           float = 0.0090   # cap TP1 0.90%
+    short_tp2_max:           float = 0.0150   # cap TP2 1.50%
+    # Early trail for SHORT before formal TP1 (MFE arm)
+    short_early_trail_arm_pct: float = 0.0035 # arm trail after +0.35% MFE
+    short_early_trail_pct:     float = 0.0025 # trail distance 0.25%
+    # Early trail for LONG (standard) — audit: trail n=20 avg $4.3 vs time_exit med $0.42
+    # Arm moderate 0.65% so we catch runners without noise-churn on every +0.3% tick
+    long_early_trail_arm_pct:  float = 0.0065 # arm trail after +0.65% MFE
+    long_early_trail_pct:      float = 0.0035 # trail distance 0.35%
+    # SHORT time-exit: looser than long so we don't harvest 0.10% crumbs
+    short_time_exit_flatline_pct:  float = 0.0030  # 0.30% (was 0.15% — too tight)
+    short_time_exit_flatline_mins: int   = 45      # 45m before flatline (was 30)
+    short_time_exit_pullback_pct:  float = 0.35    # need deeper giveback than long 20%
+    short_time_exit_pullback_mins: int   = 40
+    short_time_exit_min_mfe_for_pullback: float = 0.004  # only pullback-exit if had ≥0.40% MFE
+    # Soft EV for short scalp-style (hit TP1 often, not long RR)
+    short_ev_use_tp1_weight: float = 0.85
+    short_ev_sl_haircut:     float = 0.90     # not every loss is full SL
 
     # remaining 37.5% uses trailing stop
 
@@ -196,18 +245,24 @@ class ScalperConfig:
     max_risk_per_trade_pct:  float = 0.10     # 10% absolute cap (AI Boost)
     fixed_margin_per_position: float = 0.0   # 0 = use pct, not fixed margin
 
-    # Scalper SL/TP (Calibrated for 25x leverage)
-    # [SL FIX 2026-04-28] Data: scalper SL WR rendah — 0.65% kena noise sebelum bergerak.
-    # Dinaikkan ke 0.80% (+23%) supaya SL di luar zona noise 25x leverage.
-    sl_pct:                  float = 0.0080   # 0.80% stop loss (was 0.65% — terlalu sempit)
-    tp1_pct:                 float = 0.0050   # 0.50% TP1 — audit p75 winner ~0.57%
-    tp2_pct:                 float = 0.0090   # 0.90% TP2 — audit p90 winner ~1.02%
-    trailing_pct:            float = 0.0030   # 0.30% trailing after TP1; lock profits sooner
+    # Scalper SL/TP — aligned to ~12m hold (don't set TP2 outside typical MFE window).
+    # Audit: p75 win ~0.57%, p90 ~1.02%, but 12m often time_exits before TP2 0.90%.
+    # Ladder: TP1 bank early, TP2 reachable, trail for anything beyond.
+    sl_pct:                  float = 0.0080   # 0.80% SL — above 25x noise
+    tp1_pct:                 float = 0.0045   # 0.45% TP1 — hit more often inside 12m
+    tp2_pct:                 float = 0.0075   # 0.75% TP2 — was 0.90%, often missed in 12m
+    trailing_pct:            float = 0.0025   # 0.25% trail after arm
+    # Early trail for scalper (both sides) — lower arm than standard long
+    early_trail_arm_pct:     float = 0.0040   # arm @ +0.40% MFE (before/without TP1)
+    early_trail_pct:         float = 0.0025   # trail width 0.25%
 
     # Timing
-    max_hold_minutes:        float = 12.0     # force close after 12min if no TP hit
+    max_hold_minutes:        float = 12.0     # force close after 12min if no edge left
     max_hold_grace_minutes:  float = 6.0      # extra grace if still in deeper loss
     max_hold_soft_floor_pct: float = -0.0015  # allow delay if loss worse than -0.15%
+    # Don't force time_exit if trail is managing a winner (max-profit)
+    max_hold_respect_trail:  bool  = True
+    max_hold_trail_min_mfe:  float = 0.0035   # need at least +0.35% MFE to skip force-exit
     scan_interval_seconds:   int   = 15       # scan every 15s to avoid HL rate limits
 
     # Score threshold — HARD THRESHOLD SCALPER = 60 (TIDAK BISA DIUBAH USER)
@@ -258,17 +313,27 @@ class SignalConfig:
     min_score_to_auto_trade: int   = 60      # STANDARD: minimum score full-auto execute
     signal_cooldown_minutes: int   = 15       # cooldown per asset between signals
 
-    # Bull-Bear gap (LONG vs SHORT berbeda threshold)
+    # Bull-Bear gap — equalized until 50+ SHORT trades justify a stricter SHORT gap
     min_bull_bear_gap:       int   = 18       # LONG: minimum gap bull vs bear pts
-    min_bull_bear_gap_short: int   = 20       # SHORT: slightly higher than LONG (was 28 — too restrictive)
+    min_bull_bear_gap_short: int   = 18       # SHORT: same as LONG (was 20/28 — asymmetry blocked shorts)
 
     # SHORT-specific filters (aktif saat ALLOW_SHORT = True)
-    # Funding dipakai per tesis: breakdown continuation boleh funding negatif,
-    # crowded-long reversal butuh longs paying.
-    short_min_funding_rate:  float = 0.00001  # Reversal SHORT threshold: funding >= +0.00001
-                                               # Previously 0.0002 which is 10x too high — blocked all SHORTs
-    # Solusi 3: Anti-trend filter
+    # Thesis setups (OR): breakdown | failed-rally (real up-leg) | cascade
+    # Calibrated for QUANTITY + quality: tight enough to cut micro-noise thesis,
+    # loose enough that valid shorts still fire (audit 206 shorts: failed_rally spam).
+    short_min_funding_rate:  float = 0.00003  # meaningful crowded-long (was 0.00001 micro-noise)
+    # Failed-rally geometry (moderate — keep fill rate)
+    short_rally_lookback_mins: int = 45       # swing high window
+    short_rally_min_up_pct:    float = 0.0025 # need ≥0.25% up-leg before rejection
+    short_rally_reject_pct:    float = 0.0012 # give back ≥0.12% from swing high
+    short_rally_max_1h_pct:    float = 0.0020 # 1h still not strongly up (≤+0.20%)
+    # HTF momentum for SHORT only (soft): 5m veto if strongly bull, not hard multi-TF stack
+    short_htf_veto_enabled:    bool = True
+    short_htf_bull_candles:    int = 3        # 3/4 last 5m green → veto short
+    short_htf_bull_move_pct:   float = 0.004  # or 5m net move > +0.40%
+    # Regime hard filters (symmetric)
     short_max_uptrend_pct:   float = 0.03     # Block SHORT jika 24h trend > +3% (jangan lawan trend)
+    long_max_downtrend_pct:  float = -0.03    # Block LONG  jika 24h trend < -3% (jangan catch knife)
 
     # Session windows (UTC)
     ny_session_start_utc:    int   = 13       # 13:00 UTC = 09:00 ET
@@ -324,7 +389,7 @@ SIGNAL = SignalConfig()
 # [FIX 3 - 2026-04-22] SHORT disabled - WR hanya 31.4%, total loss -$9.15
 # SHORT stop_loss WR: 20%, total -$20.07
 # Re-enable ONLY when paper trade menunjukkan SHORT WR > 50% untuk 30+ trades
-ALLOW_SHORT = True   # Re-enabled dengan tesis SHORT terpisah: breakdown continuation atau crowded-long reversal
+ALLOW_SHORT = True   # Re-enabled: breakdown | failed-rally | cascade SHORT theses (OR)
 
 # ── HARD RESET ON DEPLOY ──────────────────────────────────────────────────────
 # Set KARA_HARD_RESET=true di env variable Railway/Docker sebelum deploy.

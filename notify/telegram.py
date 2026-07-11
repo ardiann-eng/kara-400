@@ -48,7 +48,7 @@ DAILY_REPORT_TEMPLATE = """
 • Saldo Tersedia : <code>{available}</code>
 
 📈 <b>PERFORMA HARI INI</b>
-• Daily PnL      : <b>{pnl_sign}{pnl_val} ({pnl_sign}{pnl_pct})</b> {pnl_emoji}
+• Daily PnL      : <b>{daily_pnl_line}</b> {pnl_emoji}
 • Posisi Aktif   : <b>{pos_count} terbuka</b>
 • Max Drawdown   : <b>{drawdown}</b>
 • Win Rate Hari Ini : <b>{win_rate}</b>
@@ -237,13 +237,16 @@ class KaraTelegram:
         if not self.mode_manager:
             return
         try:
-            all_users = user_db.get_all_users()
-            any_scalper = any(
-                getattr(u.config, 'trading_mode', 'standard') == 'scalper'
-                for u in all_users
-                if u.is_authorized
-            )
-            target = 'scalper' if any_scalper else 'standard'
+            if getattr(config, "FORCE_SCALPER_ONLY", False):
+                target = "scalper"
+            else:
+                all_users = user_db.get_all_users()
+                any_scalper = any(
+                    getattr(u.config, 'trading_mode', 'standard') == 'scalper'
+                    for u in all_users
+                    if u.is_authorized
+                )
+                target = 'scalper' if any_scalper else 'standard'
             if self.mode_manager.mode != target:
                 self.mode_manager.switch(target)
                 log.info(f"[MODE] mode_manager synced to '{target}' after user switch")
@@ -953,7 +956,9 @@ class KaraTelegram:
         for pos in positions:
             current    = live_prices.get(pos.asset, pos.entry_price)
             unreal_pnl = pos.unrealized_pnl(current)
-            float_pct  = pos.floating_pct(current) * 100
+            lev_pos    = max(int(getattr(pos, "leverage", 1) or 1), 1)
+            # Show ROE (price_move × lev), not raw price %
+            float_pct  = pos.floating_pct(current) * lev_pos * 100
             pnl_sign   = "+" if float_pct >= 0 else ""
             pnl_emoji  = "🟢" if float_pct >= 0 else "🔴"
             side_str   = pos.side.value.upper()
@@ -1230,23 +1235,88 @@ class KaraTelegram:
         pos_count = len(session.executor.open_positions)
         await self.send_daily_report(acc, pos_count, target_chat_id=chat_id)
 
+    @staticmethod
+    def _trade_ts_utc(trade: dict):
+        """Parse trade timestamp → timezone-aware UTC datetime, or None."""
+        from datetime import timezone as _tz
+        raw = trade.get("created_at", trade.get("timestamp"))
+        if raw is None:
+            return None
+        if isinstance(raw, datetime):
+            return raw if raw.tzinfo else raw.replace(tzinfo=_tz.utc)
+        if isinstance(raw, (int, float)):
+            # unix seconds (or ms)
+            ts = float(raw)
+            if ts > 1e12:
+                ts /= 1000.0
+            try:
+                return datetime.fromtimestamp(ts, tz=_tz.utc)
+            except (OSError, OverflowError, ValueError):
+                return None
+        s = str(raw).strip()
+        # ISO / "2026-06-15 14:15:11+00:00"
+        try:
+            s2 = s.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s2)
+            return dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
+        except ValueError:
+            pass
+        # "YYYY-MM-DD ..."
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            try:
+                return datetime(int(s[0:4]), int(s[5:7]), int(s[8:10]), tzinfo=_tz.utc)
+            except ValueError:
+                return None
+        return None
+
+    def _today_closed_trades(self, chat_id: str, limit: int = 500) -> list:
+        """Closed trades for the current UTC calendar day."""
+        from core.db import user_db
+        from datetime import timezone as _tz
+        history = []
+        try:
+            if hasattr(user_db, "get_trade_history"):
+                history = user_db.get_trade_history(str(chat_id), limit=limit) or []
+            elif hasattr(user_db, "load_trade_history"):
+                history = user_db.load_trade_history(str(chat_id), limit=limit) or []
+        except Exception as e:
+            log.error(f"[Daily] get_trade_history failed: {e}")
+            return []
+
+        today = datetime.now(_tz.utc).date()
+        out = []
+        for t in history:
+            if not isinstance(t, dict):
+                continue
+            # Accept close records (type missing → still count if has pnl)
+            ttype = str(t.get("type") or "close").lower()
+            if ttype not in ("close", "full_close", ""):
+                continue
+            dt = self._trade_ts_utc(t)
+            if dt is None or dt.date() != today:
+                continue
+            out.append(t)
+        return out
+
     async def send_daily_report(self, acc: AccountState, pos_count: int, target_chat_id: str = None):
-        """Send the premium daily summary report."""
+        """Send daily insights text + visual daily PnL card."""
         from core.mode_manager import mode_manager as _global_mm
         import config as _cfg
+        from datetime import timezone as _tz
 
         pnl_sign = "+" if acc.daily_pnl >= 0 else ""
         pnl_emoji = "🟢" if acc.daily_pnl >= 0 else "🔴"
 
-        # Use injected mode_manager if available, fall back to global singleton
         mm = self.mode_manager or _global_mm
         is_scalper = mm.is_scalper() if mm else False
+        # FORCE_SCALPER_ONLY → always show SCALPER
+        if getattr(_cfg, "FORCE_SCALPER_ONLY", False):
+            is_scalper = True
         mode_text = "SCALPER ⚡" if is_scalper else "STANDARD 📊"
         mode_icon = "⚡" if is_scalper else "📊"
 
         exec_mode = "Full-Auto 🤖" if getattr(_cfg, "FULL_AUTO", False) else "Semi-Auto 🤝"
 
-        # Friendly footers based on performance
         if acc.daily_pnl >= 0:
             footer = "Kerja bagus hari ini! Mari kita jaga momentumnya~ 🌸"
         else:
@@ -1265,35 +1335,52 @@ class KaraTelegram:
             status_icon = "✅"
             pause_reason = "-"
 
-        # Calculate today's win rate from trade history
+        # Today's closed trades (fixed: was load_trade_history missing + bad date filter)
+        today_trades: list = []
+        total_trades = 0
+        wins = 0
+        losses_n = 0
+        win_rate = "Belum ada trade hari ini"
+        best_pnl = 0.0
+        worst_pnl = 0.0
         try:
-            from core.db import user_db
-            chat_id_for_stats = target_chat_id
+            chat_id_for_stats = str(target_chat_id) if target_chat_id else None
             if chat_id_for_stats:
-                history = user_db.load_trade_history(chat_id_for_stats, limit=50)
-                today_str = datetime.now().strftime("%Y-%m-%d")
-                today_trades = [t for t in history if str(t.get("timestamp", "")).startswith(today_str) and t.get("type") == "close"]
+                today_trades = self._today_closed_trades(chat_id_for_stats, limit=500)
                 total_trades = len(today_trades)
-                wins = sum(1 for t in today_trades if (t.get("pnl") or 0) > 0)
-                win_rate = f"{wins/total_trades*100:.0f}% ({wins}/{total_trades})" if total_trades > 0 else "Belum ada trade hari ini"
-            else:
-                total_trades = 0
-                win_rate = "-"
-        except Exception:
-            total_trades = 0
-            win_rate = "-"
+                pnls = []
+                for t in today_trades:
+                    try:
+                        pnls.append(float(t.get("pnl") or 0))
+                    except (TypeError, ValueError):
+                        pnls.append(0.0)
+                wins = sum(1 for p in pnls if p > 0)
+                losses_n = sum(1 for p in pnls if p < 0)
+                if total_trades > 0:
+                    win_rate = f"{wins/total_trades*100:.0f}% ({wins}/{total_trades})"
+                    best_pnl = max(pnls)
+                    worst_pnl = min(pnls)
+        except Exception as e:
+            log.error(f"[Daily] stats failed: {e}")
+
+        report_date = datetime.now(_tz.utc).strftime("%Y-%m-%d")
+        # Single signed PnL line — no double "++"
+        daily_pnl_line = (
+            f"{format_idr(acc.daily_pnl)} ({format_pct(acc.daily_pnl_pct, show_sign=True)})"
+        )
+        # drawdown: AccountState usually stores fraction (0.21 = 21%)
+        dd_raw = float(acc.current_drawdown_pct or 0)
+        dd_frac = dd_raw if abs(dd_raw) <= 1.5 else dd_raw / 100.0
 
         text = DAILY_REPORT_TEMPLATE.format(
-            date=datetime.now().strftime("%Y-%m-%d"),
+            date=report_date,
             total_equity=format_idr(acc.total_equity),
             wallet_balance=format_idr(acc.wallet_balance),
             available=format_idr(acc.available),
-            pnl_sign=pnl_sign,
-            pnl_val=format_idr(acc.daily_pnl),
-            pnl_pct=format_pct(acc.daily_pnl_pct),
+            daily_pnl_line=daily_pnl_line,
             pnl_emoji=pnl_emoji,
             pos_count=pos_count,
-            drawdown=format_pct(acc.current_drawdown_pct, show_sign=False),
+            drawdown=format_pct(dd_frac, show_sign=False),
             win_rate=win_rate,
             total_trades=total_trades,
             mode_icon=mode_icon,
@@ -1302,49 +1389,51 @@ class KaraTelegram:
             status_icon=status_icon,
             status_text=status_text,
             pause_reason=pause_reason,
-            footer=footer
+            footer=footer,
         )
 
-        # Try to send daily card image first, fall back to text-only
+        # Generate + send daily PnL card (photo + caption)
         try:
             import io as _io
             from notify.daily_card import generate_daily_card
 
-            # Derive card stats from trade history
-            losses    = [t for t in today_trades if (t.get("pnl") or 0) < 0] if total_trades > 0 else []
-            all_pnls  = [t.get("pnl", 0) for t in today_trades] if total_trades > 0 else []
-            best_pnl  = max(all_pnls) if all_pnls else 0.0
-            worst_pnl = min(all_pnls) if all_pnls else 0.0
+            start_bal = float(getattr(acc, "wallet_balance", 0) or 0) - float(acc.daily_pnl or 0)
+            end_bal = float(getattr(acc, "total_equity", getattr(acc, "wallet_balance", 0)) or 0)
+            dd_for_card = abs(dd_frac) * 100.0  # card expects percent number e.g. 20.9
 
             card_bytes = generate_daily_card(
-                date_str        = datetime.now().strftime("%d %B %Y"),
-                daily_pnl_usd   = acc.daily_pnl,
-                daily_pnl_pct   = acc.daily_pnl_pct,
-                start_balance   = acc.wallet_balance - acc.daily_pnl,
-                end_balance     = acc.wallet_balance,
-                total_trades    = total_trades,
-                win_trades      = wins,
-                loss_trades     = len(losses),
-                best_trade_pnl  = best_pnl,
-                worst_trade_pnl = worst_pnl,
-                max_drawdown_pct = acc.current_drawdown_pct,
-                trading_mode    = "SCALPER" if is_scalper else "STANDARD",
+                date_str=datetime.now(_tz.utc).strftime("%d %B %Y"),
+                daily_pnl_usd=float(acc.daily_pnl or 0),
+                daily_pnl_pct=float(acc.daily_pnl_pct or 0),
+                start_balance=max(start_bal, 0.0),
+                end_balance=end_bal,
+                total_trades=total_trades,
+                win_trades=wins,
+                loss_trades=losses_n,
+                best_trade_pnl=float(best_pnl or 0),
+                worst_trade_pnl=float(worst_pnl or 0),
+                max_drawdown_pct=dd_for_card,
+                trading_mode="SCALPER" if is_scalper else "STANDARD",
             )
 
             send_ids = [target_chat_id] if target_chat_id else list(self._authorized_chat_ids)
             for cid in send_ids:
                 try:
                     await self._app.bot.send_photo(
-                        chat_id    = cid,
-                        photo      = _io.BytesIO(card_bytes),
-                        caption    = text,
-                        parse_mode = "HTML",
+                        chat_id=cid,
+                        photo=_io.BytesIO(card_bytes),
+                        caption=text.strip()[:1024],
+                        parse_mode="HTML",
+                    )
+                    log.info(
+                        f"[DailyCard] sent to {cid} trades={total_trades} "
+                        f"pnl={acc.daily_pnl:+.2f} wr={win_rate}"
                     )
                 except Exception as e:
                     log.error(f"[DailyCard] send_photo failed for {cid}: {e}")
                     await self.send_text(text, target_chat_id=cid)
         except Exception as e:
-            log.error(f"[DailyCard] Card generation failed: {e}")
+            log.error(f"[DailyCard] Card generation failed: {e}", exc_info=True)
             await self.send_text(text, target_chat_id=target_chat_id)
 
     async def cmd_enable_auto(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1686,6 +1775,18 @@ class KaraTelegram:
         session = await self.bot_app.get_session(chat_id) if self.bot_app else None
         if not session: return
 
+        if getattr(config, "FORCE_SCALPER_ONLY", False):
+            session.user.config.trading_mode = "scalper"
+            user_db.update_user(session.user)
+            self._sync_mode_manager()
+            await update.effective_message.reply_html(
+                "⚡ <b>STANDARD DINONAKTIFKAN</b>\n\n"
+                "Bot dikunci ke <b>SCALPER ONLY</b>.\n"
+                "• Hold time / risk / SL = aturan scalper\n"
+                "• Sinyal scorer standard (jika ada) dijalankan sebagai scalper"
+            )
+            return
+
         session.user.config.trading_mode = "standard"
         user_db.update_user(session.user)
         self._sync_mode_manager()
@@ -1847,128 +1948,184 @@ class KaraTelegram:
 
 
     async def send_position_event(self, action: dict, prices: dict, target_chat_id: str = None):
-        """Dispatch the right formatted card based on action type."""
+        """
+        Position lifecycle notifications.
+
+        - TP1 / TP2: status only (partial). NO PnL card.
+        - Full close (trail / SL / time_exit / close_all): TOTAL accumulated PnL
+          (all partials + final) + generate PnL card once.
+        """
         action_type = action.get("action", "")
         pos_id      = action.get("position_id", "")
-        pnl         = action.get("pnl", 0.0)
+        pnl_slice   = float(action.get("pnl_slice", action.get("pnl", 0.0)) or 0.0)
+        fully_closed = bool(action.get("fully_closed", action_type in (
+            "trailing_stop", "stop_loss", "time_exit", "close_all", "manual"
+        ) and action_type not in ("tp1", "tp2")))
 
-        # Retrieve position from user session for rich context
         session = await self.bot_app.get_session(target_chat_id) if (self.bot_app and target_chat_id) else None
         pos = None
         if session and hasattr(session.executor, '_positions'):
             pos = session.executor._positions.get(pos_id)
 
         if not pos:
-            # Fallback to plain message
             msg = action.get("message", "")
             if msg:
                 await self.send_text(msg, target_chat_id=target_chat_id)
             return
 
-        current = prices.get(pos.asset, pos.entry_price)
+        current = float(action.get("exit_price") or prices.get(pos.asset, pos.entry_price) or pos.entry_price)
         entry   = pos.entry_price
-        side_str = "LONG" if pos.side.value == "long" else "SHORT"
-        
-        # Calculate PnL % based on initial size
-        pnl_pct  = (pnl / (pos.size_initial * entry)) * 100 if (entry and pos.size_initial) else 0
-        pnl_sign = "+" if pnl >= 0 else ""
+        lev = max(int(getattr(pos, "leverage", 1) or 1), 1)
+        from utils.helpers import pnl_roe_fraction, normalize_pct_display
+        import config as _cfg
+
+        # Cumulative total (TP1+TP2+final). Prefer executor field.
+        total_pnl = float(action.get("pnl_total", getattr(pos, "pnl_realized", 0.0)) or 0.0)
+        if fully_closed and abs(total_pnl) < 1e-12:
+            total_pnl = pnl_slice
+
+        full_notional = pos.size_initial * entry if entry and pos.size_initial else 0.0
+        total_roe_frac = float(action.get("pnl_pct_total") or 0.0)
+        if abs(total_roe_frac) < 1e-12:
+            total_roe_frac = pnl_roe_fraction(total_pnl, full_notional, lev)
+        total_roe_pct = normalize_pct_display(total_roe_frac)
+
+        price_frac = float(action.get("price_move_pct") or pos.floating_pct(current) or 0.0)
+        price_pct = abs(price_frac) * 100.0
+        slice_sign = "+" if pnl_slice >= 0 else ""
+        total_sign = "+" if total_pnl >= 0 else ""
+
+        # Partial remaining UI
+        is_scl = (getattr(pos, "trade_mode", "standard") or "standard") == "scalper"
+        cfg_mode = _cfg.SCALPER if is_scl else _cfg.RISK
+        tp1_r = float(getattr(cfg_mode, "tp1_close_ratio", getattr(_cfg.RISK, "tp1_close_ratio", 0.25)))
+        tp2_r = float(getattr(cfg_mode, "tp2_close_ratio", getattr(_cfg.RISK, "tp2_close_ratio", 0.50)))
+        remain_after_tp1 = max(0.0, 1.0 - tp1_r)
+        remain_after_tp2 = remain_after_tp1 * (1.0 - tp2_r)
+
+        # Slice ROE for partial status only
+        slice_roe = float(action.get("pnl_pct_slice") or action.get("pnl_pct") or 0.0)
+        if abs(slice_roe) < 1e-12 and abs(price_frac) > 0:
+            slice_roe = price_frac * lev
+        slice_roe_pct = normalize_pct_display(slice_roe)
 
         if action_type == "tp1":
+            # Partial only — no PnL card
             text = (
-                "🌸 <b>KARA UPDATE: Target Reached</b>\n\n"
-                f"<i>I have secured partial profits for <b>{pos.asset}</b>. Taking some chips off the table.</i>\n\n"
-                
-                f"🎯 <b>TP1 HIT</b>\n"
+                "🌸 <b>KARA UPDATE: TP1 Partial</b>\n\n"
+                f"<i>Partial profit on <b>{pos.asset}</b> — posisi masih terbuka.</i>\n\n"
+                f"🎯 <b>TP1 HIT</b> ({tp1_r*100:.0f}% ditutup)\n"
                 f"  • Entry   : <code>${format_price(entry)}</code>\n"
-                f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
-                
-                f"🛡️ <b>Risk Adjustment</b>\n"
-                f"  • Status : Sisa 60% masih jalan\n"
-                f"  • Action : SL digeser ke Entry ✅\n\n"
-                
-                f"<i>Continuing to monitor for TP2. ✨</i>"
+                f"  • Price   : <code>${format_price(current)}</code> "
+                f"({slice_sign}{price_pct:.2f}% move)\n"
+                f"  • Slice   : <b>{slice_sign}{format_idr(pnl_slice)}</b> "
+                f"({slice_sign}{slice_roe_pct:.2f}% ROE @ {lev}x)\n"
+                f"  • Accrued : <code>{total_sign}{format_idr(total_pnl)}</code> "
+                f"(belum final)\n\n"
+                f"🛡️ Sisa <b>{remain_after_tp1*100:.0f}%</b> jalan · SL → Entry ✅\n"
+                f"<i>PnL card dikirim saat posisi FULL close. ✨</i>"
             )
+            await self.send_text(text, target_chat_id=target_chat_id)
+            return
 
-        elif action_type == "tp2":
+        if action_type == "tp2":
             text = (
-                "🏁 <b>KARA UPDATE: Final Targets</b>\n\n"
-                f"<i>Excellent progress on <b>{pos.asset}</b>. TP2 has been successfully triggered.</i>\n\n"
-                
+                "🏁 <b>KARA UPDATE: TP2 Partial</b>\n\n"
+                f"<i>Partial profit on <b>{pos.asset}</b> — sisa di trailing.</i>\n\n"
                 f"🎯🎯 <b>TP2 HIT</b>\n"
                 f"  • Entry   : <code>${format_price(entry)}</code>\n"
-                f"  • Profit  : <b>{pnl_sign}{format_idr(pnl)} ({pnl_sign}{pnl_pct:.2f}%)</b>\n\n"
-                
-                f"🛡️ <b>Trailing Active</b>\n"
-                f"  • Status : 25% sisa dengan trailing stop\n"
-                f"  • Objective: Maximizing the remainder. 🚀"
+                f"  • Price   : <code>${format_price(current)}</code> "
+                f"({slice_sign}{price_pct:.2f}% move)\n"
+                f"  • Slice   : <b>{slice_sign}{format_idr(pnl_slice)}</b> "
+                f"({slice_sign}{slice_roe_pct:.2f}% ROE @ {lev}x)\n"
+                f"  • Accrued : <code>{total_sign}{format_idr(total_pnl)}</code> "
+                f"(belum final)\n\n"
+                f"🛡️ Sisa <b>{remain_after_tp2*100:.0f}%</b> trailing 🚀\n"
+                f"<i>PnL card dikirim saat posisi FULL close.</i>"
             )
+            await self.send_text(text, target_chat_id=target_chat_id)
+            return
 
-        elif action_type == "trailing_stop":
+        # ── FULL CLOSE only from here ─────────────────────────────────
+        if action_type == "trailing_stop":
             trail_px = action.get("trail_price", current)
-            total_pnl = pnl + pos.pnl_realized
-            total_sign = "+" if total_pnl >= 0 else ""
             text = (
-                "📍 <b>TRAILING STOP — {asset}</b>\n"
-                "Trailing SL Hit: <code>${trail:,.4f}</code>\n"
-                "Profit Total    : <b>{tsign}{pnl_idr}</b>\n"
-                "Posisi ditutup  : 100% ✅"
-            ).format(
-                asset=pos.asset, trail=trail_px,
-                tsign=total_sign, pnl_idr=format_idr(total_pnl)
+                f"📍 <b>FULL CLOSE — {pos.asset}</b> (Trailing Stop)\n\n"
+                f"  • Entry → Exit : <code>${format_price(entry)}</code> → "
+                f"<code>${format_price(current)}</code>\n"
+                f"  • Trail SL     : <code>${trail_px:,.4f}</code>\n"
+                f"  • <b>TOTAL PnL</b> : <b>{total_sign}{format_idr(total_pnl)} "
+                f"({total_sign}{total_roe_pct:.2f}% ROE @ {lev}x)</b>\n"
+                f"  • Includes     : TP1 + TP2 + sisa (akumulasi)\n"
+                f"  • Status       : 100% ditutup ✅"
             )
-
         elif action_type == "stop_loss":
-            loss_pct = abs(pnl_pct)
             text = (
-                "🛑 <b>STOP LOSS — {asset}</b>\n"
-                "Entry   : <code>${entry:,.4f}</code>\n"
-                "SL hit  : <code>${sl:,.4f}</code>\n"
-                "Loss    : <b>-{loss_idr} (-{lpct:.2f}%)</b>\n"
-                "Modal   : Dilindungi 🛡️"
-            ).format(
-                asset=pos.asset, entry=entry,
-                sl=pos.stop_loss, loss_idr=format_idr(abs(pnl)), lpct=loss_pct
+                f"🛑 <b>FULL CLOSE — {pos.asset}</b> (Stop Loss)\n\n"
+                f"  • Entry → SL   : <code>${format_price(entry)}</code> → "
+                f"<code>${format_price(pos.stop_loss)}</code>\n"
+                f"  • Move         : <code>{price_pct:.2f}%</code> price\n"
+                f"  • <b>TOTAL PnL</b> : <b>{total_sign}{format_idr(total_pnl)} "
+                f"({total_sign}{total_roe_pct:.2f}% ROE @ {lev}x)</b>\n"
+                f"  • Includes     : partials (jika ada) + final SL\n"
+                f"  • Status       : 100% ditutup"
             )
-
+        elif action_type == "time_exit":
+            text = (
+                f"⏱ <b>FULL CLOSE — {pos.asset}</b> (Time Exit)\n\n"
+                f"  • Entry → Exit : <code>${format_price(entry)}</code> → "
+                f"<code>${format_price(current)}</code>\n"
+                f"  • <b>TOTAL PnL</b> : <b>{total_sign}{format_idr(total_pnl)} "
+                f"({total_sign}{total_roe_pct:.2f}% ROE @ {lev}x)</b>\n"
+                f"  • Includes     : TP1 + TP2 + sisa (akumulasi)\n"
+                f"  • Status       : 100% ditutup ✅"
+            )
+        elif action_type in ("close_all", "manual"):
+            text = (
+                f"🔒 <b>FULL CLOSE — {pos.asset}</b>\n\n"
+                f"  • <b>TOTAL PnL</b> : <b>{total_sign}{format_idr(total_pnl)} "
+                f"({total_sign}{total_roe_pct:.2f}% ROE @ {lev}x)</b>\n"
+                f"  • Status       : 100% ditutup ✅"
+            )
         else:
             msg = action.get("message", "")
             if msg:
                 await self.send_text(msg, target_chat_id=target_chat_id)
             return
 
-        # PnL Card button: only for profit events (tp1, tp2, trailing_stop), inline in same message.
-        # stop_loss gets no button.
-        inline_markup = None
-        if action_type in ("tp1", "tp2", "trailing_stop") and pos:
-            try:
-                acc_state = None
-                if session:
-                    acc_state = await session.get_account_state()
-                if acc_state:
-                    total_pnl_for_card = pnl + getattr(pos, "pnl_realized", 0)
-                    close_data_card = {
-                        "exit_price": current,
-                        "pnl": total_pnl_for_card,
-                        "pnl_pct": pos.floating_pct(current),
-                        "reason": action_type,
-                        "score": getattr(pos, "entry_score", 0) or 0,
-                        "duration_sec": (
-                            (utcnow() - pos.opened_at).total_seconds()
-                            if hasattr(pos, "opened_at") and pos.opened_at else 0
-                        ),
-                    }
-                    self._pending_pnl_cards[pos.position_id] = {
-                        "pos": pos,
-                        "close_data": close_data_card,
-                        "account": acc_state,
-                    }
-                    inline_markup = InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📊 Lihat PnL Card", callback_data=f"card_detail:{pos.position_id}"),
-                    ]])
-            except Exception as e:
-                log.debug(f"[PnLCard] Cache PnL data failed: {e}")
+        await self.send_text(text, target_chat_id=target_chat_id)
 
-        await self.send_text(text, target_chat_id=target_chat_id, reply_markup=inline_markup)
+        # PnL card ONLY on full close — cumulative totals
+        try:
+            acc_state = await session.get_account_state() if session else None
+            if acc_state:
+                duration_sec = 0.0
+                if getattr(pos, "opened_at", None):
+                    end_ts = getattr(pos, "closed_at", None) or utcnow()
+                    opened = pos.opened_at
+                    if opened.tzinfo is None:
+                        from datetime import timezone as _tz
+                        opened = opened.replace(tzinfo=_tz.utc)
+                    duration_sec = (end_ts - opened).total_seconds()
+                close_data = {
+                    "exit_price": current,
+                    "pnl": total_pnl,
+                    "pnl_pct": total_roe_frac,
+                    "reason": action_type,
+                    "score": getattr(pos, "entry_score", 0) or 0,
+                    "duration_sec": duration_sec,
+                    "hold_minutes": duration_sec / 60.0,
+                }
+                # Auto-generate card once position is fully closed
+                await self.send_pnl_card(pos, close_data, acc_state)
+                # Keep cache for re-request
+                self._pending_pnl_cards[pos.position_id] = {
+                    "pos": pos,
+                    "close_data": close_data,
+                    "account": acc_state,
+                }
+        except Exception as e:
+            log.error(f"[PnLCard] full-close card failed: {e}")
 
     async def send_hourly_summary(self, acc, open_count: int, target_chat_id: str = None):
         """Send a premium status overview."""
@@ -2030,11 +2187,11 @@ class KaraTelegram:
 
             pnl_usd = close_data.get("pnl", 0)
             pnl_pct_val = close_data.get("pnl_pct", 0)
-            pct_display = pnl_pct_val * 100 if abs(pnl_pct_val) < 10 else pnl_pct_val
+            from utils.helpers import format_idr, normalize_pct_display
+            pct_display = normalize_pct_display(pnl_pct_val)
             sign = "+" if pnl_usd >= 0 else ""
             reason = close_data.get("reason", "")
 
-            from utils.helpers import format_idr
             from config import USD_TO_IDR
 
             pnl_idr = pnl_usd * USD_TO_IDR
@@ -2045,72 +2202,28 @@ class KaraTelegram:
             )
 
             reason_lower = reason.lower()
-            if reason_lower == "tp1":
-                trigger_label = "Take Profit 1 tercapai"
-                emoji = "🎯"
-            elif reason_lower == "tp2":
-                trigger_label = "Take Profit 2 tercapai"
-                emoji = "🎯"
-            elif reason_lower == "trailing_stop":
-                trigger_label = "Trailing stop diaktifkan"
+            if reason_lower == "trailing_stop":
+                trigger_label = "Trailing stop · full close"
                 emoji = "📍"
             elif reason_lower == "stop_loss":
-                trigger_label = "Stop loss terpicu"
+                trigger_label = "Stop loss · full close"
                 emoji = "🛑"
             elif reason_lower == "time_exit":
-                trigger_label = "Batas waktu habis"
+                trigger_label = "Time exit · full close"
                 emoji = "⏱"
             else:
-                trigger_label = "Ditutup manual"
+                trigger_label = "Full close"
                 emoji = "🔒"
 
             outcome = "Profit" if pnl_usd >= 0 else "Loss"
-            if reason_lower == "time_exit":
-                entry_price = float(getattr(position, "entry_price", 0) or 0)
-                exit_price = float(close_data.get("exit_price", 0) or close_data.get("price", 0) or entry_price)
-                if entry_price > 0 and exit_price > 0:
-                    if position.side == Side.LONG:
-                        move_pct = (exit_price - entry_price) / entry_price * 100
-                    else:
-                        move_pct = (entry_price - exit_price) / entry_price * 100
-                else:
-                    move_pct = 0.0
-
-                hold_minutes = None
-                try:
-                    opened_at = getattr(position, "opened_at", None)
-                    closed_at = getattr(position, "closed_at", None) or utcnow()
-                    if opened_at:
-                        hold_minutes = max(0, round((closed_at - opened_at).total_seconds() / 60))
-                except Exception:
-                    hold_minutes = None
-
-                hold_text = f"{hold_minutes} menit" if hold_minutes is not None else "batas hold"
-                action_text = (
-                    "Momentum mulai decay, jadi profit diamankan."
-                    if pnl_usd >= 0
-                    else "Setup tidak memberi follow-through, jadi risiko dipotong."
-                )
-                money_sign = "+" if pnl_usd >= 0 else "-"
-                pnl_money = f"{money_sign}${abs(pnl_usd):.2f}"
-                caption = (
-                    "🌸 <b>KARA UPDATE: Time Exit</b>\n\n"
-                    f"Saya menutup <b>{position.side.value.upper()} {position.asset}</b> karena {hold_text} tercapai.\n"
-                    f"{action_text}\n\n"
-                    "📊 <b>Result</b>\n"
-                    f"  • {outcome:<6}: <b>{pnl_money} ({sign}{pct_display:.2f}% ROI)</b>\n"
-                    f"  • Move   : <b>{move_pct:+.2f}%</b>\n"
-                    f"  • Price  : <code>${format_price(entry_price)}</code> → <code>${format_price(exit_price)}</code>\n\n"
-                    "KARA lanjut mencari setup dengan EV lebih bersih. ✨"
-                )
-            else:
-                caption = (
-                    f"{emoji} <b>KARA menutup posisi {position.asset} {position.side.value.upper()}</b>\n"
-                    f"<i>{trigger_label} — posisi ditutup otomatis oleh bot.</i>\n\n"
-                    f"{'✅' if pnl_usd >= 0 else '❌'} <b>{outcome}: {sign}{pct_display:.2f}%</b>\n"
-                    f"💵 <code>{sign}${abs(pnl_usd):.2f} USD</code>  •  "
-                    f"🇮🇩 <code>{pnl_idr_str}</code>"
-                )
+            # Caption always reflects TOTAL accumulated PnL (TP1+TP2+final)
+            caption = (
+                f"{emoji} <b>KARA FULL CLOSE — {position.asset} {position.side.value.upper()}</b>\n"
+                f"<i>{trigger_label}. Angka di bawah = total akumulasi semua partial.</i>\n\n"
+                f"{'✅' if pnl_usd >= 0 else '❌'} <b>{outcome}: {sign}{pct_display:.2f}% ROE</b>\n"
+                f"💵 <code>{sign}${abs(pnl_usd):.2f} USD</code>  •  "
+                f"🇮🇩 <code>{pnl_idr_str}</code>"
+            )
 
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("📊 Detail Posisi", callback_data=f"card_detail:{position.position_id}"),
@@ -2276,11 +2389,23 @@ class KaraTelegram:
                     reply_markup=keyboard
                 )
             elif sig_id == "standard":
-                session.user.config.trading_mode = "standard"
-                user_db.update_user(session.user)
-                self._sync_mode_manager()
-                await query.edit_message_reply_markup(reply_markup=None)
-                await query.message.reply_html("📊 <b>STANDARD MODE AKTIF!</b>\n\nMode swing yang lebih aman dan terukur.")
+                if getattr(config, "FORCE_SCALPER_ONLY", False):
+                    session.user.config.trading_mode = "scalper"
+                    user_db.update_user(session.user)
+                    self._sync_mode_manager()
+                    await query.edit_message_reply_markup(reply_markup=None)
+                    await query.message.reply_html(
+                        "⚡ <b>STANDARD DINONAKTIFKAN</b>\n\n"
+                        "Bot dikunci ke <b>SCALPER ONLY</b> (hold time & risk scalper).\n"
+                        "Sinyal standard scorer — jika ada — tetap dijalankan "
+                        "dengan aturan scalper."
+                    )
+                else:
+                    session.user.config.trading_mode = "standard"
+                    user_db.update_user(session.user)
+                    self._sync_mode_manager()
+                    await query.edit_message_reply_markup(reply_markup=None)
+                    await query.message.reply_html("📊 <b>STANDARD MODE AKTIF!</b>\n\nMode swing yang lebih aman dan terukur.")
             else:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.message.reply_html("❌ Pemindahan mode dibatalkan.")

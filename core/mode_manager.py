@@ -31,16 +31,23 @@ class ModeManager:
     SCALPER  = "scalper"
     VALID_MODES = {STANDARD, SCALPER}
 
-    def __init__(self, initial_mode: str = "standard"):
+    def __init__(self, initial_mode: str = "scalper"):
         import config
         # Determine initial mode from env/config or argument
-        mode = initial_mode.lower() if initial_mode else config.TRADING_MODE
-        self._mode: str = mode if mode in self.VALID_MODES else self.STANDARD
+        if getattr(config, "FORCE_SCALPER_ONLY", False):
+            mode = self.SCALPER
+        else:
+            mode = initial_mode.lower() if initial_mode else config.TRADING_MODE
+        self._mode: str = mode if mode in self.VALID_MODES else self.SCALPER
         self._switched_at: float = time.monotonic()
         # Callbacks to notify interested parties (e.g. main.py loop) on switch
         self._on_switch_callbacks: List[Callable[[str], None]] = []
 
-        log.info(f"🎛️  ModeManager initialized — mode: {self._mode.upper()}")
+        force = getattr(config, "FORCE_SCALPER_ONLY", False)
+        log.info(
+            f"🎛️  ModeManager initialized — mode: {self._mode.upper()}"
+            f"{' (FORCE_SCALPER_ONLY)' if force else ''}"
+        )
 
     # ──────────────────────────────────────────
     # GETTERS
@@ -53,10 +60,16 @@ class ModeManager:
 
     def is_scalper(self) -> bool:
         """True when Scalper Mode is active."""
+        import config
+        if getattr(config, "FORCE_SCALPER_ONLY", False):
+            return True
         return self._mode == self.SCALPER
 
     def is_standard(self) -> bool:
         """True when Standard Mode is active."""
+        import config
+        if getattr(config, "FORCE_SCALPER_ONLY", False):
+            return False
         return self._mode == self.STANDARD
 
     def get_config(self):
@@ -96,7 +109,27 @@ class ModeManager:
         Switch to new_mode. Returns True if mode actually changed.
         Existing positions are NOT force-closed — they run out under old rules.
         """
+        import config
         new_mode = new_mode.lower()
+
+        # Hard lock: standard cannot be selected while FORCE_SCALPER_ONLY
+        if getattr(config, "FORCE_SCALPER_ONLY", False) and new_mode != self.SCALPER:
+            log.warning(
+                f"Mode switch to {new_mode.upper()} blocked — FORCE_SCALPER_ONLY is on"
+            )
+            if self._mode != self.SCALPER:
+                old_mode = self._mode
+                self._mode = self.SCALPER
+                self._switched_at = time.monotonic()
+                log.warning(f"🔀 Trading mode forced: {old_mode.upper()} → SCALPER")
+                for cb in self._on_switch_callbacks:
+                    try:
+                        cb(self.SCALPER)
+                    except Exception as e:
+                        log.error(f"Mode switch callback error: {e}")
+                return True
+            return False
+
         if new_mode not in self.VALID_MODES:
             log.error(f"Invalid mode: {new_mode}. Must be 'standard' or 'scalper'.")
             return False

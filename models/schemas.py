@@ -369,7 +369,7 @@ class TelegramResponse(BaseModel):
 # ──────────────────────────────────────────────
 
 class UserConfig(BaseModel):
-    trading_mode:  str = "standard"        # standard | scalper
+    trading_mode:  str = "scalper"         # standard | scalper (default scalper; FORCE_SCALPER_ONLY locks it)
     bot_mode:      BotMode = BotMode.PAPER # paper | live
     risk_pct:      float = 0.02            # 2% of equity
     

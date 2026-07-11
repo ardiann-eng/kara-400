@@ -4,6 +4,9 @@
 .env.*.local
 *.pem
 *.key
+users_backup.json
+users.json
+data/users.json
 
 # Python
 __pycache__/
@@ -14,6 +17,7 @@ __pycache__/
 env/
 venv/
 ENV/
+.venv/
 build/
 develop-eggs/
 dist/
@@ -30,9 +34,12 @@ wheels/
 .installed.cfg
 *.egg
 
-# IDE
+# IDE / agent tooling
 .vscode/
 .idea/
+.claude/
+.kilo/
+.kiro/
 *.swp
 *.swo
 *~
@@ -42,33 +49,58 @@ wheels/
 .pytest_cache/
 .coverage
 htmlcov/
+tests/__pycache__/
 
 # Logs
 kara.log
 logs/
 *.log
+logs.*.log
 
-# State
+# Runtime state & local DBs (not source)
 kara_state.json
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.db-journal
+data/kara_ml.db
+data/kara_data.db
+
+# Local dumps / audits / experiments (not bot runtime)
+tmp/
+audit_score_analysis/
+scratch/
+*.b64
+*.pkl
+*.xlsx
+trade_history.xlsx
+
+# Generated / test images (keep notify/assets/)
+test_*.png
+test_pnl_*.png
+test_current.png
+tmp/*.png
 
 # Cache
 .cache/
 .mypy_cache/
 .dmypy.json
+__pycache__/
 
 # Docker
 docker-compose.override.yml
 
 # Misc
 *.tmp
-.claude/
-
-# Project Persistence (KARA)
-# Allow the folder and its code, but ignore specific database files
 storage/
+
+# JSON state dumps (keep config JSON manifests)
 *.json
 !package.json
 !composer.json
 !tsconfig.json
 !zeabur.json
 !railway.json
+!opencode.json

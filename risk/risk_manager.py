@@ -107,7 +107,11 @@ class RiskManager:
 
     def _is_scalper(self) -> bool:
         """True if scalper mode is currently active for this user."""
-        if not self._chat_id: return False
+        import config as _cfg
+        if getattr(_cfg, "FORCE_SCALPER_ONLY", False):
+            return True
+        if not self._chat_id:
+            return False
         user = user_db.get_user(self._chat_id)
         if user and user.config.trading_mode == "scalper":
             return True
@@ -116,9 +120,10 @@ class RiskManager:
     def _get_user_value(self, key: str, global_fallback=None):
         """Helper to get mode-specific value from user config."""
         user = user_db.get_user(self._chat_id)
-        if not user: return global_fallback
-        
-        is_scalper = user.config.trading_mode == "scalper"
+        if not user:
+            return global_fallback
+
+        is_scalper = self._is_scalper()
         prefix = "scl_" if is_scalper else "std_"
         return getattr(user.config, f"{prefix}{key}", global_fallback)
 
@@ -484,22 +489,19 @@ class RiskManager:
         # Aset kecil (CHIP, MEGA, FARTCOIN, kLUNC) sering punya vol nyata
         # jauh lebih tinggi dari yang terukur di candle 1h karena likuiditas rendah.
         # Paksa minimum realized_vol agar SL tidak kena di gerakan biasa.
-        from data.hyperliquid_client import get_client as _get_client
         try:
+            from data.hyperliquid_client import get_client as _get_client
             _client = _get_client()
-            oi_usd_est = 0.0
             if _client._market_cache:
                 universe, _ = _client._market_cache
                 for u in universe:
                     if isinstance(u, dict) and u.get("name") == asset:
-                        # OI dalam contracts, estimasi kasar pakai mid_price tidak tersedia di sini
-                        # Gunakan maxLeverage sebagai proxy likuiditas:
-                        # aset dengan maxLeverage rendah = lebih illiquid = vol lebih tinggi
+                        # maxLeverage proxy likuiditas: low lev = more illiquid = higher vol floor
                         max_lev = int(u.get("maxLeverage", 50))
                         if max_lev <= 10:
-                            realized_vol = max(realized_vol, 0.060)   # min 6%/hari untuk illiquid
+                            realized_vol = max(realized_vol, 0.060)
                         elif max_lev <= 20:
-                            realized_vol = max(realized_vol, 0.045)   # min 4.5%/hari
+                            realized_vol = max(realized_vol, 0.045)
                         break
         except Exception:
             pass
@@ -541,23 +543,47 @@ class RiskManager:
             tp_mult *= 0.90
 
         # ── Step 5: Session adjustment — hanya perlebar, tidak persempit ─
-        # Mempersempit SL di Asia terbukti tidak membantu karena aset bergerak
-        # bebas 24 jam. Hanya tambah buffer saat NY session karena volume lebih tinggi.
         hour = datetime.now(_tz.utc).hour
         if 13 <= hour < 21:   # NY session — market lebih likuid, gerakan lebih besar
             sl_pct  = min(sl_pct * 1.20, 0.060)
             tp_mult *= 1.15
 
-        # ── Step 6: TP levels ─────────────────────────────────────────────
-        tp1_pct = sl_pct * tp_mult * 0.55   # TP1 = 55% dari target penuh
-        tp2_pct = sl_pct * tp_mult          # TP2 = target penuh
+        side_l = (side or "long").lower()
+        is_short = side_l in ("short", "sell", "s")
 
-        # RR minimum 1.5:1 — tidak mau trade dengan TP < 1.5× SL
-        tp2_pct = max(tp2_pct, sl_pct * 1.50)
-        tp1_pct = max(tp1_pct, sl_pct * 0.65)
+        # ── Step 6: TP levels ─────────────────────────────────────────────
+        # LONG: classic vol×mult RR engine.
+        # SHORT: rebuild SL/TP from MFE audit — do NOT inherit long 3–5% SL
+        # after NY widen (that made TP1 unhittable and EV always red).
+        if is_short:
+            if regime_lower in ("extreme", "volatile"):
+                sl_floor_s = getattr(RISK, "short_sl_floor_extreme", 0.028)
+            elif regime_lower == "high_vol":
+                sl_floor_s = getattr(RISK, "short_sl_floor_high_vol", 0.022)
+            else:
+                sl_floor_s = getattr(RISK, "short_sl_floor", 0.018)
+            sl_cap_s = getattr(RISK, "short_sl_cap", 0.045)
+            # Moderate short SL: vol*0.55 but stay in [floor, cap] — room above 0.9% noise
+            sl_pct = max(sl_floor_s, min(realized_vol * 0.55, sl_cap_s))
+            if 13 <= hour < 21:
+                sl_pct = min(sl_pct * 1.08, sl_cap_s)  # mild NY buffer, not long's +20%
+
+            base_tp1 = getattr(RISK, "short_tp1_pct", 0.0060)
+            base_tp2 = getattr(RISK, "short_tp2_pct", 0.0110)
+            vol_scale = getattr(RISK, "short_tp1_vol_scale", 0.12)
+            tp1_pct = base_tp1 + realized_vol * vol_scale * 0.5
+            tp2_pct = base_tp2 + realized_vol * vol_scale
+            tp1_pct = min(max(tp1_pct, 0.0050), getattr(RISK, "short_tp1_max", 0.0090))
+            tp2_pct = min(max(tp2_pct, tp1_pct * 1.35), getattr(RISK, "short_tp2_max", 0.0150))
+        else:
+            tp1_pct = sl_pct * tp_mult * 0.55   # TP1 = 55% dari target penuh
+            tp2_pct = sl_pct * tp_mult          # TP2 = target penuh
+            # RR minimum 1.5:1 — long only
+            tp2_pct = max(tp2_pct, sl_pct * 1.50)
+            tp1_pct = max(tp1_pct, sl_pct * 0.65)
 
         # ── Step 7: Absolute price levels ────────────────────────────────
-        if side == "long":
+        if not is_short:
             sl_price  = round(entry_price * (1 - sl_pct),  8)
             tp1_price = round(entry_price * (1 + tp1_pct), 8)
             tp2_price = round(entry_price * (1 + tp2_pct), 8)
@@ -566,13 +592,14 @@ class RiskManager:
             tp1_price = round(entry_price * (1 - tp1_pct), 8)
             tp2_price = round(entry_price * (1 - tp2_pct), 8)
 
-        rr = tp2_pct / sl_pct
+        rr = tp2_pct / sl_pct if sl_pct > 0 else 0.0
 
         log.info(
             f"[LEVELS] {asset} {side.upper()} "
             f"vol={realized_vol*100:.2f}% regime={regime} "
             f"sl={sl_pct*100:.2f}% tp1={tp1_pct*100:.2f}% tp2={tp2_pct*100:.2f}% "
             f"RR={rr:.2f}x score={score}"
+            f"{' [SHORT-MFE-TP]' if is_short else ''}"
         )
 
         return {
@@ -610,6 +637,8 @@ class RiskManager:
         sl_pct: float,
         tp2_pct: float,
         min_ev: float = 0.001,
+        side: str = "long",
+        tp1_pct: float = 0.0,
     ) -> Tuple[bool, float]:
         """
         Gate trade on positive expected value. Pure math, <0.01ms.
@@ -618,23 +647,42 @@ class RiskManager:
         92-trade proof: EV was -0.226%/trade despite 57.6% WR because
         avg loss (1.09%) was 2.66x avg win (0.41%). This filter enforces
         that the math works before capital is risked.
+
+        SHORT: scalp-style payoff (hit TP1 often). Weight TP1 so tighter
+        short targets are not auto-blocked by long-style RR math.
         """
         win_prob      = self.score_to_win_prob(score)
         loss_prob     = 1.0 - win_prob
-        realistic_win = tp2_pct * 0.70   # realistic: not all trades reach TP2
-        ev = (win_prob * realistic_win) - (loss_prob * sl_pct)
+        side_l = (side or "long").lower()
+        if side_l in ("short", "sell", "s"):
+            w1 = getattr(RISK, "short_ev_use_tp1_weight", 0.85)
+            t1 = tp1_pct if tp1_pct > 0 else tp2_pct * 0.55
+            realistic_win = t1 * w1 + tp2_pct * (1.0 - w1)
+            # Short scalp: many exits before full SL; haircut loss side.
+            # Also bump WR slightly — short needs ~higher hit-rate by design.
+            win_prob_s = min(0.62, win_prob + 0.04)
+            loss_prob_eff = (1.0 - win_prob_s) * getattr(RISK, "short_ev_sl_haircut", 0.90)
+            win_prob = win_prob_s
+            # Soft: pass if TP1/SL not absurdly bad OR classic EV ok
+            min_ev = min(min_ev, 0.0)
+            rr_ok = t1 >= sl_pct * 0.22  # e.g. 0.55% TP vs 2.0% SL still ok for quantity
+        else:
+            realistic_win = tp2_pct * 0.70   # realistic: not all trades reach TP2
+            loss_prob_eff = loss_prob
+            rr_ok = True
+        ev = (win_prob * realistic_win) - (loss_prob_eff * sl_pct)
 
-        passes = ev >= min_ev
+        passes = (ev >= min_ev) or (side_l in ("short", "sell", "s") and rr_ok and score >= 58)
         if passes:
             log.debug(
-                f"[EV] score={score} win_prob={win_prob:.2f} "
+                f"[EV] score={score} side={side_l} win_prob={win_prob:.2f} "
                 f"sl={sl_pct*100:.2f}% tp={tp2_pct*100:.2f}% "
                 f"ev={ev*100:.3f}% APPROVED"
             )
         else:
             log.info(
                 f"[EV] Trade rejected: ev={ev*100:.3f}% < min={min_ev*100:.3f}% "
-                f"(score={score} win_prob={win_prob:.2f} "
+                f"(score={score} side={side_l} win_prob={win_prob:.2f} "
                 f"sl={sl_pct*100:.2f}% tp={tp2_pct*100:.2f}%)"
             )
         return passes, ev
@@ -664,11 +712,17 @@ class RiskManager:
 
         floating = position.floating_pct(current_price)
 
+        # Always track extreme price for MFE / trail (persist on position).
+        # Without this, bounce after peak loses MFE and early-SHORT trail is blind.
+        if position.trailing_high <= 0:
+            position.trailing_high = position.entry_price
         if position.side == Side.LONG:
-            new_high = max(position.trailing_high, current_price)
+            position.trailing_high = max(position.trailing_high, current_price)
+            new_high = position.trailing_high
             max_floating = (new_high - position.entry_price) / position.entry_price
         else:
-            new_low = min(position.trailing_high, current_price)
+            position.trailing_high = min(position.trailing_high, current_price)
+            new_low = position.trailing_high
             max_floating = (position.entry_price - new_low) / position.entry_price
 
         # ── Rule A: Hard SL ───────────────────────────────────────────────
@@ -721,20 +775,58 @@ class RiskManager:
                 )
             }
 
-        # ── Rule D: Trailing stop on last position piece (post-TP1) ─────
-        if position.tp1_hit:
-            tp1_diff_pct = abs(position.entry_price - position.tp1) / position.entry_price
-            # Activate trail once price extends 0.3% beyond TP1
-            activation_threshold = tp1_diff_pct + 0.003
+        # ── Rule D: Trailing stop ─────────────────────────────────────────
+        # Post-TP1 trail (classic) OR early MFE trail (max-profit):
+        #   SHORT standard: arm ~0.35%
+        #   LONG  standard: arm ~0.65%  (audit: trail avg $4.3 vs time_exit med $0.42)
+        #   Scalper either side: arm ~0.40% (fits 12m hold)
+        trade_mode = getattr(position, "trade_mode", "standard") or "standard"
+        is_scalper_pos = trade_mode == "scalper"
+        early_trail = False
+        early_arm = 0.0
+        early_width = 0.0
+        early_tag = ""
+
+        if not position.tp1_hit:
+            if is_scalper_pos:
+                early_arm = getattr(SCALPER, "early_trail_arm_pct", 0.0040)
+                early_width = getattr(SCALPER, "early_trail_pct", 0.0025)
+                early_tag = "early-SCL"
+            elif position.side == Side.SHORT:
+                early_arm = getattr(RISK, "short_early_trail_arm_pct", 0.0035)
+                early_width = getattr(RISK, "short_early_trail_pct", 0.0025)
+                early_tag = "early-SHORT"
+            else:
+                early_arm = getattr(RISK, "long_early_trail_arm_pct", 0.0065)
+                early_width = getattr(RISK, "long_early_trail_pct", 0.0035)
+                early_tag = "early-LONG"
+
+            if max_floating >= early_arm:
+                early_trail = True
+                if not getattr(position, "trailing_active", False):
+                    position.trailing_active = True
+                    log.debug(
+                        f"[TRAIL] {position.asset} {early_tag} arm MFE={max_floating*100:.2f}% "
+                        f"(threshold {early_arm*100:.2f}%)"
+                    )
+
+        if position.tp1_hit or early_trail:
+            if position.tp1_hit:
+                tp1_diff_pct = abs(position.entry_price - position.tp1) / position.entry_price
+                activation_threshold = tp1_diff_pct + 0.003
+            else:
+                activation_threshold = early_arm
 
             if max_floating >= activation_threshold:
-                # After TP2: tighter trail (0.3x vol or 0.3% min)
-                # Before TP2: standard trail (0.5x vol or 0.5% min)
                 vol_est = getattr(position, 'realized_vol', 0.02)
-                if position.tp2_hit:
+                if early_trail and not position.tp1_hit:
+                    trail_pct = early_width
+                elif position.tp2_hit:
                     trail_pct = max(vol_est * 0.30, 0.003)
                 else:
                     trail_pct = max(vol_est * 0.50, 0.005)
+                    if is_scalper_pos:
+                        trail_pct = min(trail_pct, getattr(SCALPER, "trailing_pct", 0.0025) * 1.5)
 
                 if position.side == Side.LONG:
                     trail_sl = new_high * (1 - trail_pct)
@@ -746,7 +838,8 @@ class RiskManager:
                             "trail_price": trail_sl,
                             "message":     (
                                 f"🛡️ Trailing Stop ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
-                                f"(peak +{max_floating*100:.1f}%)."
+                                f"(peak +{max_floating*100:.1f}%)"
+                                f"{f' [{early_tag}]' if early_trail and not position.tp1_hit else ''}."
                             )
                         }
                 else:
@@ -759,12 +852,15 @@ class RiskManager:
                             "trail_price": trail_sl,
                             "message":     (
                                 f"🛡️ Trailing Stop ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
-                                f"(peak +{max_floating*100:.1f}%)."
+                                f"(peak +{max_floating*100:.1f}%)"
+                                f"{f' [{early_tag}]' if early_trail and not position.tp1_hit else ''}."
                             )
                         }
 
-        # ── Rule E: Scalper max-hold (unchanged) ─────────────────────────
-        if getattr(position, 'trade_mode', 'standard') == 'scalper':
+        # ── Rule E: Scalper max-hold ─────────────────────────────────────
+        # Force-exit dead trades after 12m, but do NOT cut winners that trail
+        # is already managing (max-profit vs hard clock).
+        if is_scalper_pos:
             scfg = SCALPER
             max_hold  = getattr(scfg, 'max_hold_minutes', 12.0)
             grace     = getattr(scfg, 'max_hold_grace_minutes', 6.0)
@@ -777,7 +873,25 @@ class RiskManager:
             hold_minutes = (now - opened).total_seconds() / 60.0
 
             if hold_minutes >= max_hold:
-                if floating <= soft_floor / 100.0 and hold_minutes < (max_hold + grace):
+                respect_trail = getattr(scfg, "max_hold_respect_trail", True)
+                min_mfe = getattr(scfg, "max_hold_trail_min_mfe", 0.0035)
+                trail_managing = (
+                    respect_trail
+                    and floating > 0
+                    and max_floating >= min_mfe
+                    and (
+                        position.tp1_hit
+                        or early_trail
+                        or getattr(position, "trailing_active", False)
+                    )
+                )
+                if trail_managing:
+                    log.debug(
+                        f"[SCALPER] {position.asset}: max-hold {hold_minutes:.0f}m skipped — "
+                        f"trail managing winner MFE={max_floating*100:.2f}% float={floating*100:.2f}%"
+                    )
+                    pass  # let Rule D trail close it
+                elif floating <= soft_floor / 100.0 and hold_minutes < (max_hold + grace):
                     pass  # grace period — wait
                 else:
                     return {
@@ -793,9 +907,7 @@ class RiskManager:
                     }
 
         # ── Rule F: Standard momentum-based time exit (Fix 6) ────────────
-        # time_exit 72.2% WR proves signals are right, but hard 12-min cuts
-        # winners mid-move. New: only exit on reversal or flatline, NEVER
-        # exit if above TP1 (let trail handle it).
+        # Never time-exit if TP1 hit OR early trail is managing a winner.
         if getattr(position, 'trade_mode', 'standard') == 'standard':
             now    = _dt.now(_tz.utc)
             opened = position.opened_at
@@ -803,30 +915,51 @@ class RiskManager:
                 opened = opened.replace(tzinfo=_tz.utc)
             hold_minutes = (now - opened).total_seconds() / 60.0
 
-            # Condition C: NEVER time-exit above TP1 — let trailing close it
-            if position.tp1_hit:
+            trail_owns_exit = (
+                position.tp1_hit
+                or early_trail
+                or (
+                    getattr(position, "trailing_active", False)
+                    and max_floating >= getattr(RISK, "long_early_trail_arm_pct", 0.0065) * 0.85
+                    and floating > 0
+                )
+            )
+            if trail_owns_exit:
                 pass  # trailing stop will handle this, not time exit
 
             else:
                 cfg_risk = RISK
-                flatline_pct  = getattr(cfg_risk, 'time_exit_flatline_pct',  0.0015)
-                flatline_mins = getattr(cfg_risk, 'time_exit_flatline_mins', 30)
-                pullback_pct  = getattr(cfg_risk, 'time_exit_pullback_pct',  0.20)
+                is_short_pos = position.side == Side.SHORT
+                if is_short_pos:
+                    # SHORT: looser flatline so we don't harvest 0.10% crumbs
+                    flatline_pct  = getattr(cfg_risk, "short_time_exit_flatline_pct", 0.0030)
+                    flatline_mins = getattr(cfg_risk, "short_time_exit_flatline_mins", 45)
+                    pullback_pct  = getattr(cfg_risk, "short_time_exit_pullback_pct", 0.35)
+                    pullback_mins = getattr(cfg_risk, "short_time_exit_pullback_mins", 40)
+                    min_mfe_pb    = getattr(cfg_risk, "short_time_exit_min_mfe_for_pullback", 0.004)
+                else:
+                    flatline_pct  = getattr(cfg_risk, 'time_exit_flatline_pct',  0.0015)
+                    flatline_mins = getattr(cfg_risk, 'time_exit_flatline_mins', 30)
+                    pullback_pct  = getattr(cfg_risk, 'time_exit_pullback_pct',  0.20)
+                    pullback_mins = 30
+                    min_mfe_pb    = 0.0
                 hard_hours    = getattr(cfg_risk, 'time_exit_hard_hours',    6.0)
 
-                # Condition A: momentum reversed — price pulled back 20% of TP1 distance
-                # Only after 30min to avoid triggering on normal noise
-                if hold_minutes >= 30:
+                # Condition A: momentum reversed — price pulled back X% of TP1 distance
+                if hold_minutes >= pullback_mins:
+                    # SHORT: only if trade had real MFE first (don't cut scratch greens)
+                    mfe_ok = (not is_short_pos) or (max_floating >= min_mfe_pb)
                     tp1_dist = abs(position.tp1 - position.entry_price)
                     if position.side == Side.LONG:
                         pullback_threshold = position.entry_price + tp1_dist * pullback_pct
                         momentum_reversed = (
                             current_price <= pullback_threshold and
-                            floating >= 0  # still slightly positive — take it
+                            floating >= 0
                         )
                     else:
                         pullback_threshold = position.entry_price - tp1_dist * pullback_pct
                         momentum_reversed = (
+                            mfe_ok and
                             current_price >= pullback_threshold and
                             floating >= 0
                         )
@@ -845,7 +978,7 @@ class RiskManager:
                             )
                         }
 
-                # Condition B: flatline — less than 0.15% move in last 30min
+                # Condition B: flatline — SHORT uses wider band / longer wait
                 if hold_minutes >= flatline_mins and abs(floating) < flatline_pct:
                     return {
                         "action":      "time_exit",

@@ -134,7 +134,13 @@ class ScoringEngine:
     def _infer_setup_type(self, signal: TradeSignal) -> str:
         reasons = " | ".join(getattr(signal.breakdown, "reasons", []) or []).lower()
         if signal.side == Side.SHORT:
-            if "crowded-long reversal" in reasons:
+            if "cascade short" in reasons or "liq cascade" in reasons:
+                return "short_cascade"
+            if (
+                "failed-rally" in reasons
+                or "failed rally" in reasons
+                or "crowded-long reversal" in reasons
+            ):
                 return "short_crowded_reversal"
             if "breakdown continuation" in reasons or "downtrend" in reasons or "bearish" in reasons:
                 return "short_breakdown"
@@ -1131,7 +1137,7 @@ class ScoringEngine:
         scfg = config.SCALPER
 
         # Dynamic SL: scale with realized_vol, floor at config sl_pct, ceiling at 1.5%
-        # RR ratio tetap 1.125x TP1 dan 1.5x TP2 relatif terhadap SL
+        # TP ladder calibrated for ~12m hold (tp1~0.45%, tp2~0.75% base).
         SL_FLOOR   = scfg.sl_pct          # 0.80%
         SL_CEILING = 0.0150               # 1.50% max — beyond this scalper isn't viable
         VOL_MULT   = 1.20                 # SL = vol * 1.2 (noise buffer)
@@ -1141,11 +1147,14 @@ class ScoringEngine:
         else:
             sl_pct = SL_FLOOR
 
-        # TP scaled proportionally to maintain consistent RR
-        rr1 = scfg.tp1_pct / scfg.sl_pct   # ~1.125x
-        rr2 = scfg.tp2_pct / scfg.sl_pct   # ~1.5x
+        # TP: keep config RR, but cap TP2 so it stays inside typical 12m MFE
+        rr1 = scfg.tp1_pct / max(scfg.sl_pct, 1e-9)   # ~0.56x base
+        rr2 = scfg.tp2_pct / max(scfg.sl_pct, 1e-9)   # ~0.94x base
         tp1_pct = sl_pct * rr1
         tp2_pct = sl_pct * rr2
+        # Soft caps: TP1 ≤ 0.70%, TP2 ≤ 1.10% even if vol inflates SL
+        tp1_pct = min(tp1_pct, 0.0070)
+        tp2_pct = min(max(tp2_pct, tp1_pct * 1.40), 0.0110)
 
         leverage = min(scfg.default_leverage, scfg.max_leverage)
 
@@ -1413,36 +1422,76 @@ class ScoringEngine:
         if max(long_count, short_count) < 2:
             log.debug(f"[{asset}] REJECT: No basic consensus (Longs:{long_count}, Shorts:{short_count})")
             return None, 0
-            
-        # Fetch 3 latest 1m candles for Momentum Confirmation
+
+        # Fetch 1m (swing + micro mom) and 5m (soft HTF for SHORT).
+        # Keep LONG quantity: 1m mom still votes. SHORT: 1m votes only if 5m not strongly bull.
         mom_dir = None
         mom_reason = "Momentum: None"
+        candles_1m: list = []
+        htf_bull_veto = False
+        htf_note = "htf=na"
         try:
             async with self.candle_sem:
                 now_ms = int(time.time() * 1000)
-                start_ms = now_ms - 5 * 60 * 1000
-                resp, succ = await self.client._call_info_endpoint(
+                # ~60m of 1m for failed-rally swing high
+                start_1m = now_ms - 60 * 60 * 1000
+                resp_1m, succ_1m = await self.client._call_info_endpoint(
                     "candleSnapshot",
-                    {"req": {"coin": asset, "interval": "1m", "startTime": start_ms, "endTime": now_ms}}
+                    {"req": {"coin": asset, "interval": "1m", "startTime": start_1m, "endTime": now_ms}}
                 )
-                if succ and isinstance(resp, list) and len(resp) >= 3:
-                    closes = [float(c["c"]) for c in resp[-3:]]
-                    opens = [float(c["o"]) for c in resp[-3:]]
-                    
-                    bull_candles = sum(1 for o, c in zip(opens, closes) if c > o)
-                    bear_candles = sum(1 for o, c in zip(opens, closes) if c < o)
-                    
-                    if bull_candles >= 2:
-                        mom_dir = Side.LONG
-                        mom_reason = f"Momentum: 1m Bullish ({bull_candles}/3 Green)"
-                    elif bear_candles >= 2:
-                        mom_dir = Side.SHORT
-                        mom_reason = f"Momentum: 1m Bearish ({bear_candles}/3 Red)"
-                    else:
-                        mom_reason = "Momentum: Neutral"
+                if succ_1m and isinstance(resp_1m, list):
+                    candles_1m = resp_1m
+
+                start_5m = now_ms - 40 * 60 * 1000
+                resp_5m, succ_5m = await self.client._call_info_endpoint(
+                    "candleSnapshot",
+                    {"req": {"coin": asset, "interval": "5m", "startTime": start_5m, "endTime": now_ms}}
+                )
+                if succ_5m and isinstance(resp_5m, list) and len(resp_5m) >= 4:
+                    c5 = [float(c["c"]) for c in resp_5m[-4:] if isinstance(c, dict) and "c" in c]
+                    o5 = [float(c["o"]) for c in resp_5m[-4:] if isinstance(c, dict) and "o" in c]
+                    if len(c5) >= 4 and len(o5) >= 4:
+                        green5 = sum(1 for o, c in zip(o5, c5) if c > o)
+                        move5 = (c5[-1] - c5[0]) / c5[0] if c5[0] > 0 else 0.0
+                        need_g = getattr(config.SIGNAL, "short_htf_bull_candles", 3)
+                        need_m = getattr(config.SIGNAL, "short_htf_bull_move_pct", 0.004)
+                        htf_bull_veto = green5 >= need_g or move5 >= need_m
+                        htf_note = f"5m green={green5}/4 move={move5*100:+.2f}%"
         except Exception as e:
-            log.debug(f"[{asset}] Momentum fetch failed: {e}")
-            
+            log.debug(f"[{asset}] Momentum/HTF fetch failed: {e}")
+
+        mom_1m_long = False
+        mom_1m_short = False
+        if len(candles_1m) >= 3:
+            try:
+                closes = [float(c["c"]) for c in candles_1m[-3:]]
+                opens = [float(c["o"]) for c in candles_1m[-3:]]
+                bull_candles = sum(1 for o, c in zip(opens, closes) if c > o)
+                bear_candles = sum(1 for o, c in zip(opens, closes) if c < o)
+                mom_1m_long = bull_candles >= 2
+                mom_1m_short = bear_candles >= 2
+                if mom_1m_long:
+                    mom_reason = f"Momentum: 1m Bullish ({bull_candles}/3 Green) | {htf_note}"
+                elif mom_1m_short:
+                    mom_reason = f"Momentum: 1m Bearish ({bear_candles}/3 Red) | {htf_note}"
+                else:
+                    mom_reason = f"Momentum: 1m Neutral | {htf_note}"
+            except (TypeError, ValueError, KeyError):
+                pass
+
+        # LONG vote: classic 1m (preserve long fill rate)
+        # SHORT vote: 1m bear counts only if 5m is NOT in hard bull (soft HTF filter)
+        if mom_1m_long:
+            mom_dir = Side.LONG
+        elif mom_1m_short:
+            if htf_bull_veto and getattr(config.SIGNAL, "short_htf_veto_enabled", True):
+                mom_dir = None  # abstain — don't let 1m dump vote short into 5m uptrend
+                mom_reason += " | SHORT mom abstain (5m bull veto soft)"
+            else:
+                mom_dir = Side.SHORT
+        else:
+            mom_dir = None
+
         dirs.append(mom_dir)
         long_count = dirs.count(Side.LONG)
         short_count = dirs.count(Side.SHORT)
@@ -1460,64 +1509,157 @@ class ScoringEngine:
         if long_count >= 3:
             side = Side.LONG
             raw_score = total_bull + confidence_bonus
+
+            # P0-A: Mirror anti-trend hard filter — block LONG in strong 24h dump
+            max_down = getattr(config.SIGNAL, "long_max_downtrend_pct", -0.03)
+            if trend_pct < max_down:
+                log.debug(
+                    f"[{asset}] LONG BLOCKED: 24h downtrend {trend_pct*100:.1f}% < "
+                    f"{max_down*100:.0f}% (jangan catch knife)"
+                )
+                return None, 0
         elif short_count >= 3:
-            # [FIX 3] Block SHORT if disabled
             if not config.ALLOW_SHORT:
                 log.debug(f"[{asset}] SHORT signal blocked (ALLOW_SHORT=False). WR=31.4% data.")
                 return None, 0
-            side = Side.SHORT
-            raw_score = total_bear + confidence_bonus
-
-            # SHORT Quality Filters (berlaku saat ALLOW_SHORT = True)
-            # Funding is thesis-dependent:
-            # 1) Breakdown continuation: negative funding + price down + OI expanding.
-            # 2) Crowded-long reversal: positive funding + price failed up + bearish flow.
-            fr = getattr(funding, 'funding_rate', 0.0)
-            min_fr = getattr(config.SIGNAL, 'short_min_funding_rate', 0.0002)
-            oi_chg = getattr(oi, 'oi_change_pct', 0.0)
-            oi_expanding = oi_chg > getattr(config.SIGNAL, 'oi_change_threshold_pct', 0.008)
-            price_down = price_change_1h < -0.002
-            price_failed_up = price_change_1h <= 0.001
-            cvd_bearish = cvd_val < 0
-            ob_bearish = ob_bear > ob_bull
-
-            breakdown_short = fr < 0 and price_down and oi_expanding
-            crowded_long_reversal = fr >= min_fr and price_failed_up and (cvd_bearish or ob_bearish)
-
-            if breakdown_short:
-                oi_reasons.append(
-                    f"SHORT setup: breakdown continuation "
-                    f"(funding={fr:.6f}, price_1h={price_change_1h*100:.2f}%, OI={oi_chg*100:.2f}%)"
-                )
-            elif crowded_long_reversal:
-                oi_reasons.append(
-                    f"SHORT setup: crowded-long reversal "
-                    f"(funding={fr:.6f}, price_1h={price_change_1h*100:.2f}%, "
-                    f"cvd_bear={cvd_bearish}, ob_bear={ob_bearish})"
-                )
-            else:
+            # Soft HTF veto only when 5m is strongly bull AND 1m was the 3rd vote.
+            # If OI+Liq+OB already 3 short without mom, still allow (keep quantity).
+            core_short = [oi_dir, liq_dir, ob_dir].count(Side.SHORT)
+            if (
+                getattr(config.SIGNAL, "short_htf_veto_enabled", True)
+                and htf_bull_veto
+                and core_short < 3
+            ):
                 log.debug(
-                    f"[{asset}] SHORT BLOCKED: no valid funding/flow thesis "
-                    f"(fr={fr:.6f}, price_1h={price_change_1h:.4f}, oi_chg={oi_chg:.4f}, "
-                    f"cvd_bear={cvd_bearish}, ob_bear={ob_bearish})"
+                    f"[{asset}] SHORT BLOCKED soft HTF: {htf_note} core_short={core_short}/3"
                 )
                 return None, 0
 
-            # Solusi 3: Anti-Trend Filter
-            # Jangan SHORT jika market sedang uptrend kuat (> +2% dalam 24h).
-            max_up = getattr(config.SIGNAL, 'short_max_uptrend_pct', 0.02)
+            side = Side.SHORT
+            raw_score = total_bear + confidence_bonus
+
+            # SHORT thesis (moderate tightness — preserve fill rate):
+            # 1) Breakdown: price 1h < -0.25% + (OI expand OR CVD OR structure OR mom red)
+            # 2) Failed-rally: real up-leg + rejection from swing high + flow lean
+            # 3) Cascade: long-liq cluster + red 1m
+            fr = getattr(funding, "funding_rate", 0.0)
+            min_fr = getattr(config.SIGNAL, "short_min_funding_rate", 0.00003)
+            oi_thr = getattr(config.SIGNAL, "oi_change_threshold_pct", 0.008)
+            oi_chg = getattr(oi, "oi_change_pct", 0.0)
+            oi_expanding = oi_chg > oi_thr
+            price_down_hard = price_change_1h < -0.0025
+            cvd_bearish = cvd_val < 0
+            # Mild OB lean ok for quantity; strong ask helps quality tag
+            ob_bearish = ob_bear > ob_bull
+            structure_bear = trend_pct < -0.010 or mom_dir == Side.SHORT
+            mom_red = mom_1m_short
+
+            long_liq_cascade = False
+            if liq_map is not None and getattr(liq_map, "levels", None):
+                long_liq_above = sum(
+                    l.notional_usd
+                    for l in liq_map.levels
+                    if l.side == Side.LONG and l.distance_pct < 0.03
+                )
+                short_liq_below = sum(
+                    l.notional_usd
+                    for l in liq_map.levels
+                    if l.side == Side.SHORT and l.distance_pct < 0.03
+                )
+                long_liq_cascade = long_liq_above > short_liq_below * 1.5 and long_liq_above > 0
+            if not long_liq_cascade:
+                long_liq_cascade = liq_bear >= liq_bull + 4
+
+            breakdown_confirm = oi_expanding or cvd_bearish or structure_bear or mom_red
+            breakdown_short = price_down_hard and breakdown_confirm
+
+            # Real failed-rally geometry from 1m swing high (not flat price_1h)
+            failed_rally_short = False
+            rally_detail = "no_swing"
+            lookback = getattr(config.SIGNAL, "short_rally_lookback_mins", 45)
+            min_up = getattr(config.SIGNAL, "short_rally_min_up_pct", 0.0025)
+            min_rej = getattr(config.SIGNAL, "short_rally_reject_pct", 0.0012)
+            max_1h = getattr(config.SIGNAL, "short_rally_max_1h_pct", 0.0020)
+            if candles_1m and mark_price > 0:
+                try:
+                    # last `lookback` 1m bars
+                    window = candles_1m[-(lookback + 1):] if len(candles_1m) > lookback else candles_1m
+                    highs = [float(c["h"]) for c in window if isinstance(c, dict) and "h" in c]
+                    if highs:
+                        swing_high = max(highs)
+                        up_leg = (swing_high - mark_price) / mark_price
+                        # up-leg from an earlier low in window
+                        lows = [float(c["l"]) for c in window if isinstance(c, dict) and "l" in c]
+                        swing_low = min(lows) if lows else mark_price
+                        rally_span = (swing_high - swing_low) / swing_low if swing_low > 0 else 0.0
+                        rejected = up_leg >= min_rej and rally_span >= min_up
+                        stalled_1h = price_change_1h <= max_1h
+                        flow_ok = cvd_bearish or ob_bearish
+                        failed_rally_short = rejected and stalled_1h and flow_ok
+                        rally_detail = (
+                            f"up_leg={up_leg*100:.2f}% span={rally_span*100:.2f}% "
+                            f"1h={price_change_1h*100:.2f}% flow={flow_ok}"
+                        )
+                except (TypeError, ValueError, KeyError) as e:
+                    rally_detail = f"parse_err={e}"
+
+            cascade_short = long_liq_cascade and mom_red
+
+            if breakdown_short:
+                conf_bits = []
+                if oi_expanding:
+                    conf_bits.append(f"OI+{oi_chg*100:.2f}%")
+                if cvd_bearish:
+                    conf_bits.append("cvd_bear")
+                if structure_bear:
+                    conf_bits.append("structure_bear")
+                if mom_red:
+                    conf_bits.append("mom_1m_red")
+                oi_reasons.append(
+                    f"SHORT setup: breakdown continuation "
+                    f"(price_1h={price_change_1h*100:.2f}%, confirm={'+'.join(conf_bits) or 'n/a'})"
+                )
+            elif failed_rally_short:
+                fund_note = (
+                    f"funding+={fr:.6f}"
+                    if fr >= min_fr
+                    else f"funding={fr:.6f} (optional)"
+                )
+                oi_reasons.append(
+                    f"SHORT setup: failed-rally short "
+                    f"({rally_detail}, {fund_note})"
+                )
+            elif cascade_short:
+                oi_reasons.append(
+                    f"SHORT setup: cascade short "
+                    f"(long_liq_cluster=True, mom_red=True, liq_b/s={liq_bull}/{liq_bear})"
+                )
+            else:
+                log.debug(
+                    f"[{asset}] SHORT BLOCKED: no valid thesis "
+                    f"(price_1h={price_change_1h:.4f}, oi_chg={oi_chg:.4f}, "
+                    f"cvd_bear={cvd_bearish}, ob_bear={ob_bearish}, "
+                    f"structure_bear={structure_bear}, long_liq_cascade={long_liq_cascade}, "
+                    f"mom_red={mom_red}, rally={rally_detail}, fr={fr:.6f})"
+                )
+                return None, 0
+
+            max_up = getattr(config.SIGNAL, "short_max_uptrend_pct", 0.03)
             if trend_pct > max_up:
-                log.debug(f"[{asset}] SHORT BLOCKED: 24h uptrend {trend_pct*100:.1f}% > {max_up*100:.0f}% (jangan lawan trend)")
+                log.debug(
+                    f"[{asset}] SHORT BLOCKED: 24h uptrend {trend_pct*100:.1f}% > "
+                    f"{max_up*100:.0f}% (jangan lawan trend)"
+                )
                 return None, 0
         else:
             return None, 0
 
-        # ── Bull-Bear gap filter (SHORT butuh gap lebih besar dari LONG) ──
+        # ── Bull-Bear gap filter (P0-C: SHORT gap == LONG gap until data says otherwise) ──
         bull_bear_gap = abs(total_bull - total_bear)
         if side == Side.SHORT:
-            min_gap = getattr(config.SIGNAL, 'min_bull_bear_gap_short', 28)
+            min_gap = getattr(config.SIGNAL, "min_bull_bear_gap_short", 18)
         else:
-            min_gap = getattr(config.SIGNAL, 'min_bull_bear_gap', 18)
+            min_gap = getattr(config.SIGNAL, "min_bull_bear_gap", 18)
         if bull_bear_gap < min_gap:
             log.debug(f"[{asset}] REJECT: Bull-Bear gap {bull_bear_gap:.1f} < {min_gap} ({'SHORT' if side == Side.SHORT else 'LONG'} threshold)")
             return None, 0

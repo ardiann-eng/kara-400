@@ -348,9 +348,12 @@ class PaperExecutor:
         import config as _ai_cfg
         from intelligence.experience_buffer import experience_buffer
 
-        # Pakai pnl_realized (total PnL kumulatif) bukan floating_pct (hanya sisa size)
-        # floating_pct salah untuk trade dengan partial close karena hanya ngitung sisa, bukan total
-        pnl_pct_final = pos.pnl_realized / (pos.size_initial * pos.entry_price) if pos.size_initial > 0 and pos.entry_price > 0 else pos.floating_pct(fill_price)
+        # ROE fraction on initial margin (price_move × lev, cumulative after partials).
+        # BUGFIX: was notional-only (no lev) → showed 0.7% instead of ~14% @20x.
+        from utils.helpers import pnl_roe_fraction
+        full_notional = pos.size_initial * pos.entry_price if pos.size_initial > 0 else 0.0
+        lev = max(int(getattr(pos, "leverage", 1) or 1), 1)
+        pnl_pct_final = pnl_roe_fraction(pos.pnl_realized, full_notional, lev)
         duration_sec = (pos.closed_at - pos.opened_at).total_seconds()
 
         loop = asyncio.get_event_loop()
@@ -381,7 +384,8 @@ class PaperExecutor:
             "size":             pos.size_initial,
             "notional":         pos.size_initial * pos.entry_price,
             "pnl":              total_pnl,
-            "pnl_pct":          pos.floating_pct(fill_price) * pos.leverage,
+            # Cumulative ROE on full initial margin (fraction, e.g. 0.24 = +24%)
+            "pnl_pct":          pnl_pct_final,
             "score":            pos.entry_score,
             "meta_boost":       getattr(pos, "meta_score_delta", 0),
             "meta_pattern_key": getattr(pos, "meta_pattern_key", ""),
@@ -421,10 +425,13 @@ class PaperExecutor:
         close_ratio = action["close_ratio"]
         close_size  = pos.size_current * close_ratio
         
-        partial_pnl = (
-            pos.floating_pct(current_price) * 
-            close_size * pos.entry_price
-        )
+        price_move = pos.floating_pct(current_price)
+        notional_closed = close_size * pos.entry_price
+        partial_pnl = price_move * notional_closed
+        lev = max(int(getattr(pos, "leverage", 1) or 1), 1)
+        from utils.helpers import pnl_roe_fraction
+        # ROE on margin of *this slice* = price_move × leverage
+        partial_roe = pnl_roe_fraction(partial_pnl, notional_closed, lev)
         
         # Release proportional margin back to balance
         margin_to_release = pos.margin_usd * close_ratio
@@ -440,22 +447,99 @@ class PaperExecutor:
         pos.size_current   -= close_size
         pos.pnl_unrealized = pos.unrealized_pnl(current_price)
 
+        fully_closed = False
         if action["action"] == "tp1":
             pos.tp1_hit = True
             pos.trailing_active = True
             pos.trailing_high = current_price
             pos.stop_loss = pos.entry_price * 1.0005 if pos.side == Side.LONG else pos.entry_price * 0.9995
-            log.info(f" [PAPER] TP1 hit on {pos.asset} - SL moved to breakeven")
+            log.info(
+                f" [PAPER] TP1 hit on {pos.asset} - SL→BE | "
+                f"slice={partial_pnl:+.4f} cum={pos.pnl_realized:+.4f} "
+                f"move={price_move*100:.2f}% slice_ROE={partial_roe*100:.2f}% @{lev}x"
+            )
 
         elif action["action"] == "tp2":
             pos.tp2_hit = True
-            log.info(f" [PAPER] TP2 hit on {pos.asset}")
+            log.info(
+                f" [PAPER] TP2 hit on {pos.asset} | "
+                f"slice={partial_pnl:+.4f} cum={pos.pnl_realized:+.4f} "
+                f"move={price_move*100:.2f}% slice_ROE={partial_roe*100:.2f}% @{lev}x"
+            )
 
         elif action["action"] in ("trailing_stop", "stop_loss", "time_exit"):
-            # Full close — guard: only if still OPEN
+            # Full close: slice PnL already booked above. Mark closed without
+            # re-adding PnL in close_position (would double-count).
+            fully_closed = True
             if pos.status == PositionStatus.OPEN:
-                await self.close_position(
-                    pos.position_id, current_price, action["action"]
+                pos.status = PositionStatus.CLOSED
+                pos.closed_at = utcnow()
+                pos.size_current = 0.0
+                pos.pnl_unrealized = 0.0
+                from core.db import user_db
+                user_db.remove_paper_position(pos.position_id)
+                user_db.save_paper_state(self.chat_id, self._balance, self._balance)
+                self.risk.record_pnl(pos.pnl_realized, self._balance)
+
+                # Trade log + meta with *cumulative* totals
+                full_notional = pos.size_initial * pos.entry_price if pos.size_initial > 0 else 0.0
+                total_roe = pnl_roe_fraction(pos.pnl_realized, full_notional, lev)
+                log_data = {
+                    "type":             "close",
+                    "pos_id":           pos.position_id,
+                    "asset":            pos.asset,
+                    "side":             pos.side.value,
+                    "reason":           action["action"],
+                    "entry_price":      pos.entry_price,
+                    "exit_price":       current_price,
+                    "size":             pos.size_initial,
+                    "notional":         full_notional,
+                    "pnl":              pos.pnl_realized,   # cumulative TP1+TP2+final
+                    "pnl_pct":          total_roe,          # ROE on full initial margin
+                    "score":            pos.entry_score,
+                    "meta_boost":       getattr(pos, "meta_score_delta", 0),
+                    "meta_pattern_key": getattr(pos, "meta_pattern_key", ""),
+                    "timestamp":        utcnow(),
+                }
+                self._trade_log.append(log_data)
+                get_excel_logger().log_trade(self.chat_id, log_data)
+                user_db.save_trade(self.chat_id, log_data)
+
+                # Meta pattern + AI label on full close only
+                try:
+                    if pos.signal_id:
+                        sig = user_db.get_signal_by_id(pos.signal_id)
+                        if sig and getattr(sig, "meta_pattern_key", None):
+                            user_db.update_meta_pattern_outcome(sig.meta_pattern_key, pos.pnl_realized)
+                except Exception as e:
+                    log.debug(f"[META] full-close update failed: {e}")
+                try:
+                    import asyncio
+                    import config as _ai_cfg
+                    from intelligence.experience_buffer import experience_buffer
+                    duration_sec = (pos.closed_at - pos.opened_at).total_seconds()
+                    loop = asyncio.get_event_loop()
+                    loop.run_in_executor(
+                        None,
+                        experience_buffer.update_label,
+                        pos.position_id,
+                        total_roe,
+                        duration_sec,
+                    )
+                    if _ai_cfg.ENABLE_INTELLIGENCE:
+                        from intelligence.intelligence_model import intelligence_model
+                        from intelligence.experience_buffer import experience_buffer as _eb
+                        data = _eb.get_training_data()
+                        min_samples = getattr(_ai_cfg, "INTELLIGENCE_RETRAIN_MIN_SAMPLES", 300)
+                        if len(data) >= min_samples:
+                            asyncio.create_task(intelligence_model.retrain_async())
+                except Exception as e:
+                    log.debug(f"[AI] full-close label failed: {e}")
+
+                log.info(
+                    f" [PAPER] FULL CLOSE {pos.asset} {pos.side.value.upper()} "
+                    f"@ {current_price} | TOTAL PnL: {format_usd(pos.pnl_realized)} "
+                    f"ROE={total_roe*100:.2f}% @{lev}x ({action['action']})"
                 )
 
         # Update trailing high
@@ -469,9 +553,25 @@ class PaperExecutor:
         from core.db import user_db
         if pos.status == PositionStatus.OPEN:
             user_db.save_paper_position(self.chat_id, pos)
-        user_db.save_paper_state(self.chat_id, self._balance, self._balance + pos.pnl_unrealized)
+            user_db.save_paper_state(self.chat_id, self._balance, self._balance + pos.pnl_unrealized)
 
-        return {**action, "pnl": partial_pnl, "position_id": pos.position_id}
+        full_notional = pos.size_initial * pos.entry_price if pos.size_initial > 0 else 0.0
+        total_roe = pnl_roe_fraction(pos.pnl_realized, full_notional, lev)
+        return {
+            **action,
+            "pnl": partial_pnl,                 # this slice only (status msgs)
+            "pnl_slice": partial_pnl,
+            "pnl_total": pos.pnl_realized,      # cumulative (TP1+TP2+final)
+            "pnl_pct": total_roe if fully_closed else partial_roe,
+            "pnl_pct_slice": partial_roe,
+            "pnl_pct_total": total_roe,
+            "price_move_pct": price_move,
+            "notional_closed": notional_closed,
+            "close_ratio": close_ratio,
+            "fully_closed": fully_closed,
+            "exit_price": current_price,
+            "position_id": pos.position_id,
+        }
 
     # ──────────────────────────────────────────
     # HELPERS
