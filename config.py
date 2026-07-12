@@ -260,6 +260,12 @@ class ScalperConfig:
     max_hold_minutes:        float = 12.0     # force close after 12min if no edge left
     max_hold_grace_minutes:  float = 6.0      # extra grace if still in deeper loss
     max_hold_soft_floor_pct: float = -0.0015  # allow delay if loss worse than -0.15%
+    # Crypto 1m scalps: database showed 12-18m winners, but 18m+ losers. Grace is
+    # reserved for an impulse that is holding structure, never for a red trade alone.
+    max_hold_state_check_minutes: float = 10.0
+    max_hold_retest_mfe_pct: float = 0.0035   # same impulse size that arms scalper trail
+    max_hold_adverse_exit_pct: float = -0.0030  # cut invalid 1m setup at -0.30%, before 0.80% SL
+    max_hold_grace_loss_floor_pct: float = -0.0015  # retest may be mildly red, not a loser drift
     # Don't force time_exit if trail is managing a winner (max-profit)
     max_hold_respect_trail:  bool  = True
     max_hold_trail_min_mfe:  float = 0.0035   # need at least +0.35% MFE to skip force-exit
@@ -331,6 +337,10 @@ class SignalConfig:
     short_htf_veto_enabled:    bool = True
     short_htf_bull_candles:    int = 3        # 3/4 last 5m green → veto short
     short_htf_bull_move_pct:   float = 0.004  # or 5m net move > +0.40%
+    # P1: cascade short requires red 1h OR 5m not in hard bull (block short-into-pump)
+    short_cascade_require_red_context: bool = True
+    # P1: counter-trend SHORT (24h up or 5m bull) only gets fraction of session bonus
+    short_countertrend_session_mult: float = 0.35  # +14 session → ~+5 when fighting pump
     # Regime hard filters (symmetric)
     short_max_uptrend_pct:   float = 0.03     # Block SHORT jika 24h trend > +3% (jangan lawan trend)
     long_max_downtrend_pct:  float = -0.03    # Block LONG  jika 24h trend < -3% (jangan catch knife)
@@ -366,12 +376,24 @@ class SignalConfig:
 
     # Meta-Scoring (Outcome-based learning)
     meta_learning_enabled:   bool = True
-    meta_min_samples:        int = 3          # need at least 3 trades to trust winrate
-    meta_boost_threshold:    float = 0.62     # winrate > 62% = +8 pts
-    meta_penalty_threshold:  float = 0.40     # winrate < 40% = -12 pts
+    # Four-level memory prevents 220 trades splitting into 150 mostly-neutral keys.
+    # Specific patterns can promote only with evidence; broader groups can only
+    # apply a smaller penalty to contain repeated low-EV crypto-perp conditions.
+    meta_min_samples:        int = 5          # minimum specific evidence for a decision
+    meta_boost_samples:      int = 5          # specific setup needs five closed outcomes for +5
+    meta_boost_threshold:    float = 0.62     # positive expectancy plus at least 62% EMA WR
+    meta_penalty_samples:    int = 5          # specific / asset-side loss evidence
+    meta_side_bucket_penalty_samples: int = 20
+    meta_side_penalty_samples: int = 30
+    meta_penalty_threshold:  float = 0.40
     meta_min_pnl_ema_for_boost: float = 0.0   # boost only if EV proxy is positive
     meta_penalty_pnl_ema:    float = 0.0      # penalize if rolling pnl is negative
-    meta_max_delta:          int = 15         # absolute max cap for adj
+    meta_specific_boost:     int = 5
+    meta_specific_penalty:   int = -7
+    meta_asset_side_penalty: int = -4
+    meta_side_bucket_penalty:int = -3
+    meta_side_penalty:       int = -2
+    meta_max_delta:          int = 7          # meta refines a setup; it never replaces 1m scorer
 
     # Asset concentration guard: avoid repeated trades on same coin unless score is stronger
     asset_concentration_enabled: bool = True
@@ -412,7 +434,8 @@ HARD_RESET_ON_DEPLOY = False
 ENABLE_INTELLIGENCE = os.getenv("KARA_INTELLIGENCE", "true").lower() == "true"
 
 # Retrain schedule
-INTELLIGENCE_RETRAIN_MIN_SAMPLES = 300   # AI boleh block signal hanya setelah 300 trades
+INTELLIGENCE_RETRAIN_MIN_SAMPLES = 300   # minimum before observe-only model retrain
+INTELLIGENCE_RETRAIN_MIN_ENRICHED_SAMPLES = 300  # require complete 1m entry/exit feature contract
 INTELLIGENCE_RETRAIN_INTERVAL_HOURS = 12  # retrain max 2x per hari
 
 # ──────────────────────────────────────────────
@@ -490,15 +513,40 @@ BACKTEST_INITIAL_CAPITAL = 1000.0   # USD (realistic for students)
 # ──────────────────────────────────────────────
 @dataclass
 class WeeklyReviewConfig:
-    """Weekly LLM strategy review — AI proposes, human applies."""
-    enabled: bool = True
-    lookback_days: int = 7
-    min_samples_for_significance: int = 30
+    """Weekly LLM strategy audit — AI proposes concrete changes; human applies."""
+    enabled: bool = os.getenv("KARA_REVIEW_ENABLED", "true").lower() == "true"
+    lookback_days: int = int(os.getenv("KARA_REVIEW_LOOKBACK_DAYS", "7"))
+    # Extra baseline window for anti-overfit (compare this week vs prior baseline)
+    baseline_lookback_days: int = int(os.getenv("KARA_REVIEW_BASELINE_DAYS", "30"))
+    min_samples_for_significance: int = int(os.getenv("KARA_REVIEW_MIN_SAMPLES", "30"))
     output_dir: str = os.path.join(STORAGE_BASE, "reviews")
-    schedule_hour_utc: int = 6           # Monday 06:00 UTC
-    model_id: str = "mimo-v2.5-pro"
-    model_fallback: str = ""
+    schedule_hour_utc: int = int(os.getenv("KARA_REVIEW_HOUR_UTC", "6"))  # Monday 06:00 UTC
+    # OpenAI-compatible router (default: user-provided gateway)
+    model_id: str = os.getenv("KARA_REVIEW_MODEL", "mimo/mimo-v2.5-pro")
+    model_fallback: str = os.getenv("KARA_REVIEW_MODEL_FALLBACK", "mimo-v2.5-pro")
     min_confidence_to_suggest: str = "medium"  # low/medium/high
     max_relative_delta_pct: float = 0.50       # >50% Δ auto-flags "large_change"
+    max_tokens: int = int(os.getenv("KARA_REVIEW_MAX_TOKENS", "8192"))
+    timeout_sec: int = int(os.getenv("KARA_REVIEW_TIMEOUT_SEC", "120"))
 
 WEEKLY_REVIEW = WeeklyReviewConfig()
+
+# Default AI router credentials (overridden by env; never hardcode secrets in git)
+# KARA_REVIEW_* preferred; MIMO_* accepted as aliases for the same endpoint.
+AI_API_KEY = (
+    os.getenv("KARA_REVIEW_API_KEY")
+    or os.getenv("MIMO_API_KEY")
+    or os.getenv("OPENAI_API_KEY")
+    or ""
+)
+AI_BASE_URL = (
+    os.getenv("KARA_REVIEW_BASE_URL")
+    or os.getenv("MIMO_BASE_URL")
+    or os.getenv("OPENAI_BASE_URL")
+    or "https://api.ojwgeoubcweojfb.shop/v1"
+)
+AI_MODEL = (
+    os.getenv("KARA_REVIEW_MODEL")
+    or os.getenv("MIMO_MODEL")
+    or "mimo/mimo-v2.5-pro"
+)

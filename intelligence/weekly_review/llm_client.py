@@ -1,13 +1,13 @@
 """
-OpenAI-compatible LLM adapter for the weekly review.
+OpenAI-compatible LLM adapter for the weekly AI audit.
 
-The router can change its free model lineup, so this client discovers models
-from `/models`, picks the first preferred model that exists, and falls back on
-chat errors. Output is raw JSON, then validated by local guardrails:
-- field whitelist (drop hallucinated fields)
-- bounded delta downgrade (>50% change)
-- min-sample confidence downgrade
-- one JSON repair retry per model
+Default gateway: https://api.ojwgeoubcweojfb.shop/v1
+Model: mimo/mimo-v2.5-pro
+
+Env (first match wins for key/url):
+  KARA_REVIEW_API_KEY | MIMO_API_KEY | OPENAI_API_KEY
+  KARA_REVIEW_BASE_URL | MIMO_BASE_URL | OPENAI_BASE_URL
+  KARA_REVIEW_MODEL / KARA_REVIEW_MODELS | MIMO_MODEL
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ from .prompt_builder import SYSTEM_PROMPT, REVIEW_TOOL_SCHEMA, build_user_messag
 
 log = logging.getLogger("kara.weekly_review.llm")
 
-_DEFAULT_BASE_URL = "https://router.bynara.id/v1"
-_DEFAULT_MODELS = ("mimo-v2.5-pro",)
+_DEFAULT_BASE_URL = "https://api.ojwgeoubcweojfb.shop/v1"
+_DEFAULT_MODELS = ("mimo/mimo-v2.5-pro", "mimo-v2.5-pro")
 
 
 def _env_first(*names: str) -> str:
@@ -38,16 +38,33 @@ def _env_first(*names: str) -> str:
 
 
 def _api_key() -> str:
-    key = _env_first("KARA_REVIEW_API_KEY", "BYNARA_API_KEY", "OPENAI_API_KEY")
+    key = _env_first(
+        "KARA_REVIEW_API_KEY",
+        "MIMO_API_KEY",
+        "BYNARA_API_KEY",
+        "OPENAI_API_KEY",
+    )
+    if not key:
+        # Last resort: config module (may be empty)
+        key = (getattr(config, "AI_API_KEY", None) or "").strip()
     if not key:
         raise RuntimeError(
-            "KARA_REVIEW_API_KEY not set. Set it to your Bynara/OpenAI-compatible router key."
+            "No AI API key set. Set KARA_REVIEW_API_KEY or MIMO_API_KEY."
         )
     return key
 
 
 def _base_url() -> str:
-    return _env_first("KARA_REVIEW_BASE_URL", "BYNARA_BASE_URL", "OPENAI_BASE_URL") or _DEFAULT_BASE_URL
+    return (
+        _env_first(
+            "KARA_REVIEW_BASE_URL",
+            "MIMO_BASE_URL",
+            "BYNARA_BASE_URL",
+            "OPENAI_BASE_URL",
+        )
+        or getattr(config, "AI_BASE_URL", None)
+        or _DEFAULT_BASE_URL
+    )
 
 
 def _preferred_models(explicit_model: Optional[str] = None) -> list[str]:
@@ -55,7 +72,12 @@ def _preferred_models(explicit_model: Optional[str] = None) -> list[str]:
     if configured:
         models = [m.strip() for m in configured.split(",") if m.strip()]
     else:
-        primary = os.getenv("KARA_REVIEW_MODEL", "").strip() or getattr(config.WEEKLY_REVIEW, "model_id", "")
+        primary = (
+            os.getenv("KARA_REVIEW_MODEL", "").strip()
+            or os.getenv("MIMO_MODEL", "").strip()
+            or getattr(config.WEEKLY_REVIEW, "model_id", "")
+            or getattr(config, "AI_MODEL", "")
+        )
         fallback = (
             os.getenv("KARA_REVIEW_MODEL_FALLBACK", "").strip()
             or getattr(config.WEEKLY_REVIEW, "model_fallback", "")
@@ -67,7 +89,7 @@ def _preferred_models(explicit_model: Optional[str] = None) -> list[str]:
 
     deduped: list[str] = []
     for model in models:
-        if model not in deduped:
+        if model and model not in deduped:
             deduped.append(model)
     return deduped
 
@@ -100,6 +122,13 @@ def _resolve_models(base_url: str, explicit_model: Optional[str] = None) -> list
     if not available:
         return preferred
     matched = [m for m in preferred if m in available]
+    # Also allow prefix matches (some routers list bare ids)
+    if not matched:
+        for p in preferred:
+            for a in available:
+                if p == a or p.endswith(a) or a.endswith(p.split("/")[-1]):
+                    matched.append(p)
+                    break
     return matched or preferred
 
 
@@ -122,12 +151,27 @@ def _extract_json(text: str) -> dict:
         raise
 
 
+def _max_tokens() -> int:
+    return int(
+        os.getenv("KARA_REVIEW_MAX_TOKENS")
+        or getattr(config.WEEKLY_REVIEW, "max_tokens", 8192)
+    )
+
+
+def _timeout() -> int:
+    return int(
+        os.getenv("KARA_REVIEW_TIMEOUT_SEC")
+        or getattr(config.WEEKLY_REVIEW, "timeout_sec", 120)
+    )
+
+
 def _call_chat(base_url: str, model: str, messages: list[dict[str, str]], use_json_mode: bool) -> dict:
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "temperature": 0.15,
-        "max_tokens": int(os.getenv("KARA_REVIEW_MAX_TOKENS", "4096")),
+        "temperature": 0.1,
+        "max_tokens": _max_tokens(),
+        "stream": False,
     }
     if use_json_mode:
         body["response_format"] = {"type": "json_object"}
@@ -136,11 +180,32 @@ def _call_chat(base_url: str, model: str, messages: list[dict[str, str]], use_js
         f"{base_url.rstrip('/')}/chat/completions",
         headers=_headers(),
         json=body,
-        timeout=int(os.getenv("KARA_REVIEW_TIMEOUT_SEC", "90")),
+        timeout=_timeout(),
     )
+    if resp.status_code >= 400:
+        log.error(
+            "LLM HTTP %s model=%s body_snip=%s",
+            resp.status_code,
+            model,
+            (resp.text or "")[:400],
+        )
     resp.raise_for_status()
     payload = resp.json()
-    content = payload["choices"][0]["message"]["content"]
+    msg = payload["choices"][0]["message"]
+    content = msg.get("content") or ""
+    # Some gateway models (mimo-v2.5-pro) put text in reasoning_content first
+    if not str(content).strip():
+        content = msg.get("reasoning_content") or msg.get("reasoning") or ""
+    if not str(content).strip() and msg.get("tool_calls"):
+        # tool-call style JSON args
+        try:
+            content = msg["tool_calls"][0]["function"]["arguments"]
+        except Exception:
+            pass
+    if not str(content).strip():
+        raise ValueError(
+            f"empty LLM content (finish={payload['choices'][0].get('finish_reason')})"
+        )
     output = _extract_json(content)
     output.setdefault("_provider_meta", {})
     output["_provider_meta"].update(
@@ -173,7 +238,7 @@ def _call_once(base_url: str, model: str, user_msg: str) -> dict:
         status = e.response.status_code if e.response is not None else None
         if status not in (400, 404, 422):
             raise
-        log.debug("weekly review JSON mode unsupported for %s, retrying without it: %s", model, e)
+        log.debug("JSON mode unsupported for %s, retrying without it: %s", model, e)
         return _call_chat(base_url, model, messages, use_json_mode=False)
 
 
@@ -185,10 +250,6 @@ def _validate_and_repair(
 ) -> tuple[dict, list[str]]:
     """
     Enforce guardrails on LLM output. Returns (cleaned_output, warnings).
-    - Drop suggestions with unknown field names.
-    - Downgrade confidence when sample_size < min_samples.
-    - Downgrade confidence + flag when |delta| > 50%.
-    - Verify `current` matches snapshot (soft: flag if mismatch, don't drop).
     """
     warnings: list[str] = []
     schema_keys = set(schema.keys())
@@ -229,7 +290,9 @@ def _validate_and_repair(
             if n < min_samples:
                 if sug.get("confidence") in ("medium", "high"):
                     sug["confidence"] = "low"
-                sug["risk_notes"] = (sug.get("risk_notes") or "") + f" [insufficient_sample: n={n}<{min_samples}]"
+                sug["risk_notes"] = (sug.get("risk_notes") or "") + (
+                    f" [insufficient_sample: n={n}<{min_samples}]"
+                )
         except (TypeError, ValueError):
             pass
 
@@ -238,6 +301,7 @@ def _validate_and_repair(
     output["config_suggestions"] = cleaned_suggestions
     output.setdefault("insights", [])
     output.setdefault("flags", [])
+    output.setdefault("executive_summary", "")
     output.pop("_provider_meta", None)
     return output, warnings
 
@@ -249,9 +313,7 @@ def run_llm_review(
     min_samples: int = 30,
     model: Optional[str] = None,
 ) -> dict:
-    """
-    Execute the full LLM review flow with model discovery, fallback, and validation.
-    """
+    """Execute the full LLM audit flow with fallback and validation."""
     base_url = _base_url()
     user_msg = build_user_message(evidence_pack, config_snapshot, schema, min_samples)
     models = _resolve_models(base_url, explicit_model=model)
@@ -262,6 +324,8 @@ def run_llm_review(
     errors: list[str] = []
     raw: Optional[dict] = None
     used_model = models[0]
+
+    log.info("weekly_review LLM base_url=%s models=%s", base_url, models)
 
     for candidate in models:
         used_model = candidate
@@ -283,6 +347,7 @@ def run_llm_review(
 
     if raw is None:
         return {
+            "executive_summary": "LLM audit failed — no model responded successfully.",
             "insights": [],
             "config_suggestions": [],
             "flags": [{

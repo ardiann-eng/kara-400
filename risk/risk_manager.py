@@ -695,6 +695,7 @@ class RiskManager:
         self,
         position: Position,
         current_price: float,
+        market_state: Optional[Dict] = None,
     ) -> Optional[Dict]:
         """
         Exit hierarchy — Fix 5 (partial ratios) + Fix 6 (momentum time-exit).
@@ -728,13 +729,19 @@ class RiskManager:
         # ── Rule A: Hard SL ───────────────────────────────────────────────
         if (position.side == Side.LONG and current_price <= position.stop_loss) or \
            (position.side == Side.SHORT and current_price >= position.stop_loss):
+            profit_locked = (
+                (position.side == Side.LONG and position.stop_loss > position.entry_price) or
+                (position.side == Side.SHORT and position.stop_loss < position.entry_price)
+            )
+            action = "profit_lock_stop" if profit_locked else "stop_loss"
+            label = "Profit lock" if profit_locked else "Stop-loss"
             return {
-                "action":      "stop_loss",
+                "action":      action,
                 "close_ratio": 1.0,
                 "price":       current_price,
                 "message":     (
-                    f"🛑 Stop-loss hit at {position.stop_loss:.4f}. "
-                    f"Loss: {floating*100:.2f}%."
+                    f"{'🛡️' if profit_locked else '🛑'} {label} hit at {position.stop_loss:.4f}. "
+                    f"Move: {floating*100:.2f}%."
                 )
             }
 
@@ -776,52 +783,47 @@ class RiskManager:
             }
 
         # ── Rule D: Trailing stop ─────────────────────────────────────────
-        # Post-TP1 trail (classic) OR early MFE trail (max-profit):
-        #   SHORT standard: arm ~0.35%
-        #   LONG  standard: arm ~0.65%  (audit: trail avg $4.3 vs time_exit med $0.42)
-        #   Scalper either side: arm ~0.40% (fits 12m hold)
+        # Post-TP1 trail (classic) and pre-TP1 profit lock:
+        # A 1m scalp that reaches +0.40% is protected at entry+buffer, but is
+        # not fully trailed before TP1 at +0.45%. This preserves TP1 opportunity.
         trade_mode = getattr(position, "trade_mode", "standard") or "standard"
         is_scalper_pos = trade_mode == "scalper"
-        early_trail = False
+        early_profit_lock = False
         early_arm = 0.0
-        early_width = 0.0
         early_tag = ""
 
         if not position.tp1_hit:
             if is_scalper_pos:
                 early_arm = getattr(SCALPER, "early_trail_arm_pct", 0.0040)
-                early_width = getattr(SCALPER, "early_trail_pct", 0.0025)
                 early_tag = "early-SCL"
             elif position.side == Side.SHORT:
                 early_arm = getattr(RISK, "short_early_trail_arm_pct", 0.0035)
-                early_width = getattr(RISK, "short_early_trail_pct", 0.0025)
                 early_tag = "early-SHORT"
             else:
                 early_arm = getattr(RISK, "long_early_trail_arm_pct", 0.0065)
-                early_width = getattr(RISK, "long_early_trail_pct", 0.0035)
                 early_tag = "early-LONG"
 
             if max_floating >= early_arm:
-                early_trail = True
-                if not getattr(position, "trailing_active", False):
-                    position.trailing_active = True
+                early_profit_lock = True
+                if not getattr(position, "early_profit_lock", False):
+                    position.early_profit_lock = True
+                    if position.side == Side.LONG:
+                        position.stop_loss = max(position.stop_loss, position.entry_price * 1.0005)
+                    else:
+                        position.stop_loss = min(position.stop_loss, position.entry_price * 0.9995)
                     log.debug(
-                        f"[TRAIL] {position.asset} {early_tag} arm MFE={max_floating*100:.2f}% "
-                        f"(threshold {early_arm*100:.2f}%)"
+                        f"[LOCK] {position.asset} {early_tag} MFE={max_floating*100:.2f}% "
+                        f"-> stop protected at {position.stop_loss:.6f}"
                     )
 
-        if position.tp1_hit or early_trail:
+        if position.tp1_hit:
             if position.tp1_hit:
                 tp1_diff_pct = abs(position.entry_price - position.tp1) / position.entry_price
                 activation_threshold = tp1_diff_pct + 0.003
-            else:
-                activation_threshold = early_arm
 
             if max_floating >= activation_threshold:
                 vol_est = getattr(position, 'realized_vol', 0.02)
-                if early_trail and not position.tp1_hit:
-                    trail_pct = early_width
-                elif position.tp2_hit:
+                if position.tp2_hit:
                     trail_pct = max(vol_est * 0.30, 0.003)
                 else:
                     trail_pct = max(vol_est * 0.50, 0.005)
@@ -838,8 +840,7 @@ class RiskManager:
                             "trail_price": trail_sl,
                             "message":     (
                                 f"🛡️ Trailing Stop ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
-                                f"(peak +{max_floating*100:.1f}%)"
-                                f"{f' [{early_tag}]' if early_trail and not position.tp1_hit else ''}."
+                                f"(peak +{max_floating*100:.1f}%)."
                             )
                         }
                 else:
@@ -852,8 +853,7 @@ class RiskManager:
                             "trail_price": trail_sl,
                             "message":     (
                                 f"🛡️ Trailing Stop ({trail_pct*100:.1f}%) hit at {trail_sl:.4f} "
-                                f"(peak +{max_floating*100:.1f}%)"
-                                f"{f' [{early_tag}]' if early_trail and not position.tp1_hit else ''}."
+                                f"(peak +{max_floating*100:.1f}%)."
                             )
                         }
 
@@ -881,7 +881,6 @@ class RiskManager:
                     and max_floating >= min_mfe
                     and (
                         position.tp1_hit
-                        or early_trail
                         or getattr(position, "trailing_active", False)
                     )
                 )
@@ -891,8 +890,39 @@ class RiskManager:
                         f"trail managing winner MFE={max_floating*100:.2f}% float={floating*100:.2f}%"
                     )
                     pass  # let Rule D trail close it
-                elif floating <= soft_floor / 100.0 and hold_minutes < (max_hold + grace):
-                    pass  # grace period — wait
+                elif hold_minutes < (max_hold + grace):
+                    state = market_state or {}
+                    # The 220-trade audit found 12-18m is the winning continuation
+                    # window, while 18m+ is a loser cluster. Only retain a real
+                    # impulse/retest when 1m structure and entry trend still agree.
+                    retest_mfe = getattr(scfg, "max_hold_retest_mfe_pct", 0.0035)
+                    grace_floor = getattr(scfg, "max_hold_grace_loss_floor_pct", -0.0015)
+                    retest_holding = (
+                        max_floating >= retest_mfe
+                        and floating >= grace_floor
+                        and state.get("structure_valid", False)
+                        and state.get("trend_aligned", False)
+                        and not state.get("momentum_opposes", False)
+                    )
+                    if retest_holding:
+                        log.debug(
+                            f"[SCALPER] {position.asset}: retest grace MFE={max_floating*100:.2f}% "
+                            f"float={floating*100:.2f}%"
+                        )
+                        pass
+                    else:
+                        return {
+                            "action": "time_exit",
+                            "close_ratio": 1.0,
+                            "price": current_price,
+                            "pnl": position.pnl_unrealized,
+                            "position_id": position.position_id,
+                            "time_exit_trigger": "no_follow_through",
+                            "message": (
+                                f"⏱️ Scalper no follow-through at {hold_minutes:.0f}m — "
+                                f"1m structure/trend no longer supports hold. PnL: {floating*100:.2f}%."
+                            ),
+                        }
                 else:
                     return {
                         "action":      "time_exit",
@@ -900,14 +930,39 @@ class RiskManager:
                         "price":       current_price,
                         "pnl":         position.pnl_unrealized,
                         "position_id": position.position_id,
+                        "time_exit_trigger": "max_hold",
                         "message":     (
                             f"⏱️ Scalper max-hold {hold_minutes:.0f}m — exit paksa. "
                             f"PnL: {floating*100:.2f}%."
                         )
                     }
 
+            # At 10m, exit a broken 1m scalp before it grows into the wider SL.
+            # Do not apply this to ordinary noise: require both structure failure
+            # and a meaningful adverse move, calibrated below the 0.80% stop.
+            state_check = getattr(scfg, "max_hold_state_check_minutes", 10.0)
+            adverse_exit = getattr(scfg, "max_hold_adverse_exit_pct", -0.0030)
+            if (
+                hold_minutes >= state_check
+                and floating <= adverse_exit
+                and market_state
+                and (not market_state.get("structure_valid", True) or market_state.get("momentum_opposes", False))
+            ):
+                return {
+                    "action": "time_exit",
+                    "close_ratio": 1.0,
+                    "price": current_price,
+                    "pnl": position.pnl_unrealized,
+                    "position_id": position.position_id,
+                    "time_exit_trigger": "microstructure_invalid",
+                    "message": (
+                        f"⏱️ Scalper microstructure invalid at {hold_minutes:.0f}m — "
+                        f"PnL: {floating*100:.2f}%."
+                    ),
+                }
+
         # ── Rule F: Standard momentum-based time exit (Fix 6) ────────────
-        # Never time-exit if TP1 hit OR early trail is managing a winner.
+        # Never time-exit if TP1 hit or trailing manages a winner.
         if getattr(position, 'trade_mode', 'standard') == 'standard':
             now    = _dt.now(_tz.utc)
             opened = position.opened_at
@@ -917,7 +972,7 @@ class RiskManager:
 
             trail_owns_exit = (
                 position.tp1_hit
-                or early_trail
+                or early_profit_lock
                 or (
                     getattr(position, "trailing_active", False)
                     and max_floating >= getattr(RISK, "long_early_trail_arm_pct", 0.0065) * 0.85

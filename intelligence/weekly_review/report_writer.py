@@ -32,12 +32,20 @@ def _pct_delta(cur: Any, new: Any) -> str:
 
 def write_markdown(review: dict, evidence_pack: dict, config_snapshot: dict, path: str) -> None:
     lines: list[str] = []
-    lines.append(f"# KARA Weekly Review — {datetime.utcnow().strftime('%Y-%m-%d')}")
+    lines.append(f"# KARA Weekly AI Audit — {datetime.utcnow().strftime('%Y-%m-%d')}")
     lines.append("")
+
+    # Executive summary from LLM
+    exec_sum = (review.get("executive_summary") or "").strip()
+    if exec_sum:
+        lines.append("## Executive Summary")
+        lines.append(exec_sum)
+        lines.append("")
 
     # Overview
     overall = evidence_pack.get("overall", {})
     window = evidence_pack.get("window", {})
+    baseline = (evidence_pack.get("baseline") or {}).get("overall") or {}
     lines.append("## Overview")
     lines.append(f"- Window: {window.get('first_ts')} → {window.get('last_ts')}")
     lines.append(f"- Trades: **{overall.get('total_trades', 0)}**")
@@ -46,7 +54,16 @@ def write_markdown(review: dict, evidence_pack: dict, config_snapshot: dict, pat
     lines.append(f"- Expectancy: **${overall.get('expectancy', 0):+.4f}** per trade")
     if overall.get("profit_factor"):
         lines.append(f"- Profit Factor: **{overall['profit_factor']}**")
+    if overall.get("max_drawdown_usd") is not None:
+        lines.append(f"- Max DD (window): **${overall.get('max_drawdown_usd', 0):+.2f}**")
+    if baseline:
+        lines.append(
+            f"- Baseline ({evidence_pack.get('baseline', {}).get('lookback_days', '?')}d): "
+            f"n={baseline.get('total_trades', 0)} WR={(baseline.get('winrate', 0) or 0)*100:.1f}% "
+            f"EV=${baseline.get('expectancy', 0):+.4f}"
+        )
     lines.append(f"- Model: `{review.get('meta', {}).get('model', 'n/a')}`")
+    lines.append(f"- Endpoint: `{review.get('meta', {}).get('base_url', 'n/a')}`")
     lines.append("")
 
     # Flags
@@ -149,14 +166,18 @@ def format_telegram_summary(review: dict, evidence_pack: dict, report_path: str)
     total_pnl = overall.get("total_pnl", 0) or 0
     expectancy = overall.get("expectancy", 0) or 0
 
+    exec_sum = (review.get("executive_summary") or "").strip()
     lines = [
-        f"<b>KARA Weekly Review — {_html_escape(date)}</b>",
+        f"<b>KARA Weekly AI Audit — {_html_escape(date)}</b>",
         "",
         f"Trades: <b>{total_trades}</b> | WR: <b>{winrate * 100:.1f}%</b> | "
         f"PnL: <b>${total_pnl:+.2f}</b>",
         f"Expectancy: <b>${expectancy:+.4f}</b>",
         "",
     ]
+    if exec_sum:
+        lines.append(_html_escape(exec_sum[:500]))
+        lines.append("")
     if top:
         lines.append(f"<b>Top {len(top)} Suggestions</b>")
     else:

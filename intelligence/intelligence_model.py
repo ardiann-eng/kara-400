@@ -12,6 +12,7 @@ from intelligence.experience_buffer import experience_buffer
 log = logging.getLogger("IntelligenceModel")
 
 MODEL_PATH = os.path.join(config.STORAGE_DIR, "kara_intelligence.pkl")
+FEATURE_COUNT = 12
 
 class IntelligenceModel:
     def __init__(self):
@@ -33,7 +34,7 @@ class IntelligenceModel:
         # Kalau DB punya lebih sedikit data dari saat model disimpan -> data di-reset -> stale.
         labeled_count = 0
         try:
-            labeled_count = len(experience_buffer.get_training_data())
+            labeled_count = len(experience_buffer.get_training_data(enriched_only=True))
         except Exception:
             pass
 
@@ -50,6 +51,10 @@ class IntelligenceModel:
 
         try:
             self.model = joblib.load(MODEL_PATH)
+            if getattr(self.model, "n_features_in_", FEATURE_COUNT) != FEATURE_COUNT:
+                log.warning("[Intelligence] Stored model uses an old feature contract — retraining required.")
+                self.model = None
+                return
             self.last_train_samples = labeled_count
             self.is_ready = True
             log.info(f"[Intelligence] Model loaded dan valid ({labeled_count} training samples).")
@@ -60,7 +65,7 @@ class IntelligenceModel:
     def get_features(self, row):
         """Convert a row from experience buffer into a feature array"""
         # We must align this perfectly with the predict method.
-        # Format: [score, meta_delta, oi_score, liq_score, ob_score, session_bonus, funding_rate, realized_vol, trend_pct]
+        # Exit outcome fields are labels only and never feed prediction.
         try:
             return [
                 float(row.get('score', 0)),
@@ -71,10 +76,15 @@ class IntelligenceModel:
                 float(row.get('session_bonus', 0)),
                 float(row.get('funding_rate', 0)),
                 float(row.get('realized_vol', 0)),
-                float(row.get('trend_pct', 0))
+                float(row.get('trend_pct', 0)),
+                float(row.get('micro_risk_pct', 0)),
+                {"invalid": 0.0, "weak": 1.0, "valid": 2.0, "excellent": 3.0}.get(
+                    str(row.get('entry_location_quality', 'unknown')), -1.0
+                ),
+                1.0 if row.get('trade_mode') == 'scalper' else 0.0,
             ]
         except Exception:
-            return [0.0] * 9
+            return [0.0] * 12
 
     def retrain(self):
         if self.is_training:
@@ -87,8 +97,9 @@ class IntelligenceModel:
             log.debug(f"🧠 Retrain skipped — interval belum lewat ({remaining/3600:.1f}h tersisa).")
             return
 
-        data = experience_buffer.get_training_data()
+        data = experience_buffer.get_training_data(enriched_only=True)
         min_samples = getattr(config, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 300)
+        min_samples = max(min_samples, getattr(config, 'INTELLIGENCE_RETRAIN_MIN_ENRICHED_SAMPLES', 300))
         if len(data) < min_samples:
             log.debug(f"🧠 Not enough data to train. Have {len(data)}, need {min_samples}.")
             return
@@ -105,7 +116,9 @@ class IntelligenceModel:
             for row in data:
                 features = self.get_features(row)
                 X.append(features)
-                y.append(int(row['is_win']))
+                # Predict fast follow-through, not merely a green final close.
+                # This aligns model target with 1m scalper entry and 12m hold logic.
+                y.append(int(row['impulse_win']))
                 
             X = np.array(X)
             y = np.array(y)

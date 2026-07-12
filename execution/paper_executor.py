@@ -171,6 +171,7 @@ class PaperExecutor:
             tp2=signal.tp2,
             trailing_active=False,
             trailing_high=fill_price,
+            early_profit_lock=False,
             liquidation_price=liq_price,
             signal_id=signal.signal_id,
             meta_pattern_key=getattr(signal, 'meta_pattern_key', None),
@@ -179,6 +180,9 @@ class PaperExecutor:
             is_paper=True,
             entry_score=signal.score,
             realized_vol=getattr(signal, 'realized_vol', 0.02),
+            trend_pct=getattr(signal, 'trend_pct', 0.0),
+            micro_invalidation_price=getattr(signal, 'micro_invalidation_price', None),
+            entry_location_quality=getattr(signal, 'entry_location_quality', 'unknown'),
         )
 
         # Update balances
@@ -232,9 +236,11 @@ class PaperExecutor:
         loop = asyncio.get_event_loop()
         loop.run_in_executor(None, 
                              experience_buffer.record_entry,
-                             self.chat_id, pos.position_id, signal.asset, signal.side.value,
-                             signal.score, getattr(signal, 'meta_score_delta', 0),
-                             bd, fr, vol, trend, getattr(signal, 'expected_edge', 0.0)
+                              self.chat_id, pos.position_id, signal.asset, signal.side.value,
+                              signal.score, getattr(signal, 'meta_score_delta', 0),
+                              bd, fr, vol, trend, getattr(signal, 'expected_edge', 0.0),
+                              pos.trade_mode, pos.entry_location_quality,
+                              abs((pos.micro_invalidation_price or pos.stop_loss) - pos.entry_price) / pos.entry_price
                             )
                             
         return pos
@@ -244,7 +250,7 @@ class PaperExecutor:
     # ──────────────────────────────────────────
 
     async def update_positions(
-        self, prices: Dict[str, float]
+        self, prices: Dict[str, float], market_states: Optional[Dict[str, Dict]] = None
     ) -> List[Dict]:
         """
         Update unrealized PnL for all open positions.
@@ -267,7 +273,7 @@ class PaperExecutor:
             pos.pnl_unrealized = pos.unrealized_pnl(current)
 
             # Check TP/SL
-            action = self.risk.check_tp_trail(pos, current)
+            action = self.risk.check_tp_trail(pos, current, (market_states or {}).get(pos.position_id))
             if action:
                 # Only process if STILL open (prevent race condition)
                 if pos.status == PositionStatus.OPEN:
@@ -357,14 +363,21 @@ class PaperExecutor:
         duration_sec = (pos.closed_at - pos.opened_at).total_seconds()
 
         loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, experience_buffer.update_label, position_id, pnl_pct_final, duration_sec)
+        mfe_pct = max(0.0, pos.floating_pct(pos.trailing_high))
+        loop.run_in_executor(
+            None, experience_buffer.update_label, position_id, pnl_pct_final, duration_sec,
+            reason, mfe_pct, ""
+        )
 
         # Retrain hanya saat ENABLE_INTELLIGENCE=True DAN data cukup DAN sudah 24 jam
         if _ai_cfg.ENABLE_INTELLIGENCE:
             from intelligence.intelligence_model import intelligence_model
             from intelligence.experience_buffer import experience_buffer as _eb
-            data = _eb.get_training_data()
-            min_samples = getattr(_ai_cfg, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 300)
+            data = _eb.get_training_data(enriched_only=True)
+            min_samples = max(
+                getattr(_ai_cfg, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 300),
+                getattr(_ai_cfg, 'INTELLIGENCE_RETRAIN_MIN_ENRICHED_SAMPLES', 300),
+            )
             if len(data) >= min_samples:
                 asyncio.create_task(intelligence_model.retrain_async())
             else:
@@ -387,6 +400,10 @@ class PaperExecutor:
             # Cumulative ROE on full initial margin (fraction, e.g. 0.24 = +24%)
             "pnl_pct":          pnl_pct_final,
             "score":            pos.entry_score,
+            "tp1_hit":          pos.tp1_hit,
+            "tp2_hit":          pos.tp2_hit,
+            "early_profit_lock": getattr(pos, "early_profit_lock", False),
+            "max_floating_pct": max(0.0, pos.floating_pct(pos.trailing_high)),
             "meta_boost":       getattr(pos, "meta_score_delta", 0),
             "meta_pattern_key": getattr(pos, "meta_pattern_key", ""),
             "timestamp":        utcnow(),
@@ -399,11 +416,33 @@ class PaperExecutor:
             f" [PAPER] Closed {pos.asset} {pos.side.value.upper()} "
             f"@ {fill_price} | PnL: {format_usd(total_pnl)} ({reason})"
         )
+        # Normalize reason for telegram send_position_event
+        action_name = reason
+        if reason in ("manual", "manual_close"):
+            action_name = "manual"
+        elif reason in ("close_all", "close_all_positions"):
+            action_name = "close_all"
+        price_move = pos.floating_pct(fill_price)
+        # Last-slice notional (remaining size at close)
+        rem_size = float(getattr(pos, "size_current", 0) or 0) or float(pos.size_initial or 0)
+        rem_notional = rem_size * pos.entry_price if pos.entry_price else full_notional
+        slice_roe = pnl_roe_fraction(floating_pnl, rem_notional, lev) if rem_notional else 0.0
         return {
+            "action": action_name,
             "position_id": position_id,
+            "asset": pos.asset,
+            "side": pos.side.value,
             "pnl": total_pnl,
-            "reason": reason,
-            "message": f"{'' if total_pnl > 0 else ''} Closed {pos.asset}: {format_usd(total_pnl)}"
+            "pnl_slice": floating_pnl,
+            "pnl_total": total_pnl,
+            "pnl_pct": pnl_pct_final,
+            "pnl_pct_total": pnl_pct_final,
+            "pnl_pct_slice": slice_roe,
+            "price_move_pct": price_move,
+            "exit_price": fill_price,
+            "fully_closed": True,
+            "reason": action_name,
+            "message": f"Closed {pos.asset}: {format_usd(total_pnl)}",
         }
     async def close_all_positions(self, prices: Dict[str, float]) -> List[Dict]:
         """Close all open positions at current prices."""
@@ -467,7 +506,7 @@ class PaperExecutor:
                 f"move={price_move*100:.2f}% slice_ROE={partial_roe*100:.2f}% @{lev}x"
             )
 
-        elif action["action"] in ("trailing_stop", "stop_loss", "time_exit"):
+        elif action["action"] in ("trailing_stop", "stop_loss", "profit_lock_stop", "time_exit"):
             # Full close: slice PnL already booked above. Mark closed without
             # re-adding PnL in close_position (would double-count).
             fully_closed = True
@@ -497,6 +536,10 @@ class PaperExecutor:
                     "pnl":              pos.pnl_realized,   # cumulative TP1+TP2+final
                     "pnl_pct":          total_roe,          # ROE on full initial margin
                     "score":            pos.entry_score,
+                    "tp1_hit":          pos.tp1_hit,
+                    "tp2_hit":          pos.tp2_hit,
+                    "early_profit_lock": getattr(pos, "early_profit_lock", False),
+                    "max_floating_pct": max(0.0, pos.floating_pct(pos.trailing_high)),
                     "meta_boost":       getattr(pos, "meta_score_delta", 0),
                     "meta_pattern_key": getattr(pos, "meta_pattern_key", ""),
                     "timestamp":        utcnow(),
@@ -525,12 +568,18 @@ class PaperExecutor:
                         pos.position_id,
                         total_roe,
                         duration_sec,
+                        action["action"],
+                        max(0.0, pos.floating_pct(pos.trailing_high)),
+                        action.get("time_exit_trigger", ""),
                     )
                     if _ai_cfg.ENABLE_INTELLIGENCE:
                         from intelligence.intelligence_model import intelligence_model
                         from intelligence.experience_buffer import experience_buffer as _eb
-                        data = _eb.get_training_data()
-                        min_samples = getattr(_ai_cfg, "INTELLIGENCE_RETRAIN_MIN_SAMPLES", 300)
+                        data = _eb.get_training_data(enriched_only=True)
+                        min_samples = max(
+                            getattr(_ai_cfg, "INTELLIGENCE_RETRAIN_MIN_SAMPLES", 300),
+                            getattr(_ai_cfg, "INTELLIGENCE_RETRAIN_MIN_ENRICHED_SAMPLES", 300),
+                        )
                         if len(data) >= min_samples:
                             asyncio.create_task(intelligence_model.retrain_async())
                 except Exception as e:

@@ -168,6 +168,8 @@ class TradeSignal(BaseModel):
     meta_score_delta: int = 0                # score adj from meta winrate
     expected_edge:    Optional[float] = None # ML predicted probability of win (0.0-1.0)
     trade_mode:       str = "standard"       # "scalper" | "standard"
+    micro_invalidation_price: Optional[float] = None  # 1m structure level captured at entry
+    entry_location_quality: str = "unknown"  # invalid | weak | valid | excellent
     funding_rate:     float = 0.0            # point-in-time funding used by ML audit
     trend_pct:        float = 0.0            # 24h trend estimate used by ML audit
 
@@ -297,6 +299,7 @@ class Position(BaseModel):
     tp2:              float
     trailing_active:  bool = False
     trailing_high:    float = 0.0    # highest price reached (for long trailing)
+    early_profit_lock: bool = False  # pre-TP1 impulse moved stop above/below entry
     liquidation_price: Optional[float] = None  # estimated or actual liquidation price
 
     # State
@@ -316,6 +319,9 @@ class Position(BaseModel):
     is_paper:         bool = True
     entry_score:      int = 50
     realized_vol:     float = 0.02       # daily realized vol at entry — used for trail distance
+    trend_pct:        float = 0.0        # entry higher-timeframe trend context
+    micro_invalidation_price: Optional[float] = None
+    entry_location_quality: str = "unknown"
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:

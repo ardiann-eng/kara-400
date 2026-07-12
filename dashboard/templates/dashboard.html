@@ -1078,9 +1078,9 @@
             <div class="flex justify-between text-xs font-mono" style="color:rgba(196,181,253,.4)">
               <span>0</span>
               <span id="ml-progress-pct" class="font-semibold" style="color:#c4b5fd">0%</span>
-              <span id="ml-min-samples-label">300 (unlock)</span>
+              <span id="ml-min-samples-label">300 (observe model)</span>
             </div>
-            <div class="text-xs" style="color:rgba(196,181,253,.4)" id="ml-progress-hint">AI hanya bisa memblok sinyal setelah 300 data trade terkumpul.</div>
+            <div class="text-xs" style="color:rgba(196,181,253,.4)" id="ml-progress-hint">Model butuh 300 outcome dengan feature entry dan exit lengkap.</div>
           </div>
         </div>
 
@@ -1184,13 +1184,13 @@
         <div class="glass p-4 md:p-5 mb-4">
           <div class="flex items-center justify-between mb-4">
             <div class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(196,181,253,.4)">Meta Pattern Heatmap</div>
-            <div class="text-xs font-mono" style="color:rgba(196,181,253,.3)">Win Rate per Pola Trading</div>
+            <div class="text-xs font-mono" style="color:rgba(196,181,253,.3)">Evidence per Pola dan Level Agregasi</div>
           </div>
           <!-- Legend -->
           <div class="flex gap-4 mb-3 text-xs" style="color:rgba(196,181,253,.4)">
-            <span><span class="inline-block w-3 h-3 rounded mr-1" style="background:rgba(52,211,153,.7);vertical-align:middle"></span>≥70% WR</span>
-            <span><span class="inline-block w-3 h-3 rounded mr-1" style="background:rgba(250,204,21,.6);vertical-align:middle"></span>50–70%</span>
-            <span><span class="inline-block w-3 h-3 rounded mr-1" style="background:rgba(248,113,113,.6);vertical-align:middle"></span>&lt;50%</span>
+            <span><span class="inline-block w-3 h-3 rounded mr-1" style="background:rgba(52,211,153,.7);vertical-align:middle"></span>Boost specific aktif</span>
+            <span><span class="inline-block w-3 h-3 rounded mr-1" style="background:rgba(248,113,113,.6);vertical-align:middle"></span>Penalty aktif</span>
+            <span><span class="inline-block w-3 h-3 rounded mr-1" style="background:rgba(250,204,21,.6);vertical-align:middle"></span>Observe, sample belum cukup</span>
             <span style="margin-left:auto" id="meta-pattern-count" class="font-mono"></span>
           </div>
           <div id="meta-pattern-grid" class="flex flex-wrap gap-2"></div>
@@ -1809,24 +1809,24 @@
         } else if (d.is_ready) {
           dot.className = 'dot dot-green blink';
           txt.textContent = 'Aktif & Siap';
-          desc.textContent = `Dilatih dari ${d.last_train_samples} samples. AI bisa memblok sinyal buruk.`;
+          desc.textContent = `Dilatih dari ${d.last_train_samples} outcome lengkap. AI masih observe-only.`;
         } else {
           dot.className = 'dot dot-gray';
           txt.textContent = 'Belum Aktif';
-          desc.textContent = `Mengumpulkan data... AI tidak akan memblok sinyal sampai ${d.min_samples} trades.`;
+          desc.textContent = `Mengumpulkan feature entry/exit lengkap sebelum model dipakai.`;
         }
 
         // Progress bar
-        document.getElementById('ml-total-samples').textContent = d.total_samples;
+        document.getElementById('ml-total-samples').textContent = d.enriched_samples;
         document.getElementById('ml-min-samples').textContent = d.min_samples;
-        document.getElementById('ml-min-samples-label').textContent = `${d.min_samples} (unlock)`;
+        document.getElementById('ml-min-samples-label').textContent = `${d.min_samples} (observe model)`;
         document.getElementById('ml-progress-bar').style.width = d.progress_pct + '%';
         document.getElementById('ml-progress-pct').textContent = d.progress_pct + '%';
         const hint = document.getElementById('ml-progress-hint');
-        const remaining = d.min_samples - d.total_samples;
+        const remaining = d.min_samples - d.enriched_samples;
         hint.textContent = remaining > 0
-          ? `Butuh ${remaining} trade lagi agar AI mulai aktif memfilter sinyal.`
-          : 'Data sudah cukup — AI aktif memfilter sinyal.';
+          ? `Butuh ${remaining} outcome lengkap untuk training model impulse.`
+          : 'Data lengkap cukup — model menunggu validasi retrain.';
 
         // Win/Loss stats
         document.getElementById('ml-total').textContent = d.total_samples;
@@ -1872,7 +1872,7 @@
         }
 
         // Guard status
-        const samplesOk = d.total_samples >= d.min_samples;
+        const samplesOk = d.enriched_samples >= d.min_samples;
         const balanceOk = d.win_rate >= 10 && d.win_rate <= 90 && d.total_samples > 0;
         const readyOk   = d.is_ready;
 
@@ -1881,7 +1881,7 @@
           document.getElementById(descId).textContent = ok ? okText : failText;
         };
         setGuard('guard-samples-dot', 'guard-samples-desc', samplesOk,
-          `✓ ${d.total_samples} / ${d.min_samples} terpenuhi`, `${d.total_samples} / ${d.min_samples} — butuh lebih banyak`);
+          `✓ ${d.enriched_samples} / ${d.min_samples} lengkap`, `${d.enriched_samples} / ${d.min_samples} outcome lengkap`);
         setGuard('guard-balance-dot', 'guard-balance-desc', balanceOk,
           `✓ Win rate ${d.win_rate}% — seimbang`, `Win rate ${d.win_rate}% — data belum seimbang`);
         setGuard('guard-ready-dot', 'guard-ready-desc', readyOk,
@@ -1893,13 +1893,17 @@
     }
 
     // ── Meta Pattern Heatmap ─────────────────────────────────────────────────
-    function renderMetaPatternCard(p) {
+      function renderMetaPatternCard(p) {
       const status = p.ev_status || 'watch';
       const statusColor = status === 'boost' ? '#34d399' : status === 'penalty' ? '#f87171' : '#fbbf24';
       const sideColor = p.side === 'LONG' ? '#34d399' : '#f87171';
       const pnl = Number(p.pnl_ema || 0);
       const pnlSign = pnl >= 0 ? '+' : '';
-      const bucket = p.score_bucket ? p.score_bucket.toUpperCase() : 'LEGACY';
+        const bucket = p.score_bucket ? p.score_bucket.toUpperCase() : 'LEGACY';
+        const level = (p.level || 'specific').toUpperCase();
+        const delta = Number(p.active_delta || 0);
+        const deltaText = delta ? `${delta > 0 ? '+' : ''}${delta}` : 'OBSERVE';
+        const evidence = `${p.samples}/${p.required_samples || '?'} sample`;
       const wr = Number(p.winrate || 0);
       return `<div class="meta-card" title="${p.key}">
         <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
@@ -1920,8 +1924,9 @@
           </div>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:6px">
-          <span class="meta-chip" style="color:${statusColor};border-color:${statusColor}55">${status.toUpperCase()}</span>
-          <span class="meta-chip">${p.samples} samples</span>
+          <span class="meta-chip" style="color:${statusColor};border-color:${statusColor}55">${deltaText}</span>
+          <span class="meta-chip">${level}</span>
+          <span class="meta-chip">${evidence}</span>
         </div>
       </div>`;
     }

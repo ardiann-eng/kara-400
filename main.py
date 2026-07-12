@@ -217,9 +217,23 @@ class KaraBot:
             if u.is_authorized and u.last_seen_version != release_tag
         ]
 
+        # Purge template / dummy paper users (never real Telegram chats)
+        try:
+            purged = user_db.purge_dummy_users()
+            if purged and self.telegram:
+                for cid in purged:
+                    self.telegram._authorized_chat_ids.discard(str(cid))
+                if hasattr(self.telegram, "_save_state"):
+                    self.telegram._save_state()
+        except Exception as e:
+            log.warning(f"Dummy user purge failed: {e}")
+
         # Initialize User Sessions from DB
         self._enforce_locked_score_thresholds()
+        _dummy = {"123456789", "987654321"}
         for u in user_db.get_all_users():
+            if str(u.chat_id) in _dummy:
+                continue
             session = UserSession(u, mode_manager=self.mode_mgr, hl_client=self.hl_client)
             if hasattr(session.executor, 'load_from_db'):
                 session.executor.load_from_db(u.chat_id)
@@ -242,33 +256,16 @@ class KaraBot:
             log.warning(f"  Telegram startup failed: {e}")
             log.warning("   Bot will continue without Telegram notifications")
 
-        # ── Update Notification System ────────────────────────────────
-        if self.telegram and self.telegram._bot_started:
-            # Prefer Telegram active/authorized chats so notifications are sent
-            # even if DB authorization flags are stale.
-            target_chat_ids = list(self.telegram._authorized_chat_ids)
-            if not target_chat_ids:
-                target_chat_ids = [u.chat_id for u in users_to_update]
-
-            if target_chat_ids:
-                log.info(
-                    f"📢 Sending update notification to {len(target_chat_ids)} chat(s) "
-                    f"(release={release_tag}, deploy_id={'yes' if short_dep else 'no'}, sha={'yes' if short_sha else 'no'})"
-                )
-                for chat_id in target_chat_ids:
-                    success = await self.telegram.send_update_notification(
-                        chat_id,
-                        release_tag=release_tag,
-                        extra_notes=[]
-                    )
-                    if success:
-                        u = user_db.get_user(chat_id)
-                        if u:
-                            u.last_seen_version = release_tag
-                            user_db.update_user(u)
-                    await asyncio.sleep(0.1) # Rate limit safety
-            else:
-                log.info(f"📭 No target chats for update notification ({release_tag})")
+        # Update / "KARA Online" Telegram broadcasts DISABLED (spam on every deploy).
+        # Still stamp last_seen_version so re-enabling later won't flood old releases.
+        try:
+            for u in user_db.users.values():
+                if u.is_authorized and u.last_seen_version != release_tag:
+                    u.last_seen_version = release_tag
+                    user_db.update_user(u)
+            log.info(f"📭 Deploy notify OFF — stamped release={release_tag} (no Telegram blast)")
+        except Exception as e:
+            log.debug(f"release stamp skipped: {e}")
 
         # ── Calibration Check ─────────────────────────────────────────
         try:
@@ -535,6 +532,23 @@ class KaraBot:
         asyncio.create_task(self._position_monitor_loop(), name="position_monitor")
         asyncio.create_task(self._ws_watchdog_loop(), name="ws_watchdog")
         asyncio.create_task(self._scan_loop(), name="scan_loop")
+
+        # Weekly AI audit — Monday 06:00 UTC (configurable via WEEKLY_REVIEW)
+        try:
+            if getattr(config, "WEEKLY_REVIEW", None) and config.WEEKLY_REVIEW.enabled:
+                from intelligence.weekly_review.scheduler import start_weekly_review_loop
+                asyncio.create_task(
+                    start_weekly_review_loop(self.telegram),
+                    name="weekly_review",
+                )
+                log.info(
+                    "📅 Weekly AI audit scheduler ON (Mon %02d:00 UTC)",
+                    getattr(config.WEEKLY_REVIEW, "schedule_hour_utc", 6),
+                )
+            else:
+                log.info("📅 Weekly AI audit scheduler OFF")
+        except Exception as e:
+            log.warning(f"Weekly review scheduler failed to start: {e}")
 
         # Loop ini hanya tetap hidup untuk menjaga bot tidak exit
         while self._running:
@@ -862,6 +876,10 @@ class KaraBot:
             return
 
         for chat_id in target_ids:
+            # Never trade for template/placeholder chat IDs
+            if str(chat_id) in {"123456789", "987654321"}:
+                log.debug(f"Skip dummy chat_id={chat_id}")
+                continue
             # Get or create session
             session = await self.get_session(chat_id)
             if not session:
@@ -877,14 +895,77 @@ class KaraBot:
             # source — still executed under scalper rules below.
             base_signal = signals_dict.get("scalper") if user_mode == "scalper" else signals_dict.get(user_mode)
             fallback_from_standard = False
+            scl_sig = signals_dict.get("scalper")
+            std_sig = signals_dict.get("standard")
+
+            # ── P2: direction conflict resolution ─────────────────────────
+            # If scalper wants LONG and standard wants SHORT (or vice versa),
+            # prefer scalper — it is closer to short-horizon price action.
+            # HYPE case: standard SHORT cascade vs scalper LONG 80 on pump.
+            if (
+                user_mode == "scalper"
+                and scl_sig is not None
+                and std_sig is not None
+                and getattr(scl_sig, "side", None) is not None
+                and getattr(std_sig, "side", None) is not None
+                and scl_sig.side != std_sig.side
+            ):
+                min_pref = int(getattr(config, "SCALPER_CONFLICT_MIN_SCORE", 60))
+                if int(getattr(scl_sig, "score", 0) or 0) >= min_pref:
+                    log.info(
+                        f"[P2-PREFER-SCALPER] {chat_id} {getattr(scl_sig, 'asset', '?')}: "
+                        f"scalper {scl_sig.side.value.upper()}@{scl_sig.score} vs "
+                        f"standard {std_sig.side.value.upper()}@{std_sig.score} "
+                        f"→ use scalper"
+                    )
+                    base_signal = scl_sig
+                    fallback_from_standard = False
+                else:
+                    # Scalper too weak — do not execute either conflicting direction
+                    log.info(
+                        f"[P2-SKIP-CONFLICT] {chat_id} {getattr(std_sig, 'asset', '?')}: "
+                        f"scalper {scl_sig.side.value.upper()}@{scl_sig.score} vs "
+                        f"standard {std_sig.side.value.upper()}@{std_sig.score} "
+                        f"(scalper < {min_pref}) → skip both"
+                    )
+                    continue
 
             if user_mode == "scalper" and not base_signal:
                 allow_std_fb = bool(getattr(config, "STANDARD_SIGNAL_AS_SCALPER_FALLBACK", True))
                 # Also allow fallback when FORCE_SCALPER_ONLY (same intent)
                 if allow_std_fb or getattr(config, "FORCE_SCALPER_ONLY", False):
-                    std_fallback = signals_dict.get("standard")
+                    std_fallback = std_sig
                     if std_fallback:
-                        base_signal = std_fallback
+                        # Standard score supplies directional context only. Re-run the
+                        # complete native 1m scorer so a fallback cannot inherit a
+                        # scalper's 12m risk profile without microstructure evidence.
+                        try:
+                            confirmed_sig, confirmed_score = await self.scorer._run_scalper(
+                                std_fallback.asset
+                            )
+                        except Exception as e:
+                            log.info(
+                                f"[SCALPER-FALLBACK-BLOCK] {std_fallback.asset}: "
+                                f"1m revalidation unavailable ({e})"
+                            )
+                            continue
+
+                        if not confirmed_sig:
+                            log.info(
+                                f"[SCALPER-FALLBACK-BLOCK] {std_fallback.asset} "
+                                f"{std_fallback.side.value.upper()}@{std_fallback.score}: "
+                                f"native 1m scorer rejected (score={confirmed_score})"
+                            )
+                            continue
+                        if confirmed_sig.side != std_fallback.side:
+                            log.info(
+                                f"[SCALPER-FALLBACK-BLOCK] {std_fallback.asset}: "
+                                f"standard={std_fallback.side.value.upper()}@{std_fallback.score} "
+                                f"but 1m={confirmed_sig.side.value.upper()}@{confirmed_sig.score}"
+                            )
+                            continue
+
+                        base_signal = confirmed_sig
                         fallback_from_standard = True
 
             if not base_signal:
@@ -906,8 +987,9 @@ class KaraBot:
             user_signal.signal_id = f"{base_signal.signal_id[:4]}{uuid.uuid4().hex[:4].upper()}"
             if fallback_from_standard:
                 log.info(
-                    f"[SCALPER-FALLBACK] {chat_id}: no scalper signal — using standard "
-                    f"scorer hit for {user_signal.asset} under SCALPER hold/risk rules"
+                    f"[SCALPER-FALLBACK-CONFIRMED] {chat_id}: standard context confirmed "
+                    f"by native 1m {user_signal.side.value.upper()}@{user_signal.score}; "
+                    f"using native scalper entry levels"
                 )
 
 
@@ -1107,7 +1189,23 @@ class KaraBot:
             if not hasattr(session.executor, 'open_positions') or len(session.executor.open_positions) == 0:
                 continue
 
-            actions = await session.executor.update_positions(prices)
+            market_states = {}
+            for pos in session.executor.open_positions:
+                if getattr(pos, "trade_mode", "standard") != "scalper":
+                    continue
+                opened = pos.opened_at
+                if opened.tzinfo is None:
+                    from datetime import timezone
+                    opened = opened.replace(tzinfo=timezone.utc)
+                age_minutes = (utcnow() - opened).total_seconds() / 60.0
+                # Audit window: 12-18m contains winners; 18m+ contains loser drift.
+                # No extra API work before the 10m decision window.
+                if 10.0 <= age_minutes < 18.0:
+                    state = await self._scalper_exit_market_state(pos, prices.get(pos.asset, 0))
+                    if state is not None:
+                        market_states[pos.position_id] = state
+
+            actions = await session.executor.update_positions(prices, market_states)
 
             # All position events (incl. time_exit full close) go through one path.
             # PnL card is generated only on FULL close with cumulative totals.
@@ -1118,6 +1216,48 @@ class KaraBot:
             acc_state = await session.get_account_state()
             session.user.paper_balance_usd = acc_state.total_equity
             user_db.update_user(session.user)
+
+    async def _scalper_exit_market_state(self, pos, current_price: float) -> Optional[Dict]:
+        """Validate whether a 1m crypto-perp scalp still has structure for its 12-18m hold window."""
+        if current_price <= 0:
+            return None
+        try:
+            candles = await self.hl_client.get_candles(pos.asset, "1m", limit=24)
+            closes = [float(c.get("c", 0)) for c in candles if isinstance(c, dict) and float(c.get("c", 0)) > 0]
+            if len(closes) < 21:
+                return None
+            ema21 = closes[-21]
+            alpha = 2.0 / 22.0
+            for close in closes[-20:]:
+                ema21 = close * alpha + ema21 * (1.0 - alpha)
+            # Use a short close sequence rather than one tick. Perp marks can briefly
+            # pierce an EMA during normal retests, especially in high-vol regimes.
+            recent_rising = closes[-1] >= closes[-3]
+            recent_falling = closes[-1] <= closes[-3]
+            invalidation = getattr(pos, "micro_invalidation_price", None)
+            trend_pct = float(getattr(pos, "trend_pct", 0.0) or 0.0)
+            if pos.side.value == "long":
+                structure_valid = (
+                    (invalidation is None or current_price >= invalidation)
+                    and current_price >= ema21 * 0.998
+                )
+                trend_aligned = trend_pct >= -0.03
+                momentum_opposes = current_price < ema21 and recent_falling
+            else:
+                structure_valid = (
+                    (invalidation is None or current_price <= invalidation)
+                    and current_price <= ema21 * 1.002
+                )
+                trend_aligned = trend_pct <= 0.03
+                momentum_opposes = current_price > ema21 and recent_rising
+            return {
+                "structure_valid": structure_valid,
+                "trend_aligned": trend_aligned,
+                "momentum_opposes": momentum_opposes,
+            }
+        except Exception as e:
+            log.debug(f"[SCALPER] {pos.asset}: exit-state candles unavailable ({e})")
+            return None
 
     async def _send_hourly_summary(self):
         """Send hourly PnL summary to all users."""

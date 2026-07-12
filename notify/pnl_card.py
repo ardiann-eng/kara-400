@@ -117,6 +117,7 @@ def _exit_reason_label(reason: str) -> str:
         "tp1":           "FULL CLOSE",
         "tp2":           "FULL CLOSE",
         "stop_loss":     "FULL · STOP",
+        "profit_lock_stop": "FULL · LOCK",
         "time_exit":     "FULL · TIME",
         "manual_close":  "FULL · MANUAL",
         "close_all":     "FULL · CLOSE ALL",
@@ -127,7 +128,7 @@ def _exit_reason_label(reason: str) -> str:
 def _exit_reason_color(reason: str) -> tuple:
     r = reason.lower()
     if r == "trailing_stop": return (45, 212, 191)
-    if r in ("tp1", "tp2", "time_exit"):  return C_PROFIT
+    if r in ("tp1", "tp2", "time_exit", "profit_lock_stop"):  return C_PROFIT
     return C_LOSS
 
 

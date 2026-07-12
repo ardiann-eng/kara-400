@@ -277,6 +277,7 @@ class LiveExecutor:
             tp1=signal.tp1,
             tp2=signal.tp2,
             trailing_high=signal.entry_price,
+            early_profit_lock=False,
             signal_id=signal.signal_id,
             meta_pattern_key=getattr(signal, 'meta_pattern_key', None),
             meta_score_delta=getattr(signal, 'meta_score_delta', 0),
@@ -284,6 +285,9 @@ class LiveExecutor:
             is_paper=False,
             entry_score=signal.score,
             realized_vol=getattr(signal, 'realized_vol', 0.02),
+            trend_pct=getattr(signal, 'trend_pct', 0.0),
+            micro_invalidation_price=getattr(signal, 'micro_invalidation_price', None),
+            entry_location_quality=getattr(signal, 'entry_location_quality', 'unknown'),
         )
         self._positions[pos.position_id] = pos
 
@@ -318,7 +322,9 @@ class LiveExecutor:
             experience_buffer.record_entry,
             self.chat_id, pos.position_id, signal.asset, signal.side.value,
             signal.score, getattr(signal, 'meta_score_delta', 0),
-            bd, fr, vol, trend, getattr(signal, 'expected_edge', 0.0)
+            bd, fr, vol, trend, getattr(signal, 'expected_edge', 0.0),
+            pos.trade_mode, pos.entry_location_quality,
+            abs((pos.micro_invalidation_price or pos.stop_loss) - pos.entry_price) / pos.entry_price
         )
 
         log.info(
@@ -332,7 +338,9 @@ class LiveExecutor:
     # UPDATE POSITIONS (Active Monitoring)
     # ──────────────────────────────────────────
 
-    async def update_positions(self, prices: Dict[str, float]) -> List[Dict]:
+    async def update_positions(
+        self, prices: Dict[str, float], market_states: Optional[Dict[str, Dict]] = None
+    ) -> List[Dict]:
         """
         Update local shadow positions and check for TP/SL/Trailing triggers.
         Returns list of actions taken.
@@ -350,7 +358,7 @@ class LiveExecutor:
             pos.pnl_unrealized = pos.unrealized_pnl(current)
 
             # Check Risk Manager for triggers (Time-based, TP, Trailing)
-            action = self.risk.check_tp_trail(pos, current)
+            action = self.risk.check_tp_trail(pos, current, (market_states or {}).get(pos.position_id))
             if action:
                 result = await self._execute_partial_close(pos, action, current)
                 if result:
@@ -462,6 +470,10 @@ class LiveExecutor:
                 # ROE fraction on closed slice margin
                 "pnl_pct":   slice_roe,
                 "score":     getattr(pos, 'entry_score', 0),
+                "tp1_hit":  pos.tp1_hit,
+                "tp2_hit":  pos.tp2_hit,
+                "early_profit_lock": getattr(pos, "early_profit_lock", False),
+                "max_floating_pct": max(0.0, pos.floating_pct(pos.trailing_high)),
                 "meta_boost": getattr(pos, "meta_score_delta", 0),
                 "meta_pattern_key": getattr(pos, "meta_pattern_key", ""),
                 "timestamp": utcnow(),
@@ -482,6 +494,9 @@ class LiveExecutor:
                     position_id,
                     pnl_pct_final,
                     duration_sec,
+                    reason,
+                    max(0.0, pos.floating_pct(pos.trailing_high)),
+                    "",
                 )
 
             log.info(

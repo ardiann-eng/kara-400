@@ -372,11 +372,7 @@ class KaraTelegram:
             except Exception as e:
                 log.warning(f"Could not register command menu: {e}")
 
-            await self.send_text(
-                f"✨ <b>KARA Online!</b> 🌸\n\n"
-                f"Intelligence Trading Partner Anda siap memantau 100+ aset.\n"
-                f"Mode: <code>{'PAPER ' if config.HL_TESTNET else 'LIVE '}</code>\n"
-            )
+            # No startup broadcast — quiet boot (user request: no "Online" spam per deploy)
 
         except Exception as e:
             log.warning(f"  Telegram initialization failed: {e}")
@@ -971,35 +967,60 @@ class KaraTelegram:
             else:
                 duration = "?"
 
-            # TP status indicators
-            tp1_icon = "✅" if pos.tp1_hit  else "⏳"
-            tp2_icon = "✅" if pos.tp2_hit  else "⏳"
+            # TP status — distinguish hit vs pending (flags from executor)
+            tp1_hit = bool(getattr(pos, "tp1_hit", False))
+            tp2_hit = bool(getattr(pos, "tp2_hit", False))
+            # Soft zone: price already past TP but flag not set yet (display only)
+            try:
+                if pos.side.value.lower() == "long":
+                    at_tp1 = current >= float(pos.tp1)
+                    at_tp2 = current >= float(pos.tp2)
+                else:
+                    at_tp1 = current <= float(pos.tp1)
+                    at_tp2 = current <= float(pos.tp2)
+            except Exception:
+                at_tp1 = at_tp2 = False
 
-            # SL label — if TP1 already hit, SL moved to breakeven
-            sl_note = " <i>(BEP)</i>" if pos.tp1_hit else ""
+            if tp1_hit:
+                tp1_label = f"✅ TP1 HIT ${format_price(pos.tp1)}"
+            elif at_tp1:
+                tp1_label = f"🟡 TP1 zone ${format_price(pos.tp1)}"
+            else:
+                tp1_label = f"⏳ TP1 ${format_price(pos.tp1)}"
 
-            # Liq row (only show if available)
-            liq_part = f" | 💥 Liq: <code>${format_price(pos.liquidation_price)}</code>" if pos.liquidation_price else ""
+            if tp2_hit:
+                tp2_label = f"✅ TP2 HIT ${format_price(pos.tp2)}"
+            elif at_tp2:
+                tp2_label = f"🟡 TP2 zone ${format_price(pos.tp2)}"
+            else:
+                tp2_label = f"⏳ TP2 ${format_price(pos.tp2)}"
 
-            # ── Concise Card ───────────────────────────────────────────────
+            # SL — BEP after TP1 partial
+            sl_tag = "BEP" if tp1_hit else "SL"
+            liq_str = (
+                f"${format_price(pos.liquidation_price)}"
+                if pos.liquidation_price else "?"
+            )
+
             # Clean ticker for Hyperliquid URL (strip 'k' for 1000x assets)
-            url_ticker = pos.asset[1:] if pos.asset.startswith('k') and len(pos.asset) > 1 else pos.asset
-            hl_link    = f"https://app.hyperliquid.xyz/trade/{url_ticker}"
+            url_ticker = pos.asset[1:] if pos.asset.startswith("k") and len(pos.asset) > 1 else pos.asset
+            hl_link = f"https://app.hyperliquid.xyz/trade/{url_ticker}"
             asset_html = f"<a href='{hl_link}'>{pos.asset}</a>"
 
             text += (
                 f"\n"
-                f"<b>{asset_html} {side_str} {pos.leverage}x</b>   {pnl_emoji} {pnl_sign}{float_pct:.2f}%\n"
-                f"Entry: ${format_price(pos.entry_price)} → ${format_price(current)}\n"
-                f"🛡️ SL: ${format_price(pos.stop_loss)} | 💥 Liq: ${format_price(pos.liquidation_price) if pos.liquidation_price else '?'}\n"
-                f"🎯 TP1: ${format_price(pos.tp1)}   🎯 TP2: ${format_price(pos.tp2)}   | {duration} lalu\n"
+                f"<b>{asset_html} {side_str} {pos.leverage}x</b>   "
+                f"{pnl_emoji} {pnl_sign}{float_pct:.2f}% · {duration}\n"
+                f"Entry ${format_price(pos.entry_price)} → ${format_price(current)}\n"
+                f"🛡️ {sl_tag} ${format_price(pos.stop_loss)} · 💥 Liq {liq_str}\n"
+                f"{tp1_label} · {tp2_label}\n"
             )
 
-            # Close button per position (2-column grid)
+            # Close buttons — clean labels, minimal emoji
             side_short = "L" if pos.side.value == "long" else "S"
             close_buttons.append(
                 InlineKeyboardButton(
-                    f"❌ {pos.asset} {side_short}",
+                    f"Close {pos.asset} {side_short}",
                     callback_data=f"close_req:{pos.asset}:{pos.side.value}"
                 )
             )
@@ -1011,9 +1032,8 @@ class KaraTelegram:
         # Footer
         text += "\n<i>Santai dulu, biarkan profit kita mengalir~ 🌸</i>"
 
-        # Close All row
         keyboard_rows.append([
-            InlineKeyboardButton("🚨 CLOSE ALL POSITIONS 🚨", callback_data="close_all_req")
+            InlineKeyboardButton("Close all", callback_data="close_all_req")
         ])
 
         reply_markup = InlineKeyboardMarkup(keyboard_rows)
@@ -1024,7 +1044,12 @@ class KaraTelegram:
                     text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
                 )
             except Exception as e:
-                log.debug(f"Refresh skip (no change): {e}")
+                # Message deleted / not modified → send a fresh list
+                log.debug(f"Positions edit failed, replying new: {e}")
+                try:
+                    await update.effective_message.reply_html(text, reply_markup=reply_markup)
+                except Exception:
+                    await self.send_text(text, target_chat_id=str(update.effective_chat.id), reply_markup=reply_markup)
         else:
             await update.effective_message.reply_html(text, reply_markup=reply_markup)
 
@@ -1915,56 +1940,87 @@ class KaraTelegram:
     # POSITION EVENT NOTIFICATIONS
     # ──────────────────────────────────────────
 
+    @staticmethod
+    def _fmt_hold_duration(seconds: float) -> str:
+        """Compact hold duration (e.g. 17m, 1h 5m)."""
+        if seconds is None or seconds < 0:
+            return "—"
+        secs = int(round(float(seconds)))
+        if secs < 60:
+            return f"{secs}s"
+        mins = max(1, int(round(secs / 60.0)))
+        if mins < 60:
+            return f"{mins}m"
+        hours = mins // 60
+        rem_m = mins % 60
+        return f"{hours}h" if rem_m == 0 else f"{hours}h {rem_m}m"
+
+    @staticmethod
+    def _signed_pct(frac_or_pct: float, already_pct: bool = False) -> str:
+        v = float(frac_or_pct or 0.0)
+        if not already_pct:
+            v = v * 100.0
+        sign = "+" if v >= 0 else ""
+        return f"{sign}{v:.2f}%"
+
     async def send_position_opened(self, pos, signal, target_chat_id: str = None):
-        """Premium AI Agent Notification for a successful entry."""
-        # Determine labels
-        # Use user_db directly for reliable mode labeling in notifications
-        chat_id = target_chat_id or (list(self._authorized_chat_ids)[0] if self._authorized_chat_ids else "")
+        """Original open notification — do not change without explicit request."""
+        # Use user_db for reliable mode labeling
+        chat_id = target_chat_id or (
+            list(self._authorized_chat_ids)[0] if self._authorized_chat_ids else ""
+        )
         user = user_db.get_user(chat_id)
-        is_scalper = (user.config.trading_mode == "scalper") if user else False
+        is_scalper = (
+            (getattr(pos, "trade_mode", None) == "scalper")
+            or (user.config.trading_mode == "scalper" if user else False)
+        )
         mode_text = "Scalping ⚡" if is_scalper else "Standar 🌸"
-        
-        # Style & Narrative
+        side = pos.side.value.upper()
+        asset = pos.asset
+        score = getattr(signal, "score", getattr(pos, "entry_score", 0)) or 0
+        rr = getattr(signal, "risk_reward_ratio", 0) or 0
+
         text = (
             f"🌸 <b>KARA SYSTEM: Position Executed</b>\n"
-            f"<i>Saya baru saja menganalisis pasar dan berhasil membuka posisi <b>{pos.side.value.upper()}</b> untuk <b><a href='https://app.hyperliquid.xyz/trade/{pos.asset}'>{pos.asset}</a></b>.</i>\n\n"
-            
+            f"<i>Saya baru saja menganalisis pasar dan berhasil membuka posisi "
+            f"<b>{side}</b> untuk <b>"
+            f"<a href='https://app.hyperliquid.xyz/trade/{asset}'>{asset}</a></b>.</i>\n\n"
             f"📦 <b>Market Details</b>\n"
             f"  • Entry   : <code>${format_price(pos.entry_price)}</code>\n"
             f"  • Margin  : <b>{format_idr(pos.margin_usd)}</b> ({format_usd(pos.margin_usd)})\n"
             f"  • Leverage: {pos.leverage}x isolated\n"
             f"  • Mode    : {mode_text}\n\n"
-            
             f"🛡️ <b>Risk Profile</b>\n"
             f"  • 🛑 SL   : <code>${format_price(pos.stop_loss)}</code>\n"
             f"  • 🎯 TP1  : <code>${format_price(pos.tp1)}</code>\n"
             f"  • 🎯 TP2  : <code>${format_price(pos.tp2)}</code>\n"
-            f"  • 📐 R:R Ratio: <b>{signal.risk_reward_ratio:.2f}x</b>\n"
-            f"  • 📊 Score: <b>{signal.score}/100</b>\n\n"
-            
+            f"  • 📐 R:R Ratio: <b>{rr:.2f}x</b>\n"
+            f"  • 📊 Score: <b>{score}/100</b>\n\n"
             f"<i>Eksekusi selesai. Memantau market untuk exit terbaik. ✨</i>"
         )
         await self.send_text(text, target_chat_id=target_chat_id)
 
-
     async def send_position_event(self, action: dict, prices: dict, target_chat_id: str = None):
         """
-        Position lifecycle notifications.
+        KARA agent-style position lifecycle notifications.
 
-        - TP1 / TP2: status only (partial). NO PnL card.
-        - Full close (trail / SL / time_exit / close_all): TOTAL accumulated PnL
-          (all partials + final) + generate PnL card once.
+        - TP1 / TP2: partial text only — no PnL card.
+        - Full close (trail / SL / time_exit / manual): summary + Generate PnL button.
+          Card image only when user taps the button.
         """
         action_type = action.get("action", "")
-        pos_id      = action.get("position_id", "")
-        pnl_slice   = float(action.get("pnl_slice", action.get("pnl", 0.0)) or 0.0)
-        fully_closed = bool(action.get("fully_closed", action_type in (
-            "trailing_stop", "stop_loss", "time_exit", "close_all", "manual"
-        ) and action_type not in ("tp1", "tp2")))
+        pos_id = action.get("position_id", "")
+        pnl_slice = float(action.get("pnl_slice", action.get("pnl", 0.0)) or 0.0)
+        fully_closed = bool(action.get("fully_closed")) or (
+            action_type in (
+                "trailing_stop", "stop_loss", "profit_lock_stop", "time_exit",
+                "close_all", "manual", "manual_close",
+            )
+        )
 
         session = await self.bot_app.get_session(target_chat_id) if (self.bot_app and target_chat_id) else None
         pos = None
-        if session and hasattr(session.executor, '_positions'):
+        if session and hasattr(session.executor, "_positions"):
             pos = session.executor._positions.get(pos_id)
 
         if not pos:
@@ -1973,13 +2029,16 @@ class KaraTelegram:
                 await self.send_text(msg, target_chat_id=target_chat_id)
             return
 
-        current = float(action.get("exit_price") or prices.get(pos.asset, pos.entry_price) or pos.entry_price)
-        entry   = pos.entry_price
+        current = float(
+            action.get("exit_price")
+            or prices.get(pos.asset, pos.entry_price)
+            or pos.entry_price
+        )
+        entry = pos.entry_price
         lev = max(int(getattr(pos, "leverage", 1) or 1), 1)
         from utils.helpers import pnl_roe_fraction, normalize_pct_display
         import config as _cfg
 
-        # Cumulative total (TP1+TP2+final). Prefer executor field.
         total_pnl = float(action.get("pnl_total", getattr(pos, "pnl_realized", 0.0)) or 0.0)
         if fully_closed and abs(total_pnl) < 1e-12:
             total_pnl = pnl_slice
@@ -1991,101 +2050,140 @@ class KaraTelegram:
         total_roe_pct = normalize_pct_display(total_roe_frac)
 
         price_frac = float(action.get("price_move_pct") or pos.floating_pct(current) or 0.0)
-        price_pct = abs(price_frac) * 100.0
+        price_signed = self._signed_pct(price_frac, already_pct=False)
         slice_sign = "+" if pnl_slice >= 0 else ""
         total_sign = "+" if total_pnl >= 0 else ""
 
-        # Partial remaining UI
         is_scl = (getattr(pos, "trade_mode", "standard") or "standard") == "scalper"
         cfg_mode = _cfg.SCALPER if is_scl else _cfg.RISK
         tp1_r = float(getattr(cfg_mode, "tp1_close_ratio", getattr(_cfg.RISK, "tp1_close_ratio", 0.25)))
         tp2_r = float(getattr(cfg_mode, "tp2_close_ratio", getattr(_cfg.RISK, "tp2_close_ratio", 0.50)))
         remain_after_tp1 = max(0.0, 1.0 - tp1_r)
         remain_after_tp2 = remain_after_tp1 * (1.0 - tp2_r)
+        mode_text = "Scalper" if is_scl else "Standard"
+        side = pos.side.value.upper()
+        asset = pos.asset
 
-        # Slice ROE for partial status only
         slice_roe = float(action.get("pnl_pct_slice") or action.get("pnl_pct") or 0.0)
         if abs(slice_roe) < 1e-12 and abs(price_frac) > 0:
             slice_roe = price_frac * lev
         slice_roe_pct = normalize_pct_display(slice_roe)
 
+        # Hold duration (available after close; for open partials use opened_at→now)
+        duration_sec = 0.0
+        try:
+            if getattr(pos, "opened_at", None):
+                end_ts = getattr(pos, "closed_at", None) or utcnow()
+                opened = pos.opened_at
+                if opened.tzinfo is None:
+                    from datetime import timezone as _tz
+                    opened = opened.replace(tzinfo=_tz.utc)
+                if end_ts.tzinfo is None:
+                    from datetime import timezone as _tz
+                    end_ts = end_ts.replace(tzinfo=_tz.utc)
+                duration_sec = max(0.0, (end_ts - opened).total_seconds())
+        except Exception:
+            duration_sec = 0.0
+        hold_str = self._fmt_hold_duration(duration_sec)
+
         if action_type == "tp1":
-            # Partial only — no PnL card
+            # Medium: light emoji + bold on numbers that matter
             text = (
-                "🌸 <b>KARA UPDATE: TP1 Partial</b>\n\n"
-                f"<i>Partial profit on <b>{pos.asset}</b> — posisi masih terbuka.</i>\n\n"
-                f"🎯 <b>TP1 HIT</b> ({tp1_r*100:.0f}% ditutup)\n"
-                f"  • Entry   : <code>${format_price(entry)}</code>\n"
-                f"  • Price   : <code>${format_price(current)}</code> "
-                f"({slice_sign}{price_pct:.2f}% move)\n"
-                f"  • Slice   : <b>{slice_sign}{format_idr(pnl_slice)}</b> "
-                f"({slice_sign}{slice_roe_pct:.2f}% ROE @ {lev}x)\n"
-                f"  • Accrued : <code>{total_sign}{format_idr(total_pnl)}</code> "
-                f"(belum final)\n\n"
-                f"🛡️ Sisa <b>{remain_after_tp1*100:.0f}%</b> jalan · SL → Entry ✅\n"
-                f"<i>PnL card dikirim saat posisi FULL close. ✨</i>"
+                f"🎯 <b>TP1 Hit — {asset} {side}</b>\n"
+                f"<i>Partial locked · sisa masih open</i>\n\n"
+                f"📈 <code>${format_price(entry)}</code> → "
+                f"<code>${format_price(current)}</code>  <b>({price_signed})</b>\n"
+                f"💰 This cut: <b>{slice_sign}{format_idr(pnl_slice)}</b> "
+                f"<b>({slice_sign}{slice_roe_pct:.2f}% @ {lev}x)</b>\n"
+                f"📦 Size: closed <b>{tp1_r*100:.0f}%</b> · remaining "
+                f"<b>{remain_after_tp1*100:.0f}%</b>\n"
+                f"🛡️ SL → <b>breakeven</b> · {mode_text} {lev}x · {hold_str}"
             )
             await self.send_text(text, target_chat_id=target_chat_id)
             return
 
         if action_type == "tp2":
             text = (
-                "🏁 <b>KARA UPDATE: TP2 Partial</b>\n\n"
-                f"<i>Partial profit on <b>{pos.asset}</b> — sisa di trailing.</i>\n\n"
-                f"🎯🎯 <b>TP2 HIT</b>\n"
-                f"  • Entry   : <code>${format_price(entry)}</code>\n"
-                f"  • Price   : <code>${format_price(current)}</code> "
-                f"({slice_sign}{price_pct:.2f}% move)\n"
-                f"  • Slice   : <b>{slice_sign}{format_idr(pnl_slice)}</b> "
-                f"({slice_sign}{slice_roe_pct:.2f}% ROE @ {lev}x)\n"
-                f"  • Accrued : <code>{total_sign}{format_idr(total_pnl)}</code> "
-                f"(belum final)\n\n"
-                f"🛡️ Sisa <b>{remain_after_tp2*100:.0f}%</b> trailing 🚀\n"
-                f"<i>PnL card dikirim saat posisi FULL close.</i>"
+                f"🎯🎯 <b>TP2 Hit — {asset} {side}</b>\n"
+                f"<i>Partial #2 locked · sisa trailing</i>\n\n"
+                f"📈 <code>${format_price(entry)}</code> → "
+                f"<code>${format_price(current)}</code>  <b>({price_signed})</b>\n"
+                f"💰 This cut: <b>{slice_sign}{format_idr(pnl_slice)}</b> "
+                f"<b>({slice_sign}{slice_roe_pct:.2f}% @ {lev}x)</b>\n"
+                f"📊 Realized: <b>{total_sign}{format_idr(total_pnl)}</b> "
+                f"<i>(TP1+TP2, belum final)</i>\n"
+                f"📍 Next: <b>trailing</b> on remainder · {mode_text} {lev}x · {hold_str}"
             )
             await self.send_text(text, target_chat_id=target_chat_id)
             return
 
-        # ── FULL CLOSE only from here ─────────────────────────────────
+        # ── FULL CLOSE (compact + light emoji) ────────────────────────
+        head_meta = f"{mode_text} {lev}x · {hold_str}"
+        pnl_block = (
+            f"<b>{total_sign}{format_idr(total_pnl)}</b> "
+            f"<b>({total_sign}{total_roe_pct:.2f}% @ {lev}x)</b>"
+        )
+        path_block = (
+            f"📈 <code>${format_price(entry)}</code> → <code>${format_price(current)}</code> "
+            f"<b>({price_signed})</b>"
+        )
+
         if action_type == "trailing_stop":
-            trail_px = action.get("trail_price", current)
+            trail_px = float(action.get("trail_price", current) or current)
+            mfe_bit = ""
+            th = float(getattr(pos, "trailing_high", 0) or 0)
+            if th > 0 and entry > 0:
+                if side == "LONG":
+                    mfe = (th - entry) / entry
+                else:
+                    mfe = (entry - th) / entry
+                if mfe > 0:
+                    mfe_bit = f" · Peak <b>{self._signed_pct(mfe)}</b>"
             text = (
-                f"📍 <b>FULL CLOSE — {pos.asset}</b> (Trailing Stop)\n\n"
-                f"  • Entry → Exit : <code>${format_price(entry)}</code> → "
-                f"<code>${format_price(current)}</code>\n"
-                f"  • Trail SL     : <code>${trail_px:,.4f}</code>\n"
-                f"  • <b>TOTAL PnL</b> : <b>{total_sign}{format_idr(total_pnl)} "
-                f"({total_sign}{total_roe_pct:.2f}% ROE @ {lev}x)</b>\n"
-                f"  • Includes     : TP1 + TP2 + sisa (akumulasi)\n"
-                f"  • Status       : 100% ditutup ✅"
+                f"📍 <b>Trailing Stop — {asset} {side}</b> · {head_meta}\n"
+                f"{path_block}{mfe_bit} · Trail <code>${format_price(trail_px)}</code>\n"
+                f"💰 PnL: {pnl_block}"
+            )
+        elif action_type == "profit_lock_stop":
+            text = (
+                f"🛡️ <b>Profit Lock — {asset} {side}</b> · {head_meta}\n"
+                f"📈 <code>${format_price(entry)}</code> → Lock "
+                f"<code>${format_price(pos.stop_loss)}</code> <b>({price_signed})</b>\n"
+                f"💰 PnL: {pnl_block} · <i>TP1 locked, remainder exited above entry</i>"
             )
         elif action_type == "stop_loss":
             text = (
-                f"🛑 <b>FULL CLOSE — {pos.asset}</b> (Stop Loss)\n\n"
-                f"  • Entry → SL   : <code>${format_price(entry)}</code> → "
-                f"<code>${format_price(pos.stop_loss)}</code>\n"
-                f"  • Move         : <code>{price_pct:.2f}%</code> price\n"
-                f"  • <b>TOTAL PnL</b> : <b>{total_sign}{format_idr(total_pnl)} "
-                f"({total_sign}{total_roe_pct:.2f}% ROE @ {lev}x)</b>\n"
-                f"  • Includes     : partials (jika ada) + final SL\n"
-                f"  • Status       : 100% ditutup"
+                f"🛑 <b>Stop Loss — {asset} {side}</b> · {head_meta}\n"
+                f"📈 <code>${format_price(entry)}</code> → SL "
+                f"<code>${format_price(pos.stop_loss)}</code> <b>({price_signed})</b>\n"
+                f"💰 PnL: {pnl_block}"
             )
         elif action_type == "time_exit":
+            if total_pnl > 1e-9:
+                te_emoji, te_tag, te_note = "⏱✅", "Time Exit · Profit", "max hold · green"
+            elif total_pnl < -1e-9:
+                te_emoji, te_tag, te_note = "⏱⚠️", "Time Exit · Loss", "max hold · cut risk"
+            else:
+                te_emoji, te_tag, te_note = "⏱", "Time Exit · Flat", "max hold · flat"
             text = (
-                f"⏱ <b>FULL CLOSE — {pos.asset}</b> (Time Exit)\n\n"
-                f"  • Entry → Exit : <code>${format_price(entry)}</code> → "
-                f"<code>${format_price(current)}</code>\n"
-                f"  • <b>TOTAL PnL</b> : <b>{total_sign}{format_idr(total_pnl)} "
-                f"({total_sign}{total_roe_pct:.2f}% ROE @ {lev}x)</b>\n"
-                f"  • Includes     : TP1 + TP2 + sisa (akumulasi)\n"
-                f"  • Status       : 100% ditutup ✅"
+                f"{te_emoji} <b>{te_tag} — {asset} {side}</b> · {head_meta}\n"
+                f"{path_block}\n"
+                f"💰 PnL: {pnl_block} · <i>{te_note}</i>"
             )
-        elif action_type in ("close_all", "manual"):
+        elif action_type in ("close_all", "manual", "manual_close"):
+            # Profit vs loss tag for manual / close-all
+            if total_pnl > 1e-9:
+                mc_tag = "Manual Close · Profit" if action_type != "close_all" else "Close All · Profit"
+            elif total_pnl < -1e-9:
+                mc_tag = "Manual Close · Loss" if action_type != "close_all" else "Close All · Loss"
+            else:
+                mc_tag = "Manual Close · Flat" if action_type != "close_all" else "Close All · Flat"
+            if action_type == "close_all":
+                mc_tag = mc_tag.replace("Manual Close", "Close All")
             text = (
-                f"🔒 <b>FULL CLOSE — {pos.asset}</b>\n\n"
-                f"  • <b>TOTAL PnL</b> : <b>{total_sign}{format_idr(total_pnl)} "
-                f"({total_sign}{total_roe_pct:.2f}% ROE @ {lev}x)</b>\n"
-                f"  • Status       : 100% ditutup ✅"
+                f"🔒 <b>{mc_tag} — {asset} {side}</b> · {head_meta}\n"
+                f"{path_block}\n"
+                f"💰 PnL: {pnl_block}"
             )
         else:
             msg = action.get("message", "")
@@ -2093,39 +2191,35 @@ class KaraTelegram:
                 await self.send_text(msg, target_chat_id=target_chat_id)
             return
 
-        await self.send_text(text, target_chat_id=target_chat_id)
-
-        # PnL card ONLY on full close — cumulative totals
+        # Cache for on-demand PnL card — never auto-generate
+        gen_markup = None
         try:
             acc_state = await session.get_account_state() if session else None
-            if acc_state:
-                duration_sec = 0.0
-                if getattr(pos, "opened_at", None):
-                    end_ts = getattr(pos, "closed_at", None) or utcnow()
-                    opened = pos.opened_at
-                    if opened.tzinfo is None:
-                        from datetime import timezone as _tz
-                        opened = opened.replace(tzinfo=_tz.utc)
-                    duration_sec = (end_ts - opened).total_seconds()
-                close_data = {
-                    "exit_price": current,
-                    "pnl": total_pnl,
-                    "pnl_pct": total_roe_frac,
-                    "reason": action_type,
-                    "score": getattr(pos, "entry_score", 0) or 0,
-                    "duration_sec": duration_sec,
-                    "hold_minutes": duration_sec / 60.0,
-                }
-                # Auto-generate card once position is fully closed
-                await self.send_pnl_card(pos, close_data, acc_state)
-                # Keep cache for re-request
-                self._pending_pnl_cards[pos.position_id] = {
-                    "pos": pos,
-                    "close_data": close_data,
-                    "account": acc_state,
-                }
+            close_data = {
+                "exit_price": current,
+                "pnl": total_pnl,
+                "pnl_pct": total_roe_frac,
+                "reason": action_type,
+                "score": getattr(pos, "entry_score", 0) or 0,
+                "duration_sec": duration_sec,
+                "hold_minutes": duration_sec / 60.0,
+            }
+            self._pending_pnl_cards[pos.position_id] = {
+                "pos": pos,
+                "close_data": close_data,
+                "account": acc_state,
+                "chat_id": str(target_chat_id) if target_chat_id else None,
+            }
+            gen_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "📊 PnL Card",
+                    callback_data=f"gen_pnl:{pos.position_id}",
+                )
+            ]])
         except Exception as e:
-            log.error(f"[PnLCard] full-close card failed: {e}")
+            log.error(f"[PnLCard] failed to cache pending card data: {e}")
+
+        await self.send_text(text, target_chat_id=target_chat_id, reply_markup=gen_markup)
 
     async def send_hourly_summary(self, acc, open_count: int, target_chat_id: str = None):
         """Send a premium status overview."""
@@ -2155,8 +2249,14 @@ class KaraTelegram:
         )
         await self.send_text(text, target_chat_id=target_chat_id)
 
-    async def send_pnl_card(self, position, close_data: dict, account):
-        """Generate and send a visual PnL card after every position close."""
+    async def send_pnl_card(
+        self,
+        position,
+        close_data: dict,
+        account,
+        target_chat_id: str = None,
+    ):
+        """Generate and send a visual PnL card — only when user requests it."""
         if not self._app:
             return
 
@@ -2180,9 +2280,9 @@ class KaraTelegram:
                 hold_minutes=hold_minutes,
                 leverage=getattr(position, "leverage", 1),
                 score=close_data.get("score", getattr(position, "entry_score", 0) or 0),
-                session_pnl=getattr(account, "daily_pnl", 0),
-                session_pnl_pct=getattr(account, "daily_pnl_pct", 0),
-                total_equity=getattr(account, "total_equity", getattr(account, "balance", 0)),
+                session_pnl=getattr(account, "daily_pnl", 0) if account else 0,
+                session_pnl_pct=getattr(account, "daily_pnl_pct", 0) if account else 0,
+                total_equity=getattr(account, "total_equity", getattr(account, "balance", 0)) if account else 0,
             )
 
             pnl_usd = close_data.get("pnl", 0)
@@ -2216,7 +2316,6 @@ class KaraTelegram:
                 emoji = "🔒"
 
             outcome = "Profit" if pnl_usd >= 0 else "Loss"
-            # Caption always reflects TOTAL accumulated PnL (TP1+TP2+final)
             caption = (
                 f"{emoji} <b>KARA FULL CLOSE — {position.asset} {position.side.value.upper()}</b>\n"
                 f"<i>{trigger_label}. Angka di bawah = total akumulasi semua partial.</i>\n\n"
@@ -2225,11 +2324,10 @@ class KaraTelegram:
                 f"🇮🇩 <code>{pnl_idr_str}</code>"
             )
 
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📊 Detail Posisi", callback_data=f"card_detail:{position.position_id}"),
-            ]])
-
-            chat_ids = list(self._authorized_chat_ids)
+            if target_chat_id:
+                chat_ids = [str(target_chat_id)]
+            else:
+                chat_ids = list(self._authorized_chat_ids)
             for cid in chat_ids:
                 try:
                     await self._app.bot.send_photo(
@@ -2237,7 +2335,6 @@ class KaraTelegram:
                         photo=_io.BytesIO(card_bytes),
                         caption=caption,
                         parse_mode=ParseMode.HTML,
-                        reply_markup=keyboard,
                     )
                 except Exception as e:
                     log.error(f"[PnLCard] Failed to send card to {cid}: {e}")
@@ -2245,12 +2342,12 @@ class KaraTelegram:
 
         except Exception as e:
             log.error(f"[PnLCard] Card generation failed: {e}")
-            # Fallback to text notification
             pnl_usd = close_data.get("pnl", 0)
             sign = "+" if pnl_usd >= 0 else ""
             await self.send_text(
                 f"📊 <b>{position.asset} {position.side.value.upper()}</b> closed\n"
-                f"<code>{sign}{pnl_usd:+.2f} USD</code>"
+                f"<code>{sign}{pnl_usd:+.2f} USD</code>",
+                target_chat_id=target_chat_id,
             )
 
     async def send_trade_update(self, message: str):
@@ -2322,18 +2419,58 @@ class KaraTelegram:
         else:
             action, sig_id = data, ""
 
-        # ── PnL Card on-demand ───────────────────────────────────────
-        if action == "card_detail":
+        # ── PnL Card on-demand (ONLY path that generates the image) ─
+        if action in ("gen_pnl", "card_detail"):
             pending = self._pending_pnl_cards.get(sig_id)
             if not pending:
-                await query.answer("Kartu tidak tersedia (sudah expired atau belum ada data).", show_alert=True)
+                try:
+                    await self.send_text(
+                        "⚠️ Kartu PnL tidak tersedia (expired atau data sudah dibersihkan).",
+                        target_chat_id=chat_id,
+                    )
+                except Exception:
+                    pass
                 return
             try:
-                await self.send_pnl_card(pending["pos"], pending["close_data"], pending["account"])
-                self._pending_pnl_cards.pop(sig_id, None)
+                # Disable button while generating
+                try:
+                    await query.edit_message_reply_markup(
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("⏳ Generating…", callback_data="noop")
+                        ]])
+                    )
+                except Exception:
+                    pass
+                await self.send_pnl_card(
+                    pending["pos"],
+                    pending["close_data"],
+                    pending.get("account"),
+                    target_chat_id=chat_id,
+                )
+                # Keep data for one re-generate; update button
+                try:
+                    await query.edit_message_reply_markup(
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                "📊 Generate PnL lagi",
+                                callback_data=f"gen_pnl:{sig_id}",
+                            )
+                        ]])
+                    )
+                except Exception:
+                    pass
             except Exception as e:
                 log.error(f"[PnLCard] on-demand generation failed: {e}")
-                await query.answer("Gagal generate kartu PnL.", show_alert=True)
+                try:
+                    await self.send_text(
+                        "❌ Gagal generate kartu PnL. Coba lagi sebentar.",
+                        target_chat_id=chat_id,
+                    )
+                except Exception:
+                    pass
+            return
+
+        if action == "noop":
             return
 
         # ── Refresh Logic ───────────────────────────────────────────
@@ -2494,85 +2631,133 @@ class KaraTelegram:
 
         if action == "close_req":
             asset, side_val = sig_id.split(":", 1)
-            pos = next((p for p in session.executor.open_positions if p.asset == asset and p.side.value == side_val), None)
+            pos = next(
+                (p for p in session.executor.open_positions
+                 if p.asset == asset and p.side.value == side_val),
+                None,
+            )
             if not pos:
-                await query.answer("❌ Posisi sudah tidak ada.", show_alert=True)
+                await query.answer("Posisi sudah tidak ada.", show_alert=True)
                 return
-            
-            # Fetch current price for profit display
+
             try:
                 current = await self.hl_client.get_mark_price(asset) if self.hl_client else pos.entry_price
             except Exception:
                 current = pos.entry_price
-                
-            pnl_pct = pos.floating_pct(current) * 100
+
+            from utils.helpers import pnl_roe_fraction
+            lev = max(int(getattr(pos, "leverage", 1) or 1), 1)
             pnl_val = pos.unrealized_pnl(current)
+            # ROE on remaining margin for this open size
+            rem_notional = pos.size_current * pos.entry_price if pos.entry_price else 0.0
+            roe_frac = pnl_roe_fraction(pnl_val, rem_notional, lev) if rem_notional else 0.0
+            roe_pct = roe_frac * 100.0
             sign = "+" if pnl_val >= 0 else ""
-            
+            side_u = side_val.upper()
+            hold_str = "?"
+            try:
+                if pos.opened_at:
+                    opened = pos.opened_at
+                    if opened.tzinfo is None:
+                        opened = opened.replace(tzinfo=timezone.utc)
+                    hold_str = self._fmt_hold_duration(
+                        (datetime.now(timezone.utc) - opened).total_seconds()
+                    )
+            except Exception:
+                pass
+
             text = (
-                f"⚠️ <b>KONFIRMASI CLOSE POSISI</b>\n\n"
-                f"Apakah kamu yakin ingin menutup posisi <b>{asset} {side_val.upper()}</b>?\n\n"
-                f"• Estimasi PnL: <b>{sign}{format_idr(pnl_val)} ({sign}{pnl_pct:.2f}%)</b>\n"
-                f"• Harga Saat Ini: <code>${format_price(current)}</code>\n\n"
-                f"<i>Tindakan ini tidak dapat dibatalkan.</i>"
+                f"<b>Close {asset} {side_u}?</b>\n\n"
+                f"Estimasi: <b>{sign}{format_idr(pnl_val)}</b> "
+                f"<b>({sign}{roe_pct:.2f}% @ {lev}x)</b>\n"
+                f"Entry <code>${format_price(pos.entry_price)}</code> → "
+                f"Now <code>${format_price(current)}</code>\n"
+                f"Hold: {hold_str} · {lev}x\n\n"
+                f"<i>Tindakan ini final.</i>"
             )
-            
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Ya, Close Sekarang", callback_data=f"close_confirm:{asset}:{side_val}")],
-                [InlineKeyboardButton("❌ Batal", callback_data="close_cancel")]
+                [InlineKeyboardButton("Confirm close", callback_data=f"close_confirm:{asset}:{side_val}")],
+                [InlineKeyboardButton("Cancel", callback_data="close_cancel")],
             ])
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
             return
 
         if action == "close_confirm":
             asset, side_val = sig_id.split(":", 1)
-            pos = next((p for p in session.executor.open_positions if p.asset == asset and p.side.value == side_val), None)
+            pos = next(
+                (p for p in session.executor.open_positions
+                 if p.asset == asset and p.side.value == side_val),
+                None,
+            )
             if not pos:
-                await query.answer("❌ Gagal: Posisi tidak ditemukan atau sudah tertutup.", show_alert=True)
+                await query.answer("Posisi tidak ditemukan atau sudah tertutup.", show_alert=True)
                 return
-                
-            await query.edit_message_text(f"⏳ Menutup posisi <b>{asset}</b>...", parse_mode=ParseMode.HTML)
-            
+
+            await query.edit_message_text(
+                f"Closing <b>{asset}</b>…", parse_mode=ParseMode.HTML
+            )
+
             try:
-                current = await self.hl_client.get_mark_price(asset)
+                current = await self.hl_client.get_mark_price(asset) if self.hl_client else pos.entry_price
             except Exception:
                 current = pos.entry_price
-                
-            res = await session.executor.close_position(pos.position_id, current, reason="manual_close")
+
+            pos_id = pos.position_id
+            res = await session.executor.close_position(pos_id, current, reason="manual")
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
             if res:
-                pnl = res.get("pnl", 0)
-                sign = "+" if pnl >= 0 else ""
-                await query.message.reply_html(
-                    f"✅ <b>Posisi {asset} BERHASIL DITUTUP!</b>\n"
-                    f"• Realized PnL: <b>{sign}{format_idr(pnl)}</b>\n"
-                    f"• Harga Exit: <code>${format_price(current)}</code>"
+                # Unified exit path → medium text + PnL Card button
+                await self.send_position_event(
+                    res,
+                    {asset: float(res.get("exit_price") or current)},
+                    target_chat_id=chat_id,
                 )
             else:
-                await query.message.reply_html(f"❌ <b>Gagal menutup posisi {asset}.</b>")
-            
-            # Use callback to refresh positions list after a delay or just delete confirmation
-            await query.message.delete()
+                await self.send_text(
+                    f"Gagal menutup posisi <b>{asset}</b>.",
+                    target_chat_id=chat_id,
+                )
+
+            # Refresh open positions list
+            try:
+                await self.cmd_positions(update, ctx)
+            except Exception:
+                pass
             return
 
         if action == "close_cancel":
-            # Just go back to positions list
             await self.cmd_positions(update, ctx)
             return
 
         if action == "close_all_req":
-            count = len(session.executor.open_positions)
+            positions = list(session.executor.open_positions)
+            count = len(positions)
             if count == 0:
                 await query.answer("Tidak ada posisi aktif.", show_alert=True)
                 return
-                
+
+            # Est. total unrealized (ROE not aggregated simply — show $ total)
+            est_total = 0.0
+            for p in positions:
+                try:
+                    px = await self.hl_client.get_mark_price(p.asset) if self.hl_client else p.entry_price
+                except Exception:
+                    px = p.entry_price
+                est_total += p.unrealized_pnl(px)
+            sign = "+" if est_total >= 0 else ""
+
             text = (
-                f"🚨 <b>KONFIRMASI CLOSE SEMUA POSISI</b> 🚨\n\n"
-                f"Tindakan ini akan mencoba menutup ke-<b>{count}</b> posisi yang sedang terbuka secara paksa.\n\n"
-                "Yakin ingin melanjutkan?"
+                f"<b>Close all · {count} positions?</b>\n\n"
+                f"Est. open PnL: <b>{sign}{format_idr(est_total)}</b>\n\n"
+                f"<i>Tindakan ini final.</i>"
             )
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⚠️ YA, CLOSE SEMUA! ⚠️", callback_data="close_all_confirm")],
-                [InlineKeyboardButton("❌ Batal", callback_data="close_cancel")]
+                [InlineKeyboardButton("Confirm all", callback_data="close_all_confirm")],
+                [InlineKeyboardButton("Cancel", callback_data="close_cancel")],
             ])
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
             return
@@ -2582,26 +2767,50 @@ class KaraTelegram:
             if not positions:
                 await query.answer("Posisi sudah kosong.", show_alert=True)
                 return
-                
-            await query.edit_message_text(f"⏳ Mencoba menutup {len(positions)} posisi...", parse_mode=ParseMode.HTML)
-            
+
+            n = len(positions)
+            await query.edit_message_text(
+                f"Closing {n} positions…", parse_mode=ParseMode.HTML
+            )
+
             prices = {}
             for p in positions:
                 try:
-                    prices[p.asset] = await self.hl_client.get_mark_price(p.asset) if self.hl_client else p.entry_price
-                except:
+                    prices[p.asset] = (
+                        await self.hl_client.get_mark_price(p.asset)
+                        if self.hl_client else p.entry_price
+                    )
+                except Exception:
                     prices[p.asset] = p.entry_price
-            
+
             results = await session.executor.close_all_positions(prices)
-            total_pnl = sum(r.get("pnl", 0) for r in results)
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+            # One notif per position (each with PnL Card), same as auto exits
+            for res in results:
+                asset = res.get("asset") or ""
+                exit_px = float(res.get("exit_price") or prices.get(asset) or 0)
+                await self.send_position_event(
+                    res,
+                    {asset: exit_px} if asset else prices,
+                    target_chat_id=chat_id,
+                )
+
+            total_pnl = sum(float(r.get("pnl", 0) or 0) for r in results)
             sign = "+" if total_pnl >= 0 else ""
-            
-            await query.message.reply_html(
-                f"🚨 <b>MASSIVE CLOSE SELESAI!</b>\n\n"
-                f"• Posisi ditutup: {len(results)}/{len(positions)}\n"
-                f"• Total PnL: <b>{sign}{format_idr(total_pnl)}</b>"
+            await self.send_text(
+                f"<b>Close all done</b> · {len(results)}/{n} · "
+                f"Total <b>{sign}{format_idr(total_pnl)}</b>",
+                target_chat_id=chat_id,
             )
-            await query.message.delete()
+
+            try:
+                await self.cmd_positions(update, ctx)
+            except Exception:
+                pass
             return
 
         # ── TOS AGREE ──────────────────────────────────────────────────

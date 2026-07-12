@@ -2,11 +2,12 @@ import logging
 
 log = logging.getLogger("FeatureEngine")
 
-def extract_live_features(score: int, meta_delta: int, bd, funding_rate: float, realized_vol: float, trend_pct: float) -> list:
+def extract_live_features(score: int, meta_delta: int, bd, funding_rate: float, realized_vol: float, trend_pct: float,
+                          micro_risk_pct: float = 0.0, entry_location_quality: str = "unknown",
+                          trade_mode: str = "standard") -> list:
     """
     Extract perfectly aligned feature array for the Intelligence Model.
-    Must match the exact order of IntelligenceModel.get_features():
-    [score, meta_delta, oi_score, liq_score, ob_score, session_bonus, funding_rate, realized_vol, trend_pct]
+    Must match IntelligenceModel.get_features(). Exit outcomes never enter this array.
     """
     try:
         oi_score = float(getattr(bd, "oi_funding_score", 0)) if bd else 0.0
@@ -23,8 +24,11 @@ def extract_live_features(score: int, meta_delta: int, bd, funding_rate: float, 
             session_bonus,
             float(funding_rate),
             float(realized_vol),
-            float(trend_pct)
+            float(trend_pct),
+            float(micro_risk_pct),
+            {"invalid": 0.0, "weak": 1.0, "valid": 2.0, "excellent": 3.0}.get(entry_location_quality, -1.0),
+            1.0 if trade_mode == "scalper" else 0.0,
         ]
     except Exception as e:
         log.error(f"Feature extraction failed: {e}")
-        return [0.0] * 9
+        return [0.0] * 12

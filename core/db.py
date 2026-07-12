@@ -432,6 +432,32 @@ class UserDB:
                 log.error(f"Error loading signal by id {signal_id}: {e}")
         return None
 
+    @staticmethod
+    def meta_pattern_hierarchy(pattern_key: str) -> List[tuple[str, str]]:
+        """Return specific and aggregate keys without guessing asset symbols."""
+        if not pattern_key:
+            return []
+        buckets = ("s72p", "s65_71", "s60_64", "sub60")
+        parts = pattern_key.split("_")
+        if len(parts) >= 2 and "_".join(parts[-2:]) in buckets:
+            bucket = "_".join(parts[-2:])
+            base_parts = parts[:-2]
+        elif parts and parts[-1] in buckets:
+            bucket = parts[-1]
+            base_parts = parts[:-1]
+        else:
+            bucket = ""
+            base_parts = parts
+        if len(base_parts) < 3:
+            return [("specific", pattern_key)]
+        mode, side = base_parts[0], base_parts[-1]
+        asset_side = "_".join(base_parts)
+        keys = [("specific", pattern_key), ("asset_side", asset_side)]
+        if bucket:
+            keys.append(("side_bucket", f"{mode}_{side}_{bucket}"))
+        keys.append(("side", f"{mode}_{side}"))
+        return keys
+
     def update_meta_pattern_outcome(self, pattern_key: str, pnl_usd: float, alpha: float = 0.20):
         """
         Rolling pattern outcome stats:
@@ -445,24 +471,23 @@ class UserDB:
             try:
                 conn = self._get_conn()
                 cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT winrate_ema, pnl_ema, samples FROM meta_pattern_stats WHERE pattern_key = ?",
-                    (pattern_key,)
-                )
-                row = cursor.fetchone()
-                if row:
-                    old_wr, old_pnl, old_n = float(row[0]), float(row[1]), int(row[2])
-                    wr = (1 - alpha) * old_wr + alpha * win
-                    pnl = (1 - alpha) * old_pnl + alpha * float(pnl_usd)
-                    n = old_n + 1
-                else:
-                    wr = win
-                    pnl = float(pnl_usd)
-                    n = 1
-                cursor.execute(
-                    "INSERT OR REPLACE INTO meta_pattern_stats (pattern_key, winrate_ema, pnl_ema, samples, updated_at) VALUES (?, ?, ?, ?, ?)",
-                    (pattern_key, wr, pnl, n, datetime.now(timezone.utc).timestamp())
-                )
+                for _, key in self.meta_pattern_hierarchy(pattern_key):
+                    cursor.execute(
+                        "SELECT winrate_ema, pnl_ema, samples FROM meta_pattern_stats WHERE pattern_key = ?",
+                        (key,)
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        old_wr, old_pnl, old_n = float(row[0]), float(row[1]), int(row[2])
+                        wr = (1 - alpha) * old_wr + alpha * win
+                        pnl = (1 - alpha) * old_pnl + alpha * float(pnl_usd)
+                        n = old_n + 1
+                    else:
+                        wr, pnl, n = win, float(pnl_usd), 1
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO meta_pattern_stats (pattern_key, winrate_ema, pnl_ema, samples, updated_at) VALUES (?, ?, ?, ?, ?)",
+                        (key, wr, pnl, n, datetime.now(timezone.utc).timestamp())
+                    )
                 conn.commit()
             except Exception as e:
                 log.error(f"Error updating meta pattern stats for {pattern_key}: {e}")
@@ -707,6 +732,72 @@ class UserDB:
     def load_trade_history(self, chat_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         return self.get_trade_history(chat_id, limit=limit)
 
+    def get_all_trade_history(
+        self,
+        limit: int = 50_000,
+        since_ts: float | None = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch closed trades across ALL users for weekly AI audit.
+        Returns newest-first, optional since_ts (unix seconds, UTC).
+        """
+        trades: List[Dict[str, Any]] = []
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                if since_ts is not None:
+                    cursor.execute(
+                        """
+                        SELECT data, created_at, pnl_usd, pnl_pct, asset, side, chat_id
+                        FROM trade_history
+                        WHERE created_at >= ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        (float(since_ts), int(limit)),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT data, created_at, pnl_usd, pnl_pct, asset, side, chat_id
+                        FROM trade_history
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        (int(limit),),
+                    )
+                for data_str, created_at, pnl_usd, pnl_pct, asset, side, chat_id in cursor.fetchall():
+                    try:
+                        t = json.loads(data_str) if data_str else {}
+                    except Exception:
+                        t = {}
+                    if not isinstance(t, dict):
+                        t = {}
+                    t.setdefault("type", "close")
+                    t.setdefault("action", t.get("type", "close"))
+                    t.setdefault("asset", asset)
+                    t.setdefault("side", side)
+                    t.setdefault("chat_id", chat_id)
+                    if t.get("pnl") is None and pnl_usd is not None:
+                        t["pnl"] = float(pnl_usd)
+                    if t.get("pnl_pct") is None and pnl_pct is not None:
+                        t["pnl_pct"] = float(pnl_pct)
+                    t["created_at"] = created_at
+                    if "timestamp" not in t or t.get("timestamp") is None:
+                        t["timestamp"] = created_at
+                    trades.append(t)
+                log.info(
+                    "get_all_trade_history: %d trades (limit=%s since=%s) from %s",
+                    len(trades),
+                    limit,
+                    since_ts,
+                    self.db_path,
+                )
+            except Exception as e:
+                log.error(f"Error fetching all trade history: {e}")
+        return trades
+
     def load(self):
         with self._lock:
             if not os.path.exists(self.file_path):
@@ -786,6 +877,55 @@ class UserDB:
         self.users[str(chat_id)] = user
         self.save()
         return user
+
+    def delete_user(self, chat_id: str) -> bool:
+        """Remove user from JSON registry + paper positions/state for that chat."""
+        cid = str(chat_id)
+        removed = False
+        if cid in self.users:
+            del self.users[cid]
+            self.save()
+            removed = True
+        try:
+            self.clear_paper_positions(cid)
+        except Exception as e:
+            log.warning(f"clear_paper_positions({cid}) failed: {e}")
+        try:
+            with self._lock:
+                conn = self._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM paper_state WHERE chat_id = ?", (cid,))
+                conn.commit()
+        except Exception as e:
+            log.warning(f"delete paper_state({cid}) failed: {e}")
+        if removed:
+            log.info(f"🗑️ Deleted user session {cid}")
+        return removed
+
+    def purge_dummy_users(
+        self,
+        dummy_ids: list[str] | None = None,
+    ) -> list[str]:
+        """
+        Remove placeholder / template chat IDs that should never trade.
+        Default: 123456789, 987654321 (from .env examples / old Meridian leftovers).
+        """
+        ids = [str(x) for x in (dummy_ids or ["123456789", "987654321"])]
+        purged: list[str] = []
+        for cid in ids:
+            had_user = cid in self.users
+            self.delete_user(cid)
+            try:
+                self.clear_paper_positions(cid)
+            except Exception:
+                pass
+            if had_user:
+                purged.append(cid)
+            else:
+                # Still report so callers strip Telegram auth state
+                purged.append(cid)
+        log.info(f"🧹 Purged dummy chat_ids: {', '.join(purged)}")
+        return purged
 
 # Global instance
 user_db = UserDB()

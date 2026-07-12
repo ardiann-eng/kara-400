@@ -503,34 +503,55 @@ async def get_ml_meta_patterns():
                 score_bucket = parts[-1]
                 parts = parts[:-1]
 
-            mode = parts[0] if len(parts) >= 3 else "?"
-            side = parts[-1] if len(parts) >= 3 else "?"
-            asset = "_".join(parts[1:-1]) if len(parts) >= 3 else key
-            return mode, asset, side, score_bucket
+            mode = parts[0] if len(parts) >= 2 else "?"
+            side = parts[-1] if len(parts) >= 2 else "?"
+            asset = "_".join(parts[1:-1]) if len(parts) >= 3 else "ALL"
+            level = "specific" if len(parts) >= 3 and score_bucket else \
+                "asset-side" if len(parts) >= 3 else \
+                "side-bucket" if len(parts) == 2 and score_bucket else "side"
+            return mode, asset, side, score_bucket, level
 
         patterns = []
         for r in rows:
             key = r["pattern_key"]
-            mode, asset, side, score_bucket = parse_meta_key(key)
+            mode, asset, side, score_bucket, level = parse_meta_key(key)
             wr = float(r["winrate_ema"] or 0)
             pnl_ema = float(r["pnl_ema"] or 0)
-            ev_status = "boost" if (
-                wr >= config.SIGNAL.meta_boost_threshold
-                and pnl_ema > config.SIGNAL.meta_min_pnl_ema_for_boost
-            ) else "penalty" if (
-                wr <= config.SIGNAL.meta_penalty_threshold
-                or pnl_ema < config.SIGNAL.meta_penalty_pnl_ema
-            ) else "watch"
+            samples = int(r["samples"] or 0)
+            low_ev = wr <= config.SIGNAL.meta_penalty_threshold or pnl_ema < config.SIGNAL.meta_penalty_pnl_ema
+            delta, required = 0, 0
+            if level == "specific":
+                required = config.SIGNAL.meta_boost_samples
+                if samples >= required and wr >= config.SIGNAL.meta_boost_threshold and pnl_ema > config.SIGNAL.meta_min_pnl_ema_for_boost:
+                    delta = config.SIGNAL.meta_specific_boost
+                elif samples >= config.SIGNAL.meta_penalty_samples and low_ev:
+                    delta = config.SIGNAL.meta_specific_penalty
+            elif level == "asset-side":
+                required = config.SIGNAL.meta_penalty_samples
+                if samples >= required and low_ev:
+                    delta = config.SIGNAL.meta_asset_side_penalty
+            elif level == "side-bucket":
+                required = config.SIGNAL.meta_side_bucket_penalty_samples
+                if samples >= required and low_ev:
+                    delta = config.SIGNAL.meta_side_bucket_penalty
+            else:
+                required = config.SIGNAL.meta_side_penalty_samples
+                if samples >= required and low_ev:
+                    delta = config.SIGNAL.meta_side_penalty
+            ev_status = "boost" if delta > 0 else "penalty" if delta < 0 else "watch"
             patterns.append({
                 "key":       key,
                 "mode":      mode,
                 "asset":     asset.upper(),
                 "side":      side.upper(),
                 "score_bucket": score_bucket,
+                "level":     level,
                 "ev_status": ev_status,
+                "active_delta": delta,
+                "required_samples": required,
                 "winrate":   round(wr * 100, 1),
                 "pnl_ema":   round(pnl_ema, 2),
-                "samples":   r["samples"],
+                "samples":   samples,
                 "updated_at": int(r["updated_at"] or 0),
             })
         return {"patterns": patterns}
@@ -603,13 +624,18 @@ async def get_ml_status():
         from intelligence.experience_buffer import experience_buffer
 
         data = experience_buffer.get_training_data()
+        enriched = experience_buffer.get_training_data(enriched_only=True)
         total = len(data)
         wins  = sum(1 for r in data if int(r.get('is_win', 0)) == 1)
         losses = total - wins
         win_rate = (wins / total * 100) if total > 0 else 0.0
 
-        min_samples = getattr(config, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 300)
-        progress_pct = min(total / min_samples * 100, 100.0)
+        min_samples = max(
+            getattr(config, 'INTELLIGENCE_RETRAIN_MIN_SAMPLES', 300),
+            getattr(config, 'INTELLIGENCE_RETRAIN_MIN_ENRICHED_SAMPLES', 300),
+        )
+        enriched_total = len(enriched)
+        progress_pct = min(enriched_total / min_samples * 100, 100.0)
 
         # Recent 20 trades win/loss streak
         recent = data[-20:] if len(data) >= 20 else data
@@ -625,6 +651,7 @@ async def get_ml_status():
             "is_ready":        intelligence_model.is_ready,
             "is_training":     intelligence_model.is_training,
             "total_samples":   total,
+            "enriched_samples": enriched_total,
             "wins":            wins,
             "losses":          losses,
             "win_rate":        round(win_rate, 1),
@@ -640,6 +667,7 @@ async def get_ml_status():
         return {
             "is_ready": False, "is_training": False,
             "total_samples": 0, "wins": 0, "losses": 0,
+            "enriched_samples": 0,
             "win_rate": 0.0, "min_samples": 300, "progress_pct": 0.0,
             "last_train_samples": 0, "avg_win_score": 0.0, "avg_loss_score": 0.0,
             "recent_results": [],

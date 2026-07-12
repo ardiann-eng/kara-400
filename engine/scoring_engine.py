@@ -497,8 +497,26 @@ class ScoringEngine:
             else:
                 signal.breakdown.reasons.append(loc_reason)
 
+            # Carry this level into position management. It is more useful for a
+            # 1m scalp than waiting for the wider ATR/fixed stop to be hit.
+            signal.micro_invalidation_price = loc["invalidation_price"]
+
         signal.meta_pattern_key = pattern_key
         signal.meta_score_delta = meta_delta
+        signal.entry_location_quality = entry_location_quality
+        if getattr(config, "ENABLE_INTELLIGENCE", True):
+            micro_risk = abs((signal.micro_invalidation_price or signal.stop_loss) - signal.entry_price) / signal.entry_price
+            signal.expected_edge = intelligence_model.predict_edge(extract_live_features(
+                score=signal.score,
+                meta_delta=signal.meta_score_delta,
+                bd=signal.breakdown,
+                funding_rate=signal.funding_rate,
+                realized_vol=signal.realized_vol,
+                trend_pct=signal.trend_pct,
+                micro_risk_pct=micro_risk,
+                entry_location_quality=signal.entry_location_quality,
+                trade_mode="scalper",
+            ))
         self._log_signal_marker(
             "scalper",
             signal,
@@ -1603,7 +1621,20 @@ class ScoringEngine:
                 except (TypeError, ValueError, KeyError) as e:
                     rally_detail = f"parse_err={e}"
 
-            cascade_short = long_liq_cascade and mom_red
+            # Base cascade: long-liq cluster + 1m red
+            cascade_raw = long_liq_cascade and mom_red
+            # P1: don't cascade-short into a pump — need 1h red OR 5m not hard-bull
+            cascade_ctx_ok = True
+            if cascade_raw and getattr(config.SIGNAL, "short_cascade_require_red_context", True):
+                price_1h_red = price_change_1h < 0.0
+                five_m_not_bull = not htf_bull_veto
+                cascade_ctx_ok = price_1h_red or five_m_not_bull
+                if not cascade_ctx_ok:
+                    log.debug(
+                        f"[{asset}] SHORT cascade blocked (P1 pump context): "
+                        f"price_1h={price_change_1h*100:+.2f}% {htf_note} — need red 1h or 5m not bull"
+                    )
+            cascade_short = cascade_raw and cascade_ctx_ok
 
             if breakdown_short:
                 conf_bits = []
@@ -1632,7 +1663,8 @@ class ScoringEngine:
             elif cascade_short:
                 oi_reasons.append(
                     f"SHORT setup: cascade short "
-                    f"(long_liq_cluster=True, mom_red=True, liq_b/s={liq_bull}/{liq_bear})"
+                    f"(long_liq_cluster=True, mom_red=True, liq_b/s={liq_bull}/{liq_bear}, "
+                    f"ctx_1h={price_change_1h*100:+.2f}%, {htf_note})"
                 )
             else:
                 log.debug(
@@ -1640,7 +1672,8 @@ class ScoringEngine:
                     f"(price_1h={price_change_1h:.4f}, oi_chg={oi_chg:.4f}, "
                     f"cvd_bear={cvd_bearish}, ob_bear={ob_bearish}, "
                     f"structure_bear={structure_bear}, long_liq_cascade={long_liq_cascade}, "
-                    f"mom_red={mom_red}, rally={rally_detail}, fr={fr:.6f})"
+                    f"mom_red={mom_red}, cascade_raw={cascade_raw}, cascade_ctx={cascade_ctx_ok}, "
+                    f"rally={rally_detail}, fr={fr:.6f}, {htf_note})"
                 )
                 return None, 0
 
@@ -1705,8 +1738,21 @@ class ScoringEngine:
         final_multiplier = vol_multiplier * trend_multiplier
         final_score = int(raw_score * final_multiplier)
 
-        # Tambahkan session bonus setelah multiplier sehingga nilainya flat (tidak ikut dimultiplikasi)
-        final_score += session_bonus
+        # Session bonus after multiplier (flat, not multiplied).
+        # P1: counter-trend SHORT only gets a fraction of session bonus
+        # (was free +14 into pumps → false high scores).
+        applied_session = int(session_bonus)
+        if side == Side.SHORT and session_bonus > 0:
+            counter_trend = (trend_pct > 0.0) or bool(htf_bull_veto)
+            if counter_trend:
+                damp = float(getattr(config.SIGNAL, "short_countertrend_session_mult", 0.35))
+                damp = max(0.0, min(damp, 1.0))
+                applied_session = int(round(session_bonus * damp))
+                session_reasons = list(session_reasons) + [
+                    f"Session short counter-trend damp ×{damp:.2f} "
+                    f"({session_bonus}→{applied_session}; trend_24h={trend_pct*100:+.1f}%, {htf_note})"
+                ]
+        final_score += applied_session
         final_score = max(0, min(final_score, 100))
         
         log.debug(f"[VOL] {asset}: realized_vol={realized_vol*100:.2f}%/day regime={vol_regime.value.upper()} multiplier={vol_multiplier}x")
@@ -1736,7 +1782,7 @@ class ScoringEngine:
             oi_funding_score=int(oi_bull + oi_bear),
             liquidation_score=int(liq_bull + liq_bear),
             orderbook_score=int(ob_bull + ob_bear),
-            session_bonus=int(session_bonus),
+            session_bonus=int(applied_session),
             regime_multiplier=final_multiplier,
             total_bull=int(total_bull),
             total_bear=int(total_bear),
@@ -2023,7 +2069,10 @@ class ScoringEngine:
                 bd=breakdown,
                 funding_rate=funding_rate,
                 realized_vol=realized_vol,
-                trend_pct=trend_pct
+                trend_pct=trend_pct,
+                micro_risk_pct=abs(stop_loss - mark_price) / mark_price,
+                entry_location_quality="unknown",
+                trade_mode="standard",
             )
             expected_edge = intelligence_model.predict_edge(features)
         else:
@@ -2126,34 +2175,44 @@ class ScoringEngine:
         else:
             score_bucket = "sub60"
 
-        legacy_pattern_key = f"{mode.lower()}_{asset}_{side.value}"
-        pattern_key = f"{legacy_pattern_key}_{score_bucket}"
-        stats = user_db.get_meta_pattern_stats(pattern_key)
+        asset_side_key = f"{mode.lower()}_{asset}_{side.value}"
+        pattern_key = f"{asset_side_key}_{score_bucket}"
+        side_bucket_key = f"{mode.lower()}_{side.value}_{score_bucket}"
+        side_key = f"{mode.lower()}_{side.value}"
 
-        if not stats or stats["samples"] < config.SIGNAL.meta_min_samples:
-            legacy_stats = user_db.get_meta_pattern_stats(legacy_pattern_key)
-            if legacy_stats and legacy_stats["samples"] >= config.SIGNAL.meta_min_samples:
-                legacy_wr = float(legacy_stats["winrate_ema"])
-                legacy_pnl = float(legacy_stats.get("pnl_ema", 0.0))
-                if legacy_wr <= config.SIGNAL.meta_penalty_threshold or legacy_pnl < config.SIGNAL.meta_penalty_pnl_ema:
-                    return -12, (
-                        f"Meta-learning: legacy LOW-EV asset-side pattern "
-                        f"(WR {legacy_wr*100:.0f}%, pnl_ema {legacy_pnl:+.2f}) -> -12"
-                    ), pattern_key
-            return 0, "", pattern_key
-            
-        wr = stats["winrate_ema"]
-        pnl_ema = float(stats.get("pnl_ema", 0.0))
-        delta = 0
-        reason = ""
-        
-        if wr >= config.SIGNAL.meta_boost_threshold and pnl_ema > config.SIGNAL.meta_min_pnl_ema_for_boost:
-            delta = 8
-            reason = f"🧠 Meta-learning: HI-WR pattern ({wr*100:.0f}%) → +8"
-        elif wr <= config.SIGNAL.meta_penalty_threshold or pnl_ema < config.SIGNAL.meta_penalty_pnl_ema:
-            delta = -12
-            reason = f"🧠 Meta-learning: LO-WR pattern ({wr*100:.0f}%) → -12"
-            
-        # Clamp delta
-        delta = max(-config.SIGNAL.meta_max_delta, min(config.SIGNAL.meta_max_delta, delta))
-        return delta, reason, pattern_key
+        def is_low_ev(stats: Optional[Dict]) -> bool:
+            return bool(stats) and (
+                float(stats["winrate_ema"]) <= config.SIGNAL.meta_penalty_threshold
+                or float(stats.get("pnl_ema", 0.0)) < config.SIGNAL.meta_penalty_pnl_ema
+            )
+
+        specific = user_db.get_meta_pattern_stats(pattern_key)
+        if specific and specific["samples"] >= config.SIGNAL.meta_boost_samples:
+            wr = float(specific["winrate_ema"])
+            pnl = float(specific.get("pnl_ema", 0.0))
+            if wr >= config.SIGNAL.meta_boost_threshold and pnl > config.SIGNAL.meta_min_pnl_ema_for_boost:
+                delta = config.SIGNAL.meta_specific_boost
+                return delta, (
+                    f"Meta specific n={specific['samples']} WR {wr*100:.0f}% EV {pnl:+.2f} -> {delta:+d}"
+                ), pattern_key
+            if is_low_ev(specific):
+                delta = config.SIGNAL.meta_specific_penalty
+                return delta, (
+                    f"Meta specific low-EV n={specific['samples']} WR {wr*100:.0f}% EV {pnl:+.2f} -> {delta:+d}"
+                ), pattern_key
+
+        # Broader keys never boost. They only reduce repeated loss exposure while
+        # preserving 1m scorer as primary source of conviction.
+        for level, key, min_samples, delta in (
+            ("asset-side", asset_side_key, config.SIGNAL.meta_penalty_samples, config.SIGNAL.meta_asset_side_penalty),
+            ("side-bucket", side_bucket_key, config.SIGNAL.meta_side_bucket_penalty_samples, config.SIGNAL.meta_side_bucket_penalty),
+            ("side", side_key, config.SIGNAL.meta_side_penalty_samples, config.SIGNAL.meta_side_penalty),
+        ):
+            stats = user_db.get_meta_pattern_stats(key)
+            if stats and stats["samples"] >= min_samples and is_low_ev(stats):
+                return delta, (
+                    f"Meta {level} low-EV n={stats['samples']} WR {stats['winrate_ema']*100:.0f}% "
+                    f"EV {stats.get('pnl_ema', 0.0):+.2f} -> {delta:+d}"
+                ), pattern_key
+
+        return 0, "", pattern_key
