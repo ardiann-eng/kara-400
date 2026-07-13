@@ -1,1 +1,1 @@
-from .schemas import *
+"""KARA application package."""

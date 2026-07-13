@@ -23,18 +23,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 from config import MODE, WATCHED_ASSETS, SIGNAL
 from models.schemas import ExecutionMode
+from models.schemas import BotMode
 from data.hyperliquid_client import HyperliquidClient
 from data.ws_client import KaraWebSocketClient, MarketDataCache, market_cache
 from engine.scoring_engine import ScoringEngine
 from risk.risk_manager import RiskManager
 from execution.paper_executor import PaperExecutor
-from execution.live_executor import LiveExecutor
 from notify.telegram import KaraTelegram
 from dashboard.app import init_dashboard, run_dashboard, broadcast
 from core.mode_manager import mode_manager
 from utils.helpers import utcnow
 from core.db import user_db
 from core.user_session import UserSession
+from core.startup_validation import StartupConfigurationError, validate_startup_config
+from core.startup_validation import validate_bybit_preflight
+from data.bybit_client import BybitClient
+from execution.bybit_executor import BybitExecutor
+from core.bybit_session_lifecycle import BybitSessionLifecycle
 
 # ──────────────────────────────────────────────
 # LOGGING SETUP
@@ -73,6 +78,13 @@ class KaraBot:
     def __init__(self):
         # Clients
         self.hl_client  = HyperliquidClient()
+        self.bybit_client: Optional[BybitClient] = None
+        self._bybit_lifecycle = BybitSessionLifecycle(lambda: BybitClient(
+            api_key="",
+            api_secret="",
+            testnet=config.BYBIT_TESTNET,
+            recv_window=config.BYBIT_RECV_WINDOW,
+        ))
         self.ws_client  = KaraWebSocketClient()
         self.cache      = market_cache
 
@@ -149,14 +161,24 @@ class KaraBot:
         log.info("=" * 60)
         log.info(f" KARA Bot starting")
         log.info(f" 📡 Data source : {config.DATA_SOURCE.upper()} (live prices)")
-        log.info(f" 📄 Execution   : {config.TRADE_MODE.upper()} (simulated trades)")
+        log.info(
+            f" 📄 Execution   : {config.TRADE_MODE.upper()} "
+            f"via {config.EXECUTION_EXCHANGE.upper()}"
+        )
 
-        if config.TRADE_MODE == "live" and not config.PRIVATE_KEY:
-            log.error(" LIVE mode requires HL_PRIVATE_KEY in .env!")
-            sys.exit(1)
+        try:
+            validate_startup_config(config)
+        except StartupConfigurationError as exc:
+            log.critical(f"Unsafe startup configuration: {exc}")
+            raise
 
         # Connect to Hyperliquid
         await self.hl_client.connect()
+
+        if config.TRADE_MODE == "live" or any(
+            u.config.bot_mode == BotMode.LIVE for u in user_db.get_all_users()
+        ):
+            await self.ensure_bybit_public_client()
 
         # Load market list (always top volume as requested)
         log.info("Loading top volume markets...")
@@ -234,15 +256,22 @@ class KaraBot:
         for u in user_db.get_all_users():
             if str(u.chat_id) in _dummy:
                 continue
-            session = UserSession(u, mode_manager=self.mode_mgr, hl_client=self.hl_client)
+            session = UserSession(
+                u,
+                mode_manager=self.mode_mgr,
+                hl_client=self.hl_client,
+                bybit_client=self.bybit_client,
+                bybit_registry=(
+                    self.bybit_client.symbol_registry if self.bybit_client else None
+                ),
+                persistence=user_db,
+                alert_sink=lambda message, cid=str(u.chat_id): self.telegram.send_text(
+                    message, target_chat_id=cid
+                ),
+            )
             if hasattr(session.executor, 'load_from_db'):
                 session.executor.load_from_db(u.chat_id)
-            # Live mode: sync open positions from chain to prevent orphaned positions after crash
-            if hasattr(session.executor, 'load_from_chain'):
-                try:
-                    await session.executor.load_from_chain()
-                except Exception as e:
-                    log.error(f"[LIVE] Chain sync failed for {u.chat_id}: {e}")
+            await session.initialize()
             self.sessions[u.chat_id] = session
         log.info(f"Loaded {len(self.sessions)} user sessions.")
 
@@ -638,26 +667,55 @@ class KaraBot:
 
             await asyncio.sleep(1)
 
+    async def ensure_bybit_public_client(self) -> BybitClient:
+        """Lazily initialize public Bybit metadata for first live user."""
+        was_ready = bool(self.bybit_client or self._bybit_lifecycle.public_client)
+        if self.bybit_client and not self._bybit_lifecycle.public_client:
+            self._bybit_lifecycle.public_client = self.bybit_client
+        client = await self._bybit_lifecycle.ensure_public_client()
+        self.bybit_client = client
+        if not was_ready:
+            log.info("Bybit public metadata ready (testnet=%s)", config.BYBIT_TESTNET)
+        return client
+
+    async def close_user_session(self, chat_id: str) -> Optional[UserSession]:
+        session = self.sessions.pop(str(chat_id), None)
+        if not session:
+            return None
+        await self._bybit_lifecycle.close_session(session)
+        return session
+
     async def get_session(self, chat_id: str) -> Optional[UserSession]:
-            if str(chat_id) not in self.sessions:
-                user = user_db.get_user(str(chat_id))
+            chat_id = str(chat_id)
+            if chat_id not in self.sessions:
+                user = user_db.get_user(chat_id)
                 if user:
-                    session = UserSession(user, mode_manager=self.mode_mgr, hl_client=self.hl_client)
+                    if user.config.bot_mode == BotMode.LIVE:
+                        await self.ensure_bybit_public_client()
+                    session = UserSession(
+                        user,
+                        mode_manager=self.mode_mgr,
+                        hl_client=self.hl_client,
+                        bybit_client=self.bybit_client,
+                        bybit_registry=(
+                            self.bybit_client.symbol_registry
+                            if self.bybit_client else None
+                        ),
+                        persistence=user_db,
+                        alert_sink=lambda message, cid=str(user.chat_id): self.telegram.send_text(
+                            message, target_chat_id=cid
+                        ),
+                    )
                     # Restore persisted state (balance + open positions) from DB
                     if hasattr(session.executor, 'load_from_db'):
                         session.executor.load_from_db(user.chat_id)
                     try:
                         await session.initialize()
-                    except Exception as e:
-                        log.error(f"❌ Failed to initialize session for {chat_id}: {e}")
-                    # Live mode: sync open positions from chain
-                    if hasattr(session.executor, 'load_from_chain'):
-                        try:
-                            await session.executor.load_from_chain()
-                        except Exception as e:
-                            log.error(f"[LIVE] Chain sync failed for {user.chat_id}: {e}")
-                    self.sessions[str(chat_id)] = session
-            return self.sessions.get(str(chat_id))
+                    except Exception:
+                        await self._bybit_lifecycle.close_session(session)
+                        raise
+                    self.sessions[chat_id] = session
+            return self.sessions.get(chat_id)
 
     async def _broadcast_heartbeat(self):
         """Dashboard heartbeat - handles real-time updates for the web UI."""
@@ -993,10 +1051,15 @@ class KaraBot:
                 )
 
 
-            # ATR dihitung untuk localize_for_user saja.
-            # SL aktual diset oleh calculate_levels() di bawah — bukan dari atr_value ini.
+            # Native scalper levels are calibrated to the 12-18 minute horizon and
+            # remain authoritative. ATR localization is only a standard-mode fallback
+            # before calculate_levels() applies final regime-aware standard levels.
             atr_value = 0.0
-            if getattr(config, 'RISK', None) and getattr(config.RISK, 'enable_atr_sl', False):
+            if (
+                user_mode != 'scalper'
+                and getattr(config, 'RISK', None)
+                and getattr(config.RISK, 'enable_atr_sl', False)
+            ):
                 try:
                     candles = await self.hl_client.get_candles(
                         user_signal.asset, "1m", limit=config.RISK.atr_lookback
@@ -1006,10 +1069,8 @@ class KaraBot:
                 except Exception as e:
                     log.debug(f"ATR calc skipped for {user_signal.asset}: {e}")
 
-            # Always localize as scalper when forced — sets trade_mode + scalper levels
+            # For scalper this only localizes mode/leverage; native SL/TP stay intact.
             user_signal.localize_for_user(user_mode, atr_value=atr_value)
-            if is_scl:
-                user_signal.trade_mode = "scalper"
 
             # ── Vol-aware SL/TP recalculation (Fix 1 + Fix 4) ────────────────
             # calculate_levels() pakai vol_cache dari scorer — zero API calls.
@@ -1153,23 +1214,57 @@ class KaraBot:
     async def _update_positions(self):
         """Update unrealized PnL and check TP/SL for all users."""
         # 1. Collect all unique assets across all users
-        all_open_assets = set()
+        hl_open_assets = set()
+        bybit_assets = set()
         for chat_id, session in self.sessions.items():
             if hasattr(session.executor, 'open_positions'):
                 for pos in session.executor.open_positions:
-                    all_open_assets.add(pos.asset)
+                    if isinstance(session.executor, BybitExecutor):
+                        bybit_assets.add(pos.asset)
+                    else:
+                        hl_open_assets.add(pos.asset)
         
         # 2. Fetch prices ONCE — pakai fast path (no semaphore, no sleep)
         # Position monitor TIDAK boleh diblok oleh data scan semaphore
-        prices = {}
-        for asset in all_open_assets:
+        hl_prices = {}
+        bybit_prices = {}
+        for asset in hl_open_assets:
             try:
-                prices[asset] = await self.hl_client.get_mark_price_fast(asset)
+                hl_prices[asset] = await self.hl_client.get_mark_price_fast(asset)
             except Exception as e:
-                log.debug(f"Failed to fetch market price for {asset}: {e}")
+                log.debug(f"Failed to fetch Hyperliquid price for {asset}: {e}")
+        if self.bybit_client:
+            for asset in bybit_assets:
+                try:
+                    spec = self.bybit_client.symbol_registry.resolve(asset)
+                    bybit_prices[asset] = await self.bybit_client.get_mark_price(
+                        spec.symbol
+                    )
+                except Exception as e:
+                    log.error(f"Failed to fetch Bybit price for {asset}: {e}")
 
         # 3. Apply updates to each user
         for chat_id, session in self.sessions.items():
+            prices = (
+                bybit_prices
+                if isinstance(session.executor, BybitExecutor)
+                else hl_prices
+            )
+            if isinstance(session.executor, BybitExecutor):
+                try:
+                    if getattr(session, "bybit_ws", None) and session.bybit_ws.stale:
+                        await session.bybit_alerts.emit(
+                            "ws_stale",
+                            "WARNING BYBIT: private WebSocket stale/disconnected; REST fallback tetap aktif.",
+                        )
+                    await session.executor.reconcile_if_due()
+                except Exception as e:
+                    log.error(f"[BYBIT] Reconciliation failed for {chat_id}: {e}")
+                    if getattr(session, "bybit_alerts", None):
+                        await session.bybit_alerts.emit(
+                            "reconciliation_failed",
+                            "CRITICAL BYBIT: reconciliation gagal; entry baru harus dianggap tidak aman sampai state exchange pulih.",
+                        )
             try:
                 acc = await session.get_account_state()
             except Exception as e:
@@ -1295,8 +1390,8 @@ class KaraBot:
         # cause confusion when reported as "open" after they've been SL/TP closed.
         try:
             for chat_id, session in list(self.sessions.items()):
-                # Only alert for live executor instances
-                if not isinstance(session.executor, LiveExecutor):
+                # Any future Bybit live executor must expose BotMode.LIVE.
+                if getattr(session.executor, "mode", None) != BotMode.LIVE:
                     continue
                 open_pos = getattr(session.executor, 'open_positions', [])
                 if not open_pos:
@@ -1306,6 +1401,22 @@ class KaraBot:
                     f"[SHUTDOWN] User {chat_id} has {len(open_pos)} open live position(s): {assets}. "
                     "Bot is stopping — positions remain on-chain. User must manage manually."
                 )
+                try:
+                    unprotected = await session.executor.audit_protection()
+                    if unprotected:
+                        log.critical(
+                            "[SHUTDOWN] Unprotected Bybit positions for %s: %s",
+                            chat_id,
+                            ", ".join(unprotected),
+                        )
+                        await self.telegram.send_text(
+                            "<b>Bahaya: posisi tanpa hard SL saat shutdown:</b> <code>"
+                            + ", ".join(unprotected)
+                            + "</code>",
+                            target_chat_id=chat_id,
+                        )
+                except Exception as e:
+                    log.error(f"[SHUTDOWN] Protection audit failed for {chat_id}: {e}")
                 try:
                     await self.telegram.send_text(
                         f"⚠️ <b>KARA sedang restart.</b>\n\n"
@@ -1330,6 +1441,26 @@ class KaraBot:
         try:
             await self.hl_client.close()
         except: pass
+
+        for session in self.sessions.values():
+            private_bybit = getattr(session, "bybit_client", None)
+            private_ws = getattr(session, "bybit_ws", None)
+            if private_ws:
+                try:
+                    await private_ws.stop()
+                except Exception as e:
+                    log.warning(f"User Bybit WS close warning: {e}")
+            if private_bybit:
+                try:
+                    await private_bybit.close()
+                except Exception as e:
+                    log.warning(f"User Bybit close warning: {e}")
+
+        if self.bybit_client:
+            try:
+                await self.bybit_client.close()
+            except Exception as e:
+                log.warning(f"Bybit close warning: {e}")
 
         log.info("✅ KARA stopped. Goodbye!")
 

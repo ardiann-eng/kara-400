@@ -21,6 +21,8 @@ from models.schemas import (
 from risk.risk_manager import RiskManager
 from utils.helpers import gen_id, format_usd, utcnow
 from utils.excel_logger import get_excel_logger
+from execution.base_executor import BaseExecutor
+from execution.profit_lock import paper_profit_lock_fill
 
 log = logging.getLogger("kara.paper_exec")
 
@@ -28,7 +30,7 @@ log = logging.getLogger("kara.paper_exec")
 PAPER_INITIAL_BALANCE = 1000.0
 
 
-class PaperExecutor:
+class PaperExecutor(BaseExecutor):
     """
     Paper (simulated) execution engine.
     All trades stored in-memory; persisted to SQLite via main.py.
@@ -300,6 +302,7 @@ class PaperExecutor:
         position_id: str,
         current_price: float,
         reason: str = "manual",
+        close_ratio: float = 1.0,
     ) -> Optional[Dict]:
         pos = self._positions.get(position_id)
         if not pos or pos.status == PositionStatus.CLOSED:
@@ -463,8 +466,20 @@ class PaperExecutor:
         """Handle TP1, TP2, trailing, or SL partial/full close."""
         close_ratio = action["close_ratio"]
         close_size  = pos.size_current * close_ratio
-        
-        price_move = pos.floating_pct(current_price)
+
+        execution_price = current_price
+        if action["action"] == "profit_lock_stop":
+            # Paper prices arrive on a polling cadence. Once a protected stop is
+            # crossed, model stop execution from the trigger plus closing spread;
+            # using the later poll price falsely turns an armed lock into a loss.
+            trigger_price = float(action.get("trigger_price", pos.stop_loss))
+            execution_price = paper_profit_lock_fill(
+                trigger_price,
+                pos.side,
+                self._simulate_fill,
+            )
+
+        price_move = pos.floating_pct(execution_price)
         notional_closed = close_size * pos.entry_price
         partial_pnl = price_move * notional_closed
         lev = max(int(getattr(pos, "leverage", 1) or 1), 1)
@@ -484,7 +499,7 @@ class PaperExecutor:
         pos.pnl_realized   += partial_pnl
         pos.margin_usd     -= margin_to_release
         pos.size_current   -= close_size
-        pos.pnl_unrealized = pos.unrealized_pnl(current_price)
+        pos.pnl_unrealized = pos.unrealized_pnl(execution_price)
 
         fully_closed = False
         if action["action"] == "tp1":
@@ -530,7 +545,8 @@ class PaperExecutor:
                     "side":             pos.side.value,
                     "reason":           action["action"],
                     "entry_price":      pos.entry_price,
-                    "exit_price":       current_price,
+                    "exit_price":       execution_price,
+                    "trigger_price":    action.get("trigger_price"),
                     "size":             pos.size_initial,
                     "notional":         full_notional,
                     "pnl":              pos.pnl_realized,   # cumulative TP1+TP2+final
@@ -587,7 +603,7 @@ class PaperExecutor:
 
                 log.info(
                     f" [PAPER] FULL CLOSE {pos.asset} {pos.side.value.upper()} "
-                    f"@ {current_price} | TOTAL PnL: {format_usd(pos.pnl_realized)} "
+                    f"@ {execution_price} | TOTAL PnL: {format_usd(pos.pnl_realized)} "
                     f"ROE={total_roe*100:.2f}% @{lev}x ({action['action']})"
                 )
 
@@ -618,7 +634,8 @@ class PaperExecutor:
             "notional_closed": notional_closed,
             "close_ratio": close_ratio,
             "fully_closed": fully_closed,
-            "exit_price": current_price,
+            "exit_price": execution_price,
+            "trigger_price": action.get("trigger_price"),
             "position_id": pos.position_id,
         }
 

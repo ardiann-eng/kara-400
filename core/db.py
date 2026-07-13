@@ -60,6 +60,83 @@ class UserDB:
             self._shared_conn = sqlite3.connect(self.db_path, check_same_thread=False)
         return self._shared_conn
 
+    def save_weak_confirmation_event(
+        self,
+        event_id: str,
+        asset: str,
+        side: str,
+        status: str,
+        signal_price: float,
+        observed_price: Optional[float],
+        score: int,
+        armed_at: float,
+        decided_at: float,
+    ):
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO weak_confirmation_events
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        asset,
+                        side,
+                        status,
+                        signal_price,
+                        observed_price,
+                        score,
+                        armed_at,
+                        decided_at,
+                    ),
+                )
+                conn.commit()
+            except Exception as exc:
+                log.error(f"Failed to save weak confirmation event: {exc}")
+
+    def save_weak_confirmation_outcome(
+        self,
+        event_id: str,
+        asset: str,
+        side: str,
+        signal_price: float,
+        observed_price: float,
+        metrics: dict,
+        completed_at: float,
+    ):
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO weak_confirmation_outcomes (
+                        event_id, asset, side, signal_price, observed_price,
+                        mfe_pct, mae_pct, final_return_pct, tp1_hit, tp2_hit,
+                        sl_hit, completed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        asset,
+                        side,
+                        signal_price,
+                        observed_price,
+                        metrics["mfe_pct"],
+                        metrics["mae_pct"],
+                        metrics["final_return_pct"],
+                        int(metrics["tp1_hit"]),
+                        int(metrics["tp2_hit"]),
+                        int(metrics["sl_hit"]),
+                        completed_at,
+                    ),
+                )
+                conn.commit()
+            except Exception as exc:
+                log.error(f"Failed to save weak confirmation outcome: {exc}")
+
     def _init_sqlite(self):
         """Initialize SQLite tables for high-frequency or structured persistence."""
         with self._lock:
@@ -166,6 +243,58 @@ class UserDB:
                     )
                 """)
 
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS bybit_positions (
+                        position_id TEXT PRIMARY KEY,
+                        chat_id     TEXT NOT NULL,
+                        symbol      TEXT NOT NULL,
+                        side        TEXT NOT NULL,
+                        live_status TEXT NOT NULL,
+                        entry_order_link_id TEXT,
+                        data        TEXT NOT NULL,
+                        updated_at  REAL NOT NULL
+                    )
+                """)
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS weak_confirmation_events (
+                        event_id TEXT PRIMARY KEY,
+                        asset TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        signal_price REAL NOT NULL,
+                        observed_price REAL,
+                        score INTEGER,
+                        armed_at REAL NOT NULL,
+                        decided_at REAL NOT NULL
+                    )
+                """)
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS weak_confirmation_outcomes (
+                        event_id TEXT PRIMARY KEY,
+                        asset TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        signal_price REAL NOT NULL,
+                        observed_price REAL NOT NULL,
+                        mfe_pct REAL NOT NULL,
+                        mae_pct REAL NOT NULL,
+                        final_return_pct REAL NOT NULL,
+                        tp1_hit INTEGER NOT NULL,
+                        tp2_hit INTEGER NOT NULL,
+                        sl_hit INTEGER NOT NULL,
+                        completed_at REAL NOT NULL
+                    )
+                """)
+                outcome_columns = {
+                    row[1] for row in cursor.execute("PRAGMA table_info(weak_confirmation_outcomes)")
+                }
+                if "tp2_hit" not in outcome_columns:
+                    cursor.execute(
+                        "ALTER TABLE weak_confirmation_outcomes "
+                        "ADD COLUMN tp2_hit INTEGER NOT NULL DEFAULT 0"
+                    )
+
                 conn.commit()
 
                 # Startup diagnostic — confirms persistent storage is working
@@ -216,6 +345,9 @@ class UserDB:
                     "oi_snapshots",
                     "history_snapshots",
                     "trade_history",
+                    "bybit_positions",
+                    "weak_confirmation_events",
+                    "weak_confirmation_outcomes",
                 ]
                 for table in all_tables:
                     try:
@@ -517,6 +649,71 @@ class UserDB:
 
     # ── PAPER POSITIONS & STATE ───────────────────────────────────────
 
+    def save_bybit_position(
+        self,
+        chat_id: str,
+        position: Position,
+        symbol: str,
+        live_status: str,
+        entry_order_link_id: str = "",
+    ):
+        with self._lock:
+            conn = self._get_conn()
+            data = (
+                position.model_dump_json()
+                if hasattr(position, "model_dump_json")
+                else json.dumps(position.dict(), default=str)
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO bybit_positions
+                (position_id, chat_id, symbol, side, live_status,
+                 entry_order_link_id, data, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    position.position_id,
+                    str(chat_id),
+                    symbol,
+                    position.side.value,
+                    live_status,
+                    entry_order_link_id,
+                    data,
+                    datetime.now(timezone.utc).timestamp(),
+                ),
+            )
+            conn.commit()
+
+    def load_bybit_positions(self, chat_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._get_conn().execute(
+                """
+                SELECT symbol, live_status, entry_order_link_id, data
+                FROM bybit_positions WHERE chat_id = ?
+                """,
+                (str(chat_id),),
+            ).fetchall()
+        result = []
+        for symbol, live_status, order_link_id, data in rows:
+            result.append({
+                "symbol": symbol,
+                "live_status": live_status,
+                "entry_order_link_id": order_link_id or "",
+                "position": Position(**json.loads(data)),
+            })
+        return result
+
+    def remove_bybit_position(self, position_id: str):
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute(
+                "DELETE FROM bybit_positions WHERE position_id = ?",
+                (position_id,),
+            )
+            conn.commit()
+
+    # ── PAPER POSITIONS & STATE ───────────────────────────────────────
+
     def save_paper_position(self, chat_id: str, pos: Position):
         with self._lock:
             try:
@@ -809,14 +1006,14 @@ class UserDB:
                     data = json.load(f)
                     for chat_id, u_data in data.items():
                         user_obj = User(**u_data)
-                        if user_obj.hl_agent_secret and _fernet:
-                            try:
-                                # First we check if it is already encrypted (starts with gAAAA...)
-                                secret = user_obj.hl_agent_secret
-                                if secret.startswith("gAAAA"):
-                                    user_obj.hl_agent_secret = _fernet.decrypt(secret.encode()).decode()
-                            except Exception as e:
-                                log.debug(f"Failed to decrypt secret for {chat_id}: {e}")
+                        for field in ("hl_agent_secret", "bybit_api_key", "bybit_api_secret"):
+                            secret = getattr(user_obj, field, None)
+                            if secret and _fernet and secret.startswith("gAAAA"):
+                                try:
+                                    setattr(user_obj, field, _fernet.decrypt(secret.encode()).decode())
+                                except Exception as e:
+                                    log.error(f"Failed to decrypt {field} for {chat_id}: {e}")
+                                    setattr(user_obj, field, None)
                                 # keep as is if decryption fails (might be plaintext or wrong key)
                         self.users[chat_id] = user_obj
                 log.info(f"Loaded {len(self.users)} users from JSON database.")
@@ -831,22 +1028,19 @@ class UserDB:
                     data = {}
                     for k, v in self.users.items():
                         udict = v.model_dump() if hasattr(v, 'model_dump') else v.dict()
-                        # Encrypt secret before saving
-                        if udict.get("hl_agent_secret"):
-                            secret = udict["hl_agent_secret"]
-                            if _fernet:
-                                try:
-                                    # Only encrypt if not already encrypted (Fernet tokens start with gAAAA)
-                                    if not secret.startswith("gAAAA"):
-                                        udict["hl_agent_secret"] = _fernet.encrypt(secret.encode()).decode()
-                                except Exception as e:
-                                    log.error(f"Failed to encrypt secret for {k}: {e}")
-                            else:
-                                # No encryption key — redact in log but keep value so user isn't locked out
-                                log.error(
-                                    f"⚠️  Saving agent secret for {k} WITHOUT encryption. "
-                                    "Set HL_FERNET_KEY to protect user wallet keys."
-                                )
+                        for field in ("hl_agent_secret", "bybit_api_key", "bybit_api_secret"):
+                            secret = udict.get(field)
+                            if not secret:
+                                continue
+                            if not _fernet:
+                                if field.startswith("bybit_"):
+                                    raise RuntimeError(
+                                        "FERNET_KEY required before saving Bybit credentials"
+                                    )
+                                log.error("Saving legacy agent secret without encryption")
+                                continue
+                            if not secret.startswith("gAAAA"):
+                                udict[field] = _fernet.encrypt(secret.encode()).decode()
                         data[k] = udict
                     # handle datetime parsing issues in basic json
                     json.dump(data, f, default=str, indent=2)

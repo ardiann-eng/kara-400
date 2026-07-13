@@ -31,6 +31,13 @@ from config import SIGNAL, SCALPER
 # -- Intelligence Layer --
 from intelligence.feature_engine import extract_live_features
 from intelligence.intelligence_model import intelligence_model
+from engine.scalper_levels import build_scalper_levels
+from engine.weak_confirmation import (
+    WeakCandidate,
+    WeakShadowOutcome,
+    evaluate_weak_confirmation,
+    latest_closed_candle,
+)
 from risk.risk_manager import RiskManager
 from data.hyperliquid_client     import HyperliquidClient
 from data.ws_client              import MarketDataCache
@@ -95,6 +102,8 @@ class ScoringEngine:
 
         # Recent accepted signal timestamps per asset/mode for concentration control.
         self._asset_signal_history: Dict[str, List[float]] = {}
+        self._weak_candidates: Dict[str, tuple[str, WeakCandidate]] = {}
+        self._weak_shadow_outcomes: Dict[str, WeakShadowOutcome] = {}
 
     @staticmethod
     def _ema(data: list, period: int) -> float:
@@ -130,6 +139,62 @@ class ScoringEngine:
     def _record_asset_signal(self, asset: str, mode: str):
         key = f"{mode.lower()}_{asset}"
         self._asset_signal_history.setdefault(key, []).append(time.time())
+
+    @staticmethod
+    def _weak_candidate_key(asset: str, side: Side) -> str:
+        return f"{asset}_{side.value}"
+
+    def _save_weak_event(
+        self,
+        event_id: str,
+        candidate: WeakCandidate,
+        status: str,
+        score: int,
+        observed_price: float | None,
+        decided_at: float,
+    ):
+        from core.db import user_db
+
+        user_db.save_weak_confirmation_event(
+            event_id,
+            candidate.asset,
+            candidate.side.value,
+            status,
+            candidate.signal_price,
+            observed_price,
+            score,
+            candidate.armed_at,
+            decided_at,
+        )
+
+    def _observe_weak_shadows(self, asset: str, price: float, now: float):
+        from core.db import user_db
+
+        for event_id, shadow in list(self._weak_shadow_outcomes.items()):
+            if shadow.candidate.asset != asset:
+                continue
+            shadow.observe(price)
+            if now - shadow.candidate.armed_at < 18 * 60:
+                continue
+            user_db.save_weak_confirmation_outcome(
+                event_id,
+                asset,
+                shadow.candidate.side.value,
+                shadow.candidate.signal_price,
+                price,
+                shadow.metrics(price),
+                now,
+            )
+            self._weak_shadow_outcomes.pop(event_id, None)
+
+    def _expire_weak_candidates(self, asset: str, price: float, now: float):
+        timeout = float(getattr(config.SCALPER, "weak_confirmation_timeout_seconds", 150))
+        for key, pending in list(self._weak_candidates.items()):
+            event_id, candidate = pending
+            if candidate.asset != asset or now - candidate.armed_at <= timeout:
+                continue
+            self._weak_candidates.pop(key, None)
+            self._save_weak_event(event_id, candidate, "expired", 0, price, now)
 
     def _infer_setup_type(self, signal: TradeSignal) -> str:
         reasons = " | ".join(getattr(signal.breakdown, "reasons", []) or []).lower()
@@ -396,6 +461,9 @@ class ScoringEngine:
         mark_price = await self.client.get_mark_price(asset, meta=meta_data)
         if mark_price <= 0:
             return None, 0
+        now = time.time()
+        self._expire_weak_candidates(asset, mark_price, now)
+        self._observe_weak_shadows(asset, mark_price, now)
 
         # 2. Fetch 1-minute candles (last 30 for EMA/RSI)
         candles = []
@@ -471,6 +539,62 @@ class ScoringEngine:
                 f"Entry location {loc['quality']}: {loc['location_type']} "
                 f"(risk={loc['distance_pct']*100:.2f}%, room/risk={loc['room_risk']:.2f}) - {loc['reason']}"
             )
+
+            # Close any opposite-side candidate immediately. Leaving it pending
+            # until timeout would hide a structural reversal in treatment data.
+            opposite = Side.SHORT if side == Side.LONG else Side.LONG
+            opposite_key = self._weak_candidate_key(asset, opposite)
+            opposite_pending = self._weak_candidates.pop(opposite_key, None)
+            if opposite_pending:
+                old_event_id, old_candidate = opposite_pending
+                now = time.time()
+                self._save_weak_event(
+                    old_event_id,
+                    old_candidate,
+                    "rejected_side_flip",
+                    score,
+                    signal.entry_price,
+                    now,
+                )
+
+            key = self._weak_candidate_key(asset, side)
+            pending = self._weak_candidates.get(key)
+            if pending and loc["quality"] != "weak":
+                event_id, candidate = pending
+                now = time.time()
+                candle = latest_closed_candle(candles, now)
+                if candle is None:
+                    return None, score
+                candle_time, close_price = candle
+                structure = self._infer_hh_hl_structure(
+                    [float(item.get("c", 0)) for item in candles if isinstance(item, dict)]
+                )
+                decision = evaluate_weak_confirmation(
+                    candidate,
+                    current_side=side,
+                    structure=structure,
+                    candle_time=candle_time,
+                    close_price=close_price,
+                    now=now,
+                    timeout_seconds=float(
+                        getattr(config.SCALPER, "weak_confirmation_timeout_seconds", 150)
+                    ),
+                )
+                if loc["quality"] == "invalid" and decision == "confirmed":
+                    decision = "rejected_structure"
+                if decision in {"waiting_next_candle", "waiting_follow_through"}:
+                    return None, score
+                self._weak_candidates.pop(key, None)
+                self._save_weak_event(event_id, candidate, decision, score, close_price, now)
+                if decision != "confirmed":
+                    return None, score
+                loc["quality"] = "weak_confirmed"
+                entry_location_quality = "weak_confirmed"
+                score = min(score, candidate.score)
+                signal.score = score
+                signal.breakdown.final_score = score
+                loc_reason += "; weak candidate confirmed on next 1m candle"
+
             if loc["quality"] == "invalid":
                 log.debug(f"[SCALPER] {asset}: REJECT {loc_reason}")
                 return None, score
@@ -486,6 +610,83 @@ class ScoringEngine:
                 signal.breakdown.final_score = score
                 signal.breakdown.failure_risk_score += penalty
                 signal.breakdown.reasons.append(f"{loc_reason}; score -{penalty}")
+
+                if getattr(config.SCALPER, "weak_confirmation_enabled", True):
+                    now = time.time()
+                    candle = latest_closed_candle(candles, now)
+                    if candle is None:
+                        log.debug(f"[SCALPER] {asset}: weak confirmation unavailable; candle timestamp missing")
+                        return None, score
+
+                    candle_time, close_price = candle
+                    pending = self._weak_candidates.get(key)
+                    timeout = float(
+                        getattr(config.SCALPER, "weak_confirmation_timeout_seconds", 150)
+                    )
+
+                    if pending is None:
+                        event_id = f"WCF_{uuid.uuid4().hex[:16]}"
+                        candidate = WeakCandidate(
+                            asset=asset,
+                            side=side,
+                            signal_price=signal.entry_price,
+                            invalidation_price=float(loc["invalidation_price"]),
+                            stop_price=signal.stop_loss,
+                            tp1_price=signal.tp1,
+                            tp2_price=signal.tp2,
+                            score=score,
+                            candle_time=candle_time,
+                            armed_at=now,
+                        )
+                        self._weak_candidates[key] = (event_id, candidate)
+                        self._weak_shadow_outcomes[event_id] = WeakShadowOutcome(
+                            event_id=event_id,
+                            candidate=candidate,
+                            highest_price=signal.entry_price,
+                            lowest_price=signal.entry_price,
+                        )
+                        self._save_weak_event(event_id, candidate, "armed", score, close_price, now)
+                        log.info(
+                            f"[WEAK-CONFIRM-ARMED] {asset} {side.value.upper()} score={score} "
+                            f"price={signal.entry_price:.8f}"
+                        )
+                        return None, score
+
+                    event_id, candidate = pending
+                    structure = self._infer_hh_hl_structure(
+                        [float(item.get("c", 0)) for item in candles if isinstance(item, dict)]
+                    )
+                    decision = evaluate_weak_confirmation(
+                        candidate,
+                        current_side=side,
+                        structure=structure,
+                        candle_time=candle_time,
+                        close_price=close_price,
+                        now=now,
+                        timeout_seconds=timeout,
+                    )
+
+                    if decision in {"waiting_next_candle", "waiting_follow_through"}:
+                        return None, score
+
+                    self._weak_candidates.pop(key, None)
+                    self._save_weak_event(event_id, candidate, decision, score, close_price, now)
+                    if decision != "confirmed":
+                        log.info(
+                            f"[WEAK-CONFIRM-{decision.upper()}] {asset} "
+                            f"{side.value.upper()} score={score}"
+                        )
+                        return None, score
+
+                    signal.entry_location_quality = "weak_confirmed"
+                    signal.breakdown.reasons.append(
+                        "Weak entry confirmed by next 1m candle: same-side structure and follow-through"
+                    )
+                    entry_location_quality = "weak_confirmed"
+                    log.info(
+                        f"[WEAK-CONFIRMED] {asset} {side.value.upper()} score={score} "
+                        f"close={close_price:.8f}"
+                    )
             elif loc["quality"] == "excellent":
                 bonus = getattr(config.SCALPER, "entry_location_excellent_bonus", 3)
                 score = min(100, score + bonus)
@@ -1148,42 +1349,29 @@ class ScoringEngine:
         realized_vol: float,
         trend_pct: float = 0.0,
     ) -> TradeSignal:
-        """Build a TradeSignal with scalper-specific dynamic TP/SL levels."""
+        """Build the authoritative scalper levels for the 12-18 minute horizon."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
         
         import config
         scfg = config.SCALPER
 
-        # Dynamic SL: scale with realized_vol, floor at config sl_pct, ceiling at 1.5%
-        # TP ladder calibrated for ~12m hold (tp1~0.45%, tp2~0.75% base).
-        SL_FLOOR   = scfg.sl_pct          # 0.80%
-        SL_CEILING = 0.0150               # 1.50% max — beyond this scalper isn't viable
-        VOL_MULT   = 1.20                 # SL = vol * 1.2 (noise buffer)
-
-        if realized_vol > 0:
-            sl_pct = max(SL_FLOOR, min(realized_vol * VOL_MULT, SL_CEILING))
-        else:
-            sl_pct = SL_FLOOR
-
-        # TP: keep config RR, but cap TP2 so it stays inside typical 12m MFE
-        rr1 = scfg.tp1_pct / max(scfg.sl_pct, 1e-9)   # ~0.56x base
-        rr2 = scfg.tp2_pct / max(scfg.sl_pct, 1e-9)   # ~0.94x base
-        tp1_pct = sl_pct * rr1
-        tp2_pct = sl_pct * rr2
-        # Soft caps: TP1 ≤ 0.70%, TP2 ≤ 1.10% even if vol inflates SL
-        tp1_pct = min(tp1_pct, 0.0070)
-        tp2_pct = min(max(tp2_pct, tp1_pct * 1.40), 0.0110)
+        # Production audit (n=554) found stop losses rare but destructive, so
+        # volatility must not widen the initial 0.80% stop. Observed winner MFE
+        # median was 0.45% and p90 1.13%; use the configured 0.45%/0.75% ladder
+        # and let trailing capture moves beyond TP2.
+        sl_pct = scfg.sl_pct
+        tp1_pct = scfg.tp1_pct
+        tp2_pct = scfg.tp2_pct
 
         leverage = min(scfg.default_leverage, scfg.max_leverage)
 
-        if side == Side.LONG:
-            stop_loss = round(mark_price * (1 - sl_pct), 8)
-            tp1       = round(mark_price * (1 + tp1_pct), 8)
-            tp2       = round(mark_price * (1 + tp2_pct), 8)
-        else:
-            stop_loss = round(mark_price * (1 + sl_pct), 8)
-            tp1       = round(mark_price * (1 - tp1_pct), 8)
-            tp2       = round(mark_price * (1 - tp2_pct), 8)
+        stop_loss, tp1, tp2 = build_scalper_levels(
+            mark_price,
+            side,
+            sl_pct,
+            tp1_pct,
+            tp2_pct,
+        )
 
         direction_score = score
         trade_quality_score = 0

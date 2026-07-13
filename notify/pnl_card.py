@@ -125,8 +125,10 @@ def _exit_reason_label(reason: str) -> str:
     }.get(reason.lower(), "FULL CLOSE")
 
 
-def _exit_reason_color(reason: str) -> tuple:
+def _exit_reason_color(reason: str, pnl: float = 0.0) -> tuple:
     r = reason.lower()
+    if pnl < 0:
+        return C_LOSS
     if r == "trailing_stop": return (45, 212, 191)
     if r in ("tp1", "tp2", "time_exit", "profit_lock_stop"):  return C_PROFIT
     return C_LOSS
@@ -247,7 +249,7 @@ def generate_pnl_card(
     draw.text((MARGIN, 22), "KARA", font=fonts["brand"], fill=C_LABEL)
 
     er_label = _exit_reason_label(exit_reason)
-    er_color = _exit_reason_color(exit_reason)
+    er_color = _exit_reason_color(exit_reason, pnl)
     er_tw    = _text_w(draw, er_label, fonts["exit_tag"])
 
     er_pill_ov = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))

@@ -77,19 +77,20 @@ def test_scalper_cuts_invalid_structure_before_wider_stop():
     assert "microstructure invalid" in action["message"]
 
 
-def test_scalper_early_impulse_locks_profit_without_full_trailing_close():
+def test_scalper_pre_tp1_impulse_does_not_move_stop():
     risk = RiskManager()
     pos = make_scalper_position(5)
+    original_stop = pos.stop_loss
 
     action = risk.check_tp_trail(pos, 100.40)
 
     assert action is None
-    assert pos.early_profit_lock is True
-    assert pos.stop_loss == 100.05
+    assert pos.early_profit_lock is False
+    assert pos.stop_loss == original_stop
     assert pos.tp1_hit is False
 
 
-def test_scalper_tp1_still_takes_partial_after_early_profit_lock():
+def test_scalper_tp1_takes_partial_without_pre_tp1_lock():
     risk = RiskManager()
     pos = make_scalper_position(5)
     risk.check_tp_trail(pos, 100.40)
@@ -97,3 +98,15 @@ def test_scalper_tp1_still_takes_partial_after_early_profit_lock():
     action = risk.check_tp_trail(pos, 100.46)
 
     assert action["action"] == "tp1"
+
+
+def test_post_tp1_breakeven_stop_is_profit_lock_exit():
+    risk = RiskManager()
+    pos = make_scalper_position(6)
+    pos.tp1_hit = True
+    pos.stop_loss = pos.entry_price
+
+    action = risk.check_tp_trail(pos, 99.99)
+
+    assert action["action"] == "profit_lock_stop"
+    assert action["trigger_price"] == pos.entry_price

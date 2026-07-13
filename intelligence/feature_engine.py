@@ -26,7 +26,7 @@ def extract_live_features(score: int, meta_delta: int, bd, funding_rate: float, 
             float(realized_vol),
             float(trend_pct),
             float(micro_risk_pct),
-            {"invalid": 0.0, "weak": 1.0, "valid": 2.0, "excellent": 3.0}.get(entry_location_quality, -1.0),
+            {"invalid": 0.0, "weak": 1.0, "weak_confirmed": 1.0, "valid": 2.0, "excellent": 3.0}.get(entry_location_quality, -1.0),
             1.0 if trade_mode == "scalper" else 0.0,
         ]
     except Exception as e:

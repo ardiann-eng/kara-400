@@ -17,7 +17,8 @@ load_dotenv()
 KARA_VERSION = "7.0.0"  # Intelligence Layer Update
 DATA_SOURCE = os.getenv("KARA_DATA_SOURCE", "mainnet").lower() # "mainnet" | "testnet"
 TRADE_MODE  = os.getenv("KARA_TRADE_MODE", "paper").lower()    # "paper" | "live"
-FULL_AUTO   = True  # Force auto execution mode as requested
+FULL_AUTO   = os.getenv("KARA_FULL_AUTO", "false").lower() == "true"
+EXECUTION_EXCHANGE = os.getenv("KARA_EXECUTION_EXCHANGE", "bybit").lower()
 
 # ── Trading Strategy Mode ──────────────────────────────────────────────────
 # Switch between "standard" (swing/positional) and "scalper" (ultra-aggressive)
@@ -76,6 +77,43 @@ if _is_placeholder(PRIVATE_KEY):
 HL_TESTNET       = MODE == "paper"                       # auto-set from mode
 
 # ──────────────────────────────────────────────
+# BYBIT EXECUTION
+# ──────────────────────────────────────────────
+BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "true").lower() in ("true", "1", "yes")
+BYBIT_ACCOUNT_TYPE = os.getenv("BYBIT_ACCOUNT_TYPE", "UNIFIED").upper()
+BYBIT_CATEGORY = os.getenv("BYBIT_CATEGORY", "linear").lower()
+BYBIT_SETTLE_COIN = os.getenv("BYBIT_SETTLE_COIN", "USDT").upper()
+BYBIT_RECV_WINDOW = int(os.getenv("BYBIT_RECV_WINDOW", "5000"))
+BYBIT_MAX_PRICE_GAP_PCT = float(os.getenv("BYBIT_MAX_PRICE_GAP_PCT", "0.003"))
+BYBIT_MAX_SLIPPAGE_PCT = float(os.getenv("BYBIT_MAX_SLIPPAGE_PCT", "0.002"))
+BYBIT_MAINNET_ACK = os.getenv("BYBIT_MAINNET_ACK", "").strip()
+BYBIT_TESTNET_ONLY = os.getenv("BYBIT_TESTNET_ONLY", "true").lower() in ("true", "1", "yes")
+BYBIT_LIVE_ASSET_ALLOWLIST = tuple(
+    asset.strip().upper()
+    for asset in os.getenv("BYBIT_LIVE_ASSET_ALLOWLIST", "BTC,ETH").split(",")
+    if asset.strip()
+)
+# Live-only hard ceilings mirror current scalper/user defaults. Paper sizing is unchanged.
+BYBIT_LIVE_MAX_LEVERAGE = int(os.getenv("BYBIT_LIVE_MAX_LEVERAGE", "20"))
+BYBIT_LIVE_MAX_POSITIONS = int(os.getenv("BYBIT_LIVE_MAX_POSITIONS", "3"))
+BYBIT_LIVE_MAX_RISK_PER_TRADE_PCT = float(
+    os.getenv("BYBIT_LIVE_MAX_RISK_PER_TRADE_PCT", "0.035")
+)
+BYBIT_LIVE_MAX_TOTAL_RISK_PCT = float(
+    os.getenv("BYBIT_LIVE_MAX_TOTAL_RISK_PCT", "0.105")
+)
+BYBIT_LIVE_MAX_SYMBOL_NOTIONAL_PCT = float(
+    os.getenv("BYBIT_LIVE_MAX_SYMBOL_NOTIONAL_PCT", "7.0")
+)
+BYBIT_LIVE_MAX_TOTAL_NOTIONAL_PCT = float(
+    os.getenv("BYBIT_LIVE_MAX_TOTAL_NOTIONAL_PCT", "21.0")
+)
+BYBIT_LIVE_MAX_SIGNAL_AGE_S = float(os.getenv("BYBIT_LIVE_MAX_SIGNAL_AGE_S", "30"))
+BYBIT_LIVE_MAX_QUOTE_AGE_S = float(os.getenv("BYBIT_LIVE_MAX_QUOTE_AGE_S", "5"))
+BYBIT_LIVE_MAX_SPREAD_PCT = float(os.getenv("BYBIT_LIVE_MAX_SPREAD_PCT", "0.0015"))
+BYBIT_LIVE_MIN_DEPTH_RATIO = float(os.getenv("BYBIT_LIVE_MIN_DEPTH_RATIO", "1.0"))
+
+# ──────────────────────────────────────────────
 # TELEGRAM
 # ──────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_TOKEN", ""))
@@ -94,9 +132,6 @@ ALL_ACCESS_CODES = list({ACCESS_CODE} | set(ACCESS_CODE_ALTS))
 ACCESS_MAX_TRIES = 3              # block after this many wrong attempts
 ACCESS_BLOCK_HOURS = 1            # block duration in hours
 
-from dotenv import load_dotenv
-load_dotenv(override=True)  # Aggressive load
-
 # ─────────── DASHBOARD (ULTIMATE DEBUG) ───────────
 DASHBOARD_HOST   = "0.0.0.0"
 DASHBOARD_PORT   = int(os.getenv("PORT", 8080))
@@ -108,7 +143,6 @@ print(f"🚀 [KARA_DEBUG] BINDING DASHBOARD TO: {DASHBOARD_HOST}:{DASHBOARD_PORT
 print("="*50 + "\n")
 
 SECRET_KEY       = os.getenv("SECRET_KEY", "CHANGEME")
-FERNET_KEY       = os.getenv("FERNET_KEY", "")
 
 # ──────────────────────────────────────────────
 # DATABASE & PERSISTENCE
@@ -204,13 +238,6 @@ class RiskConfig:
     short_tp1_vol_scale:     float = 0.12     # mild vol widen of TP (capped)
     short_tp1_max:           float = 0.0090   # cap TP1 0.90%
     short_tp2_max:           float = 0.0150   # cap TP2 1.50%
-    # Early trail for SHORT before formal TP1 (MFE arm)
-    short_early_trail_arm_pct: float = 0.0035 # arm trail after +0.35% MFE
-    short_early_trail_pct:     float = 0.0025 # trail distance 0.25%
-    # Early trail for LONG (standard) — audit: trail n=20 avg $4.3 vs time_exit med $0.42
-    # Arm moderate 0.65% so we catch runners without noise-churn on every +0.3% tick
-    long_early_trail_arm_pct:  float = 0.0065 # arm trail after +0.65% MFE
-    long_early_trail_pct:      float = 0.0035 # trail distance 0.35%
     # SHORT time-exit: looser than long so we don't harvest 0.10% crumbs
     short_time_exit_flatline_pct:  float = 0.0030  # 0.30% (was 0.15% — too tight)
     short_time_exit_flatline_mins: int   = 45      # 45m before flatline (was 30)
@@ -252,10 +279,6 @@ class ScalperConfig:
     tp1_pct:                 float = 0.0045   # 0.45% TP1 — hit more often inside 12m
     tp2_pct:                 float = 0.0075   # 0.75% TP2 — was 0.90%, often missed in 12m
     trailing_pct:            float = 0.0025   # 0.25% trail after arm
-    # Early trail for scalper (both sides) — lower arm than standard long
-    early_trail_arm_pct:     float = 0.0040   # arm @ +0.40% MFE (before/without TP1)
-    early_trail_pct:         float = 0.0025   # trail width 0.25%
-
     # Timing
     max_hold_minutes:        float = 12.0     # force close after 12min if no edge left
     max_hold_grace_minutes:  float = 6.0      # extra grace if still in deeper loss
@@ -306,6 +329,10 @@ class ScalperConfig:
     entry_location_weak_penalty: int = 8
     entry_location_excellent_bonus: int = 3
     entry_location_weak_min_score: int = 72
+    # Weak entries require one new 1m candle with same-side structure and
+    # follow-through. Timeout covers two candles without tuning price thresholds.
+    weak_confirmation_enabled: bool = True
+    weak_confirmation_timeout_seconds: int = 150
 
 SCALPER = ScalperConfig()
 

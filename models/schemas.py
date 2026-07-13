@@ -169,7 +169,7 @@ class TradeSignal(BaseModel):
     expected_edge:    Optional[float] = None # ML predicted probability of win (0.0-1.0)
     trade_mode:       str = "standard"       # "scalper" | "standard"
     micro_invalidation_price: Optional[float] = None  # 1m structure level captured at entry
-    entry_location_quality: str = "unknown"  # invalid | weak | valid | excellent
+    entry_location_quality: str = "unknown"  # invalid | weak | weak_confirmed | valid | excellent
     funding_rate:     float = 0.0            # point-in-time funding used by ML audit
     trend_pct:        float = 0.0            # 24h trend estimate used by ML audit
 
@@ -193,8 +193,12 @@ class TradeSignal(BaseModel):
 
     def localize_for_user(self, mode: str, atr_value: float = 0.0):
         """
-        Localize signal parameters (SL/TP/Leverage) based on user mode.
-        If atr_value provided, uses dynamic ATR-based SL (Opsi B).
+        Localize user-specific mode and leverage.
+
+        Scalper levels are owned by ScoringEngine._build_scalper_signal() and
+        calibrated to the 12-18 minute exit horizon.
+        Standard levels retain the legacy ATR localization before RiskManager
+        applies its final regime-aware levels.
         """
         import config
         from models.schemas import Side
@@ -202,16 +206,14 @@ class TradeSignal(BaseModel):
         self.trade_mode = mode
         if mode == "scalper":
             cfg = config.SCALPER
-            sl_pct  = cfg.sl_pct
-            tp1_pct = cfg.tp1_pct
-            tp2_pct = cfg.tp2_pct
             self.suggested_leverage = min(cfg.default_leverage, cfg.max_leverage)
-        else:
-            cfg = config.RISK
-            sl_pct  = cfg.default_sl_pct
-            tp1_pct = cfg.tp1_pct
-            tp2_pct = cfg.tp2_pct
-            self.suggested_leverage = 10  # default standard
+            return
+
+        cfg = config.RISK
+        sl_pct = cfg.default_sl_pct
+        tp1_pct = cfg.tp1_pct
+        tp2_pct = cfg.tp2_pct
+        self.suggested_leverage = 10  # default standard
 
         # ── 1. Calculate Stop Loss ────────────────────────────────────
         if atr_value > 0 and config.RISK.enable_atr_sl:
@@ -299,7 +301,7 @@ class Position(BaseModel):
     tp2:              float
     trailing_active:  bool = False
     trailing_high:    float = 0.0    # highest price reached (for long trailing)
-    early_profit_lock: bool = False  # pre-TP1 impulse moved stop above/below entry
+    early_profit_lock: bool = False  # legacy persisted field; pre-TP1 lock is disabled
     liquidation_price: Optional[float] = None  # estimated or actual liquidation price
 
     # State
@@ -404,6 +406,10 @@ class User(BaseModel):
     hl_agent_address:  Optional[str] = None
     hl_agent_secret:   Optional[str] = None
     wallet_authorized: bool = False
+    bybit_api_key:      Optional[str] = None
+    bybit_api_secret:   Optional[str] = None
+    bybit_authorized:   bool = False
+    bybit_testnet:      bool = True
     tos_agreed:        bool = False
 
     # Access Code Gate

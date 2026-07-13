@@ -78,7 +78,7 @@ class IntelligenceModel:
                 float(row.get('realized_vol', 0)),
                 float(row.get('trend_pct', 0)),
                 float(row.get('micro_risk_pct', 0)),
-                {"invalid": 0.0, "weak": 1.0, "valid": 2.0, "excellent": 3.0}.get(
+                {"invalid": 0.0, "weak": 1.0, "weak_confirmed": 1.0, "valid": 2.0, "excellent": 3.0}.get(
                     str(row.get('entry_location_quality', 'unknown')), -1.0
                 ),
                 1.0 if row.get('trade_mode') == 'scalper' else 0.0,

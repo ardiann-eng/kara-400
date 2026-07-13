@@ -173,11 +173,6 @@ class RiskManager:
         cfg = self._cfg()
         max_dd = cfg.max_drawdown_pct if hasattr(cfg, 'max_drawdown_pct') else RISK.max_drawdown_pct
         
-        # Auto-reset if limit was increased or drawdown improved
-        if self._kill_switch and account.current_drawdown_pct < max_dd:
-            log.info(f"🔄 [RISK] Max drawdown recovered ({account.current_drawdown_pct*100:.1f}% < {max_dd*100:.0f}%). Resetting kill switch.")
-            self._kill_switch = False
-
         if self._kill_switch or account.kill_switch_active:
             return False, "🚨 KILL SWITCH ACTIVE - trading stopped (max drawdown hit)"
             
@@ -371,7 +366,7 @@ class RiskManager:
         self, signal: TradeSignal, balance: float
     ) -> float:
         """Max loss in USD if stop-loss is hit."""
-        _, contracts = self.calculate_position_size(signal, balance)
+        _, contracts, _ = self.calculate_position_size(signal, balance)
         sl_pct = abs(signal.entry_price - signal.stop_loss) / signal.entry_price
         return contracts * signal.entry_price * sl_pct
 
@@ -730,6 +725,8 @@ class RiskManager:
         if (position.side == Side.LONG and current_price <= position.stop_loss) or \
            (position.side == Side.SHORT and current_price >= position.stop_loss):
             profit_locked = (
+                getattr(position, "tp1_hit", False)
+                or
                 (position.side == Side.LONG and position.stop_loss > position.entry_price) or
                 (position.side == Side.SHORT and position.stop_loss < position.entry_price)
             )
@@ -739,6 +736,7 @@ class RiskManager:
                 "action":      action,
                 "close_ratio": 1.0,
                 "price":       current_price,
+                "trigger_price": position.stop_loss,
                 "message":     (
                     f"{'🛡️' if profit_locked else '🛑'} {label} hit at {position.stop_loss:.4f}. "
                     f"Move: {floating*100:.2f}%."
@@ -783,38 +781,9 @@ class RiskManager:
             }
 
         # ── Rule D: Trailing stop ─────────────────────────────────────────
-        # Post-TP1 trail (classic) and pre-TP1 profit lock:
-        # A 1m scalp that reaches +0.40% is protected at entry+buffer, but is
-        # not fully trailed before TP1 at +0.45%. This preserves TP1 opportunity.
+        # Profit protection starts only after TP1 has realized a partial gain.
         trade_mode = getattr(position, "trade_mode", "standard") or "standard"
         is_scalper_pos = trade_mode == "scalper"
-        early_profit_lock = False
-        early_arm = 0.0
-        early_tag = ""
-
-        if not position.tp1_hit:
-            if is_scalper_pos:
-                early_arm = getattr(SCALPER, "early_trail_arm_pct", 0.0040)
-                early_tag = "early-SCL"
-            elif position.side == Side.SHORT:
-                early_arm = getattr(RISK, "short_early_trail_arm_pct", 0.0035)
-                early_tag = "early-SHORT"
-            else:
-                early_arm = getattr(RISK, "long_early_trail_arm_pct", 0.0065)
-                early_tag = "early-LONG"
-
-            if max_floating >= early_arm:
-                early_profit_lock = True
-                if not getattr(position, "early_profit_lock", False):
-                    position.early_profit_lock = True
-                    if position.side == Side.LONG:
-                        position.stop_loss = max(position.stop_loss, position.entry_price * 1.0005)
-                    else:
-                        position.stop_loss = min(position.stop_loss, position.entry_price * 0.9995)
-                    log.debug(
-                        f"[LOCK] {position.asset} {early_tag} MFE={max_floating*100:.2f}% "
-                        f"-> stop protected at {position.stop_loss:.6f}"
-                    )
 
         if position.tp1_hit:
             if position.tp1_hit:
@@ -972,10 +941,8 @@ class RiskManager:
 
             trail_owns_exit = (
                 position.tp1_hit
-                or early_profit_lock
                 or (
                     getattr(position, "trailing_active", False)
-                    and max_floating >= getattr(RISK, "long_early_trail_arm_pct", 0.0065) * 0.85
                     and floating > 0
                 )
             )
