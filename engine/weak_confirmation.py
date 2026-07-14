@@ -82,6 +82,62 @@ def latest_closed_candle(candles: list, now: float) -> tuple[float, float] | Non
     return None
 
 
+def bull_exhaustion_short_level(
+    candles: list,
+    *,
+    now: float,
+    mtf_state: str,
+    retest_candles: int,
+    tolerance: float,
+) -> str | None:
+    """Return rejected level for closed-candle bull exhaustion, else fail closed."""
+    if mtf_state != "bear" or retest_candles < 1 or tolerance < 0:
+        return None
+
+    closed = []
+    for candle in candles:
+        if not isinstance(candle, dict):
+            continue
+        try:
+            timestamp = float(candle.get("t", candle.get("T", 0)))
+            open_price = float(candle.get("o", 0))
+            high = float(candle.get("h", 0))
+            low = float(candle.get("l", 0))
+            close = float(candle.get("c", 0))
+        except (TypeError, ValueError):
+            continue
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000.0
+        if (
+            timestamp <= 0
+            or timestamp + 60 > now
+            or min(open_price, high, low, close) <= 0
+            or high < low
+        ):
+            continue
+        closed.append((open_price, high, low, close))
+
+    if len(closed) < 21:
+        return None
+
+    closes = [candle[3] for candle in closed]
+    ema21 = closes[0]
+    multiplier = 2 / 22
+    for close in closes[1:]:
+        ema21 = close * multiplier + ema21 * (1 - multiplier)
+    prior_resistance = max(candle[1] for candle in closed[-16:-4])
+    latest_open, _, _, latest_close = closed[-1]
+    if latest_close >= latest_open:
+        return None
+
+    for level_name, level in (("EMA21", ema21), ("prior_resistance", prior_resistance)):
+        for _, high, low, _ in closed[-(retest_candles + 1):-1]:
+            if high >= level * (1 - tolerance) and low <= level * (1 + tolerance):
+                if latest_close < level:
+                    return level_name
+    return None
+
+
 def evaluate_weak_confirmation(
     candidate: WeakCandidate,
     *,

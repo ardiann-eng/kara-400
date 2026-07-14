@@ -168,6 +168,7 @@ class TradeSignal(BaseModel):
     meta_score_delta: int = 0                # score adj from meta winrate
     expected_edge:    Optional[float] = None # ML predicted probability of win (0.0-1.0)
     trade_mode:       str = "standard"       # "scalper" | "standard"
+    strategy_source:  str = "native_scalper"
     micro_invalidation_price: Optional[float] = None  # 1m structure level captured at entry
     entry_location_quality: str = "unknown"  # invalid | weak | weak_confirmed | valid | excellent
     funding_rate:     float = 0.0            # point-in-time funding used by ML audit
@@ -316,6 +317,7 @@ class Position(BaseModel):
     meta_pattern_key: Optional[str] = None
     meta_score_delta: int = 0
     trade_mode:       str = "standard"   # "scalper" | "standard"
+    strategy_source:  str = "native_scalper"
     opened_at:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at:        Optional[datetime] = None
     is_paper:         bool = True

@@ -44,6 +44,16 @@
 - Single ownership level scalper berbasis MFE dan horizon 12-18 menit.
 - Next-candle structural confirmation dan shadow-control telemetry untuk weak entry.
 
+## 2026-07-15
+
+- `2026-07-15_ENTRY_PIPELINE_AUDIT.md`
+- Audit entry pipeline production pada 700 closed trade dan 467 enriched MFE outcomes.
+- Feature observability, score calibration, weak candidate control, regime association, dan purged ML validation.
+- Dokumentasi saja; tidak ada strategy behavior atau deployment change.
+
+- `2026-07-15_BULL_EXHAUSTION_SHORT.md`
+- Native scalper SHORT di atas +3% trend 24h memerlukan retest rejection MTF bear berbasis closed candle.
+
 ## Reading Order
 
 - Baca note scalper exit dan fallback untuk perubahan entry serta time exit.
@@ -54,3 +64,4 @@
 - Baca Bybit next steps sebelum melanjutkan implementasi atau testnet.
 - Baca Bybit testnet reminder sebelum membuat order testnet nyata.
 - Baca database audit, scalper levels, dan weak confirmation sebelum deploy atau mengubah strategy/risk berikutnya.
+- Baca entry pipeline audit sebelum mengubah feature, score, entry gate, sizing, atau regime policy.

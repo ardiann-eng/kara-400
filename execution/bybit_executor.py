@@ -423,6 +423,7 @@ class BybitExecutor(BaseExecutor):
                     meta_pattern_key=signal.meta_pattern_key,
                     meta_score_delta=signal.meta_score_delta,
                     trade_mode=signal.trade_mode,
+                    strategy_source=signal.strategy_source,
                     is_paper=False,
                     entry_score=signal.score,
                     realized_vol=signal.realized_vol,

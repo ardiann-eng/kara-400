@@ -371,6 +371,11 @@ class SignalConfig:
     # Regime hard filters (symmetric)
     short_max_uptrend_pct:   float = 0.03     # Block SHORT jika 24h trend > +3% (jangan lawan trend)
     long_max_downtrend_pct:  float = -0.03    # Block LONG  jika 24h trend < -3% (jangan catch knife)
+    # Native scalper exception for a confirmed rejection during a strong 24h uptrend.
+    bull_exhaustion_short_enabled: bool = True
+    bull_exhaustion_short_min_trend_pct: float = 0.03
+    bull_exhaustion_short_retest_candles: int = 3
+    bull_exhaustion_short_tolerance: float = 0.0015
 
     # Session windows (UTC)
     ny_session_start_utc:    int   = 13       # 13:00 UTC = 09:00 ET

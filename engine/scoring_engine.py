@@ -37,6 +37,7 @@ from engine.weak_confirmation import (
     WeakShadowOutcome,
     evaluate_weak_confirmation,
     latest_closed_candle,
+    bull_exhaustion_short_level,
 )
 from risk.risk_manager import RiskManager
 from data.hyperliquid_client     import HyperliquidClient
@@ -529,7 +530,27 @@ class ScoringEngine:
 
         # 4. Build signal with scalper TP/SL (now dynamic based on Volatility)
         vol_regime, realized_vol, trend_pct = await self._fetch_vol_regime(asset)
-        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol, trend_pct)
+        strategy_source = "native_scalper"
+        exhaustion_min_trend = config.SIGNAL.bull_exhaustion_short_min_trend_pct
+        if side == Side.SHORT and trend_pct > exhaustion_min_trend:
+            if not config.SIGNAL.bull_exhaustion_short_enabled:
+                return None, score
+            level = bull_exhaustion_short_level(
+                candles,
+                now=now,
+                mtf_state=mtf_trend,
+                retest_candles=config.SIGNAL.bull_exhaustion_short_retest_candles,
+                tolerance=config.SIGNAL.bull_exhaustion_short_tolerance,
+            )
+            if level is None:
+                log.debug(
+                    f"[SCALPER] {asset}: SHORT blocked above 24h trend "
+                    f"{trend_pct * 100:.2f}% without bull exhaustion"
+                )
+                return None, score
+            strategy_source = "bull_exhaustion_short"
+            reasons.append(f"Bull exhaustion short: rejected {level}")
+        signal = self._build_scalper_signal(asset, side, score, mark_price, reasons, vol_regime, session_bonus, realized_vol, trend_pct, strategy_source)
 
         entry_location_quality = "disabled"
         if getattr(config.SCALPER, "entry_location_gate_enabled", True):
@@ -1132,13 +1153,8 @@ class ScoringEngine:
                 quality_pts += mtf_bonus
                 reasons.append(f"📡 15m MTF Align ({mtf_trend}) -> +{mtf_bonus} context bonus")
             else:
-                failure_risk_pts += abs(scfg.mtf_score_penalty)
-                raw += scfg.mtf_score_penalty
-                reasons.append(f"📡 15m MTF Discord ({mtf_trend}) → {scfg.mtf_score_penalty}")
-                # Hard reject for scalper if 15m trend is strongly against us
-                if abs(scfg.mtf_score_penalty) > 10 and raw < 60:
-                    log.debug(f"[{asset}] SCALPER REJECT: Against 15m MTF trend")
-                    return 0, side, reasons + ["REJECT: Counter-trend MTF"]
+                log.debug(f"[{asset}] SCALPER REJECT: Against 15m MTF trend")
+                return 0, side, reasons + [f"REJECT: {side.value.upper()} conflicts with 15m MTF {mtf_trend}"]
 
         # Enforce Scalper Consensus: Must have momentum alignment
         # (Now uses function-level vars set above, not locals())
@@ -1348,6 +1364,7 @@ class ScoringEngine:
         session_bonus: int,
         realized_vol: float,
         trend_pct: float = 0.0,
+        strategy_source: str = "native_scalper",
     ) -> TradeSignal:
         """Build the authoritative scalper levels for the 12-18 minute horizon."""
         from models.schemas import SignalStrength, MarketRegime, ScoreBreakdown
@@ -1435,7 +1452,8 @@ class ScoringEngine:
             expected_edge=edge,
             funding_rate=0.0,
             trend_pct=trend_pct,
-            realized_vol=realized_vol
+            realized_vol=realized_vol,
+            strategy_source=strategy_source,
         )
 
     # ──────────────────────────────────────────
