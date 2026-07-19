@@ -315,6 +315,17 @@ def test_demo_execution_gate_is_wired_before_per_user_signal_selection():
     assert gate < selection
 
 
+def test_position_monitor_uses_user_bybit_client_not_public_testnet_registry():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+    monitor = source.index("async def _update_positions")
+    monitor_source = source[monitor:source.index("market_states = {}", monitor)]
+
+    assert "session.bybit_client" in monitor_source
+    assert "client.symbol_registry.resolve(asset)" in monitor_source
+
+
 @pytest.mark.asyncio
 async def test_mainnet_executor_sizing_uses_allocation_not_full_venue_equity(monkeypatch):
     from execution.bybit_executor import BybitExecutor

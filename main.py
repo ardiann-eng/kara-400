@@ -1358,14 +1358,22 @@ class KaraBot:
             except Exception as e:
                 log.debug(f"Failed to fetch Hyperliquid price for {asset}: {e}")
         if self.bybit_client:
-            for asset in bybit_assets:
-                try:
-                    spec = self.bybit_client.symbol_registry.resolve(asset)
-                    bybit_prices[asset] = await self.bybit_client.get_mark_price(
-                        spec.symbol
+            bybit_price_clients = {}
+            for session in self.sessions.values():
+                if isinstance(session.executor, BybitExecutor):
+                    bybit_price_clients.setdefault(
+                        id(session.bybit_client), session.bybit_client
                     )
-                except Exception as e:
-                    log.error(f"Failed to fetch Bybit price for {asset}: {e}")
+            for asset in bybit_assets:
+                for client in bybit_price_clients.values():
+                    try:
+                        spec = client.symbol_registry.resolve(asset)
+                        bybit_prices[asset] = await client.get_mark_price(spec.symbol)
+                        break
+                    except Exception as e:
+                        log.debug("Bybit price unavailable for %s on one client: %s", asset, e)
+                else:
+                    log.error("Failed to fetch Bybit price for %s from user venue clients", asset)
 
         # 3. Apply updates to each user
         for chat_id, session in self.sessions.items():
