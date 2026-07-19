@@ -2625,14 +2625,9 @@ class KaraTelegram:
                 "account": acc_state,
                 "chat_id": str(target_chat_id) if target_chat_id else None,
             }
-            buttons = [[InlineKeyboardButton(
+            gen_markup = InlineKeyboardMarkup([[InlineKeyboardButton(
                 "📊 PnL Card", callback_data=f"gen_pnl:{pos.position_id}"
-            )]]
-            if chart_url:
-                buttons.append([InlineKeyboardButton(
-                    self._bybit_chart_label(getattr(session, "user", None)), url=chart_url
-                )])
-            gen_markup = InlineKeyboardMarkup(buttons)
+            )]])
         except Exception as e:
             log.error(f"[PnLCard] failed to cache pending card data: {e}")
 

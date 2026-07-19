@@ -35,3 +35,13 @@ git diff --check
 - No deployment, restart, commit, credential access, Demo balance change, or order.
 - After deployment, trigger one complete Demo lifecycle and tap `PnL Card`. Required result: image delivery, no `PnLCard Card generation failed` log, and no plain-text closed fallback.
 - Roll back notification change if PnL image generation fails or TP1 reports moved stop without native protection confirmation.
+
+## Follow-up: Full-Close PnL Card Keyboard
+
+- Operator reported `Chart Bybit Demo` below `PnL Card` on a generated full-close notification for an LTC Demo time-exit loss.
+- Root cause: `send_position_event()` appended Bybit chart button to the same full-close keyboard that exposes the on-demand PnL card.
+- Full-close notifications now expose only `📊 PnL Card`. Position-open and TP1 chart links retain existing behavior.
+- Regression creates a Demo full-close event with an available chart URL and asserts keyboard contains only `gen_pnl:<position_id>`.
+- Verification: `17 passed` in `tests/test_bybit_telegram_safety.py`; `python -m py_compile notify/telegram.py tests/test_bybit_telegram_safety.py`; `git diff --check`.
+- No deployment, restart, commit, credential access, Demo balance change, or order.
+- Next production measurement: trigger one Demo full close; notification must show exactly one `📊 PnL Card` button and no `Chart Bybit Demo` button.

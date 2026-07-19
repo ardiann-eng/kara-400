@@ -117,6 +117,49 @@ async def test_tp_updates_do_not_offer_final_pnl_card(monkeypatch):
     assert kwargs["reply_markup"] is None
 
 
+@pytest.mark.asyncio
+async def test_full_close_pnl_card_does_not_offer_bybit_chart(monkeypatch):
+    from models.schemas import Position, PositionStatus, Side
+
+    position = Position(
+        position_id="p1", asset="LTC", side=Side.LONG,
+        entry_price=47.06, size_initial=10, size_current=0,
+        leverage=20, margin_usd=23.53, stop_loss=46.5,
+        tp1=48, tp2=49, status=PositionStatus.CLOSED,
+    )
+
+    class CloseSession:
+        executor = SimpleNamespace(_positions={"p1": position}, registry=None)
+        user = SimpleNamespace(bybit_environment=SimpleNamespace(value="demo"))
+
+        async def get_account_state(self):
+            return SimpleNamespace()
+
+    sent = []
+    telegram = KaraTelegram.__new__(KaraTelegram)
+    telegram.bot_app = FakeBotApp(CloseSession())
+    telegram._pending_pnl_cards = {}
+
+    async def send_text(text, **kwargs):
+        sent.append((text, kwargs))
+
+    telegram.send_text = send_text
+    monkeypatch.setattr(
+        KaraTelegram, "_bybit_chart_url", staticmethod(lambda *_: "https://chart.example/LTCUSDT")
+    )
+
+    await telegram.send_position_event({
+        "action": "time_exit", "position_id": "p1", "fully_closed": True,
+        "pnl_total": -2.085, "pnl_pct_total": -0.0135, "exit_price": 47.08,
+    }, {"LTC": 47.08}, target_chat_id="1")
+
+    text, kwargs = sent[0]
+    assert "Time Exit · Loss" in text
+    buttons = [button for row in kwargs["reply_markup"].inline_keyboard for button in row]
+    assert [button.text for button in buttons] == ["📊 PnL Card"]
+    assert [button.callback_data for button in buttons] == ["gen_pnl:p1"]
+
+
 class ReconcilingExecutor:
     def __init__(self, positions=None, error=None):
         self.open_positions = list(positions or [])
