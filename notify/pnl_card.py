@@ -249,7 +249,7 @@ def generate_pnl_card(
     draw.text((MARGIN, 22), "KARA", font=fonts["brand"], fill=C_LABEL)
 
     er_label = _exit_reason_label(exit_reason)
-    er_color = _exit_reason_color(exit_reason, pnl)
+    er_color = _exit_reason_color(exit_reason, pnl_usd)
     er_tw    = _text_w(draw, er_label, fonts["exit_tag"])
 
     er_pill_ov = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))

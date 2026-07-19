@@ -30,7 +30,6 @@ class ExecutionQuote:
 
 @dataclass(frozen=True)
 class LiveRiskLimits:
-    asset_allowlist: frozenset[str]
     max_leverage: int
     max_positions: int
     max_risk_per_trade_pct: float
@@ -59,9 +58,6 @@ class BybitLiveRiskGate:
         open_positions: Sequence[Position],
     ) -> None:
         limits = self.limits
-        asset = signal.asset.upper()
-        if asset not in limits.asset_allowlist:
-            raise LiveRiskViolation("asset_not_allowlisted")
         if equity <= 0:
             raise LiveRiskViolation("invalid_equity")
         if leverage > limits.max_leverage:

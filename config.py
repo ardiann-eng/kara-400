@@ -87,12 +87,8 @@ BYBIT_RECV_WINDOW = int(os.getenv("BYBIT_RECV_WINDOW", "5000"))
 BYBIT_MAX_PRICE_GAP_PCT = float(os.getenv("BYBIT_MAX_PRICE_GAP_PCT", "0.003"))
 BYBIT_MAX_SLIPPAGE_PCT = float(os.getenv("BYBIT_MAX_SLIPPAGE_PCT", "0.002"))
 BYBIT_MAINNET_ACK = os.getenv("BYBIT_MAINNET_ACK", "").strip()
+BYBIT_MAINNET_AUTO_ACK = os.getenv("BYBIT_MAINNET_AUTO_ACK", "").strip()
 BYBIT_TESTNET_ONLY = os.getenv("BYBIT_TESTNET_ONLY", "true").lower() in ("true", "1", "yes")
-BYBIT_LIVE_ASSET_ALLOWLIST = tuple(
-    asset.strip().upper()
-    for asset in os.getenv("BYBIT_LIVE_ASSET_ALLOWLIST", "BTC,ETH").split(",")
-    if asset.strip()
-)
 # Live-only hard ceilings mirror current scalper/user defaults. Paper sizing is unchanged.
 BYBIT_LIVE_MAX_LEVERAGE = int(os.getenv("BYBIT_LIVE_MAX_LEVERAGE", "20"))
 BYBIT_LIVE_MAX_POSITIONS = int(os.getenv("BYBIT_LIVE_MAX_POSITIONS", "3"))
@@ -445,21 +441,12 @@ SIGNAL = SignalConfig()
 # Re-enable ONLY when paper trade menunjukkan SHORT WR > 50% untuk 30+ trades
 ALLOW_SHORT = True   # Re-enabled: breakdown | failed-rally | cascade SHORT theses (OR)
 
-# ── HARD RESET ON DEPLOY ──────────────────────────────────────────────────────
-# Set KARA_HARD_RESET=true di env variable Railway/Docker sebelum deploy.
-# Bot akan menghapus SEMUA data saat startup:
-#   - Semua posisi terbuka          (paper_positions)
-#   - Semua saldo user              (paper_state → reset ke Rp1.000.000)
-#   - Semua journal/trade history   (trade_history)
-#   - Semua sinyal history          (signals_history)
-#   - Meta learning stats           (meta_pattern_stats)
-#   - Volatility cache              (vol_cache)
-#   - Risk state per user           (risk_state)
-#   - Seluruh ML experience buffer  (kara_ml.db dihapus)
-#   - Trained Intelligence model    (kara_intelligence.pkl dihapus)
-# Yang TIDAK dihapus: konfigurasi user, wallet address, akses Telegram.
-# PENTING: Ubah kembali ke false setelah deploy agar tidak reset terus!
-HARD_RESET_ON_DEPLOY = False
+# ── TOTAL RESET ON STARTUP ────────────────────────────────────────────────────
+# One-shot Option B wipe. Exact token is required; an on-volume marker prevents
+# another wipe after a process restart until operator removes the token.
+TOTAL_RESET_ACK_VALUE = "WIPE_ALL_KARA_PRODUCTION_DATA"
+TOTAL_RESET_CONFIRMATION = os.getenv("KARA_TOTAL_RESET_CONFIRMATION", "").strip()
+TOTAL_RESET_MARKER_PATH = os.path.join(STORAGE_BASE, ".kara_total_reset_done")
 
 # Intelligence ML Layer kill switch
 # Set env KARA_INTELLIGENCE=false untuk matikan tanpa redeploy.

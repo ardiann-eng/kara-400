@@ -55,8 +55,21 @@ def test_live_session_builds_only_bybit_executor():
     assert status["live_risk_limits"]["max_leverage"] == 20
     assert status["live_risk_limits"]["max_positions"] == 3
     assert status["live_risk_limits"]["max_risk_per_trade_pct"] == 0.035
-    assert status["live_risk_limits"]["asset_allowlist"] == ["BTC", "ETH"]
     assert "user-key" not in str(status)
+
+
+def test_live_session_refuses_credential_environment_mismatch(monkeypatch):
+    user = live_user()
+    user.bybit_testnet = False
+    monkeypatch.setattr("config.BYBIT_TESTNET", True)
+
+    with pytest.raises(RuntimeError, match="environment does not match"):
+        UserSession(
+            user,
+            bybit_client=FakeClient(),
+            bybit_registry=BybitSymbolRegistry(),
+            persistence=FakePersistence(),
+        )
 
 
 def test_live_sessions_never_share_credentials_or_clients():

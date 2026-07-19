@@ -244,6 +244,20 @@ class UserDB:
                 """)
 
                 cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS execution_candidates (
+                        candidate_id TEXT PRIMARY KEY,
+                        chat_id TEXT NOT NULL,
+                        asset TEXT NOT NULL,
+                        side TEXT,
+                        status TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        execution_environment TEXT NOT NULL,
+                        data TEXT NOT NULL,
+                        created_at REAL NOT NULL
+                    )
+                """)
+
+                cursor.execute("""
                     CREATE TABLE IF NOT EXISTS bybit_positions (
                         position_id TEXT PRIMARY KEY,
                         chat_id     TEXT NOT NULL,
@@ -317,16 +331,9 @@ class UserDB:
 
     def hard_reset_all_data(self) -> dict:
         """
-        Wipe SEMUA data trading — dipanggil saat KARA_HARD_RESET=true di env.
-        Yang dihapus:
-          - kara_data.db: semua tabel (posisi, balance, journal, sinyal, meta, dll)
-          - kara_ml.db: seluruh experience buffer ML
-          - kara_intelligence.pkl: trained model
-          - data/users.json: balance direset ke default, posisi dikosongkan
-        Yang TIDAK dihapus:
-          - Konfigurasi user (leverage, risk preference, wallet address)
-          - Akses Telegram (chat_id tetap terdaftar)
-        Returns dict dengan ringkasan apa yang dihapus.
+        Irreversible Option B wipe. Caller must validate startup confirmation.
+        Deletes trading tables, every user/credential/config, ML data/model,
+        Excel history, and execution-candidate telemetry.
         """
         summary = {}
         with self._lock:
@@ -345,6 +352,7 @@ class UserDB:
                     "oi_snapshots",
                     "history_snapshots",
                     "trade_history",
+                    "execution_candidates",
                     "bybit_positions",
                     "weak_confirmation_events",
                     "weak_confirmation_outcomes",
@@ -379,18 +387,20 @@ class UserDB:
                 else:
                     summary["kara_intelligence.pkl"] = "not_found"
 
-                # ── 4. Reset users.json — balance kembali ke default ────
-                reset_count = 0
-                for chat_id, user in self.users.items():
-                    user.paper_balance_usd = config.PAPER_BALANCE_USD
-                    user.wallet_authorized = False
-                    reset_count += 1
+                xlsx_path = os.path.join(config.STORAGE_DIR, "trade_history.xlsx")
+                if os.path.exists(xlsx_path):
+                    os.remove(xlsx_path)
+                    summary["trade_history.xlsx"] = "deleted"
+                else:
+                    summary["trade_history.xlsx"] = "not_found"
 
+                # ── 4. Delete every user, credential, and user config ───
+                deleted_count = len(self.users)
+                self.users = {}
                 self.save()
-                summary["users_reset"] = reset_count
+                summary["users_deleted"] = deleted_count
                 log.warning(
-                    f"🧹 [RESET] users.json: {reset_count} users "
-                    f"reset ke ${config.PAPER_BALANCE_USD:.2f}"
+                    f"🧹 [RESET] users.json: {deleted_count} users deleted"
                 )
 
                 summary["status"] = "ok"
@@ -530,6 +540,51 @@ class UserDB:
                 # conn.close() # Connection pooling applied
             except Exception as e:
                 log.error(f"Error saving signal {sig.signal_id}: {e}")
+
+    def save_execution_candidate(
+        self,
+        chat_id: str,
+        sig: TradeSignal,
+        *,
+        status: str,
+        reason: str,
+        execution_environment: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist rejected candidate telemetry without inventing execution data."""
+        if not status or not reason or not execution_environment:
+            raise ValueError("Candidate status, reason, and environment are required")
+        data = {
+            "signal_id": sig.signal_id,
+            "asset": sig.asset,
+            "side": sig.side.value,
+            "score": sig.score,
+            "entry_price": sig.entry_price,
+            "execution_environment": execution_environment,
+            "status": status,
+            "reason": reason,
+            **(extra or {}),
+        }
+        candidate_id = f"{sig.signal_id}:{chat_id}:{status}"
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO execution_candidates
+                    (candidate_id, chat_id, asset, side, status, reason,
+                     execution_environment, data, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        candidate_id, str(chat_id), sig.asset, sig.side.value,
+                        status, reason, execution_environment,
+                        json.dumps(data, default=str), sig.timestamp.timestamp(),
+                    ),
+                )
+                conn.commit()
+            except Exception as exc:
+                log.error("Failed to save execution candidate %s: %s", candidate_id, exc)
 
     def load_signals(self, limit: int = 20) -> List[TradeSignal]:
         signals = []

@@ -62,6 +62,31 @@ logging.basicConfig(
 log = logging.getLogger("kara.main")
 
 
+def run_total_reset_if_confirmed() -> bool:
+    """Run irreversible Option B reset once before user/session startup."""
+    if config.TOTAL_RESET_CONFIRMATION != config.TOTAL_RESET_ACK_VALUE:
+        return False
+    marker = config.TOTAL_RESET_MARKER_PATH
+    if os.path.exists(marker):
+        log.warning("[TOTAL RESET] confirmation remains but reset marker exists; skipping")
+        return False
+    summary = user_db.hard_reset_all_data()
+    if summary.get("status") != "ok":
+        raise RuntimeError("Total reset failed; startup blocked")
+    try:
+        if os.path.exists(config.TG_STATE_PATH):
+            os.remove(config.TG_STATE_PATH)
+            summary["telegram_state.json"] = "deleted"
+        else:
+            summary["telegram_state.json"] = "not_found"
+        with open(marker, "x", encoding="utf-8") as handle:
+            handle.write("completed")
+    except Exception as exc:
+        raise RuntimeError("Total reset marker/state cleanup failed; startup blocked") from exc
+    log.critical("[TOTAL RESET] Option B completed: %s", summary)
+    return True
+
+
 # ──────────────────────────────────────────────
 # KARA CORE
 # ──────────────────────────────────────────────
@@ -180,13 +205,29 @@ class KaraBot:
         ):
             await self.ensure_bybit_public_client()
 
-        # Load market list (always top volume as requested)
+        # Load Hyperliquid top-100 candidates. Demo execution later resolves only
+        # exact active Bybit linear-USDT metadata; no asset+USDT synthesis.
         log.info("Loading top volume markets...")
         self.watched_assets = await self.hl_client.get_top_volume_markets(top_n=100)
         if len(self.watched_assets) < 50:
             log.warning(f"Low market count ({len(self.watched_assets)}), retrying in 10s...")
             await asyncio.sleep(10)
             self.watched_assets = await self.hl_client.get_top_volume_markets(top_n=100)
+
+        if self.bybit_client:
+            from execution.demo_universe import exact_demo_universe
+            demo_users = [
+                user for user in user_db.get_all_users()
+                if getattr(getattr(user, "bybit_environment", None), "value", None) == "demo"
+            ]
+            if demo_users:
+                demo_universe = exact_demo_universe(
+                    self.watched_assets, self.bybit_client.symbol_registry
+                )
+                log.info(
+                    "Demo exact Bybit universe: %s/%s Hyperliquid top-100 candidates",
+                    len(demo_universe), len(self.watched_assets),
+                )
 
         log.info(f"   Markets ({len(self.watched_assets)}): {', '.join(self.watched_assets[:15])}{'...' if len(self.watched_assets) > 15 else ''}")
         log.info(f"   Full-auto: {config.FULL_AUTO}")
@@ -729,6 +770,17 @@ class KaraBot:
         try:
             # 1. Get current account state
             acc = await session.get_account_state()
+            allocation_usd = getattr(session.user, "capital_allocation_usd", None)
+            is_mainnet = getattr(
+                getattr(session.user, "bybit_environment", None), "value", None
+            ) == "mainnet"
+            if allocation_usd is not None and is_mainnet and session.user.config.bot_mode == BotMode.LIVE:
+                from core.capital_allocation import sizing_equity
+                effective_sizing_equity = sizing_equity(acc.total_equity, allocation_usd)
+                sizing_acc = acc.model_copy(update={"total_equity": effective_sizing_equity})
+            else:
+                effective_sizing_equity = acc.total_equity
+                sizing_acc = acc
         except Exception as e:
             # log.debug(f"Dashboard: Could not fetch state for session: {e}")
             return # Skip heartbeat for this tick
@@ -949,6 +1001,54 @@ class KaraBot:
             stored_mode = getattr(session.user.config, 'trading_mode', 'standard')
             user_mode = config.effective_trading_mode(stored_mode)
 
+            # Demo is primary execution. Legacy Paper positions still receive
+            # TP/SL/close monitoring in _update_positions(), but no new entry.
+            from core.execution_environment_policy import requires_demo_onboarding
+            if requires_demo_onboarding(session.user):
+                log.info(
+                    "[PAPER-ENTRY-BLOCK] user=%s asset=%s reason=demo_onboarding_required",
+                    chat_id,
+                    next((signal.asset for signal in signals_dict.values() if signal), "unknown"),
+                )
+                continue
+
+            # Demo-only candidate gate. Scanner remains Hyperliquid top-100 for
+            # research and Paper; only Demo execution requires an exact active
+            # Bybit linear-USDT metadata mapping before signal processing.
+            if getattr(getattr(session.user, "bybit_environment", None), "value", None) == "demo":
+                from execution.demo_universe import is_demo_execution_eligible
+                registry = getattr(getattr(session, "executor", None), "registry", None)
+                candidate_asset = next(
+                    (
+                        signal.asset for signal in signals_dict.values()
+                        if signal is not None
+                    ),
+                    None,
+                )
+                if not registry or not candidate_asset or not is_demo_execution_eligible(
+                    candidate_asset, registry
+                ):
+                    rejected_signal = next(
+                        (signal for signal in signals_dict.values() if signal), None
+                    )
+                    if rejected_signal:
+                        user_db.save_execution_candidate(
+                            chat_id,
+                            rejected_signal,
+                            status="rejected",
+                            reason="inactive_or_unsupported_bybit_metadata",
+                            execution_environment="demo",
+                            extra={
+                                "capital_allocation_idr": session.user.capital_allocation_idr,
+                                "capital_allocation_usd": session.user.capital_allocation_usd,
+                            },
+                        )
+                    log.info(
+                        "[DEMO-UNIVERSE-BLOCK] user=%s asset=%s reason=inactive_or_unsupported_bybit_metadata",
+                        chat_id, candidate_asset or "unknown",
+                    )
+                    continue
+
             # Prefer native scalper signal; optional standard scorer as fallback
             # source — still executed under scalper rules below.
             base_signal = signals_dict.get("scalper") if user_mode == "scalper" else signals_dict.get(user_mode)
@@ -1125,6 +1225,17 @@ class KaraBot:
                     continue
 
             acc = await session.get_account_state()
+            allocation_usd = getattr(session.user, "capital_allocation_usd", None)
+            is_mainnet = getattr(
+                getattr(session.user, "bybit_environment", None), "value", None
+            ) == "mainnet"
+            if allocation_usd is not None and is_mainnet and session.user.config.bot_mode == BotMode.LIVE:
+                from core.capital_allocation import sizing_equity
+                effective_sizing_equity = sizing_equity(acc.total_equity, allocation_usd)
+                sizing_acc = acc.model_copy(update={"total_equity": effective_sizing_equity})
+            else:
+                effective_sizing_equity = acc.total_equity
+                sizing_acc = acc
 
             # Full-auto only behavior requested:
             # - only process signals that meet auto threshold
@@ -1135,7 +1246,7 @@ class KaraBot:
 
             # Enrich signal with position sizing for THIS user
             size_usd, contracts, actual_lev = session.risk_mgr.calculate_position_size(
-                user_signal, acc.total_equity
+                user_signal, effective_sizing_equity
             )
             user_signal.suggested_size_usd   = size_usd
             user_signal.suggested_contracts  = contracts
@@ -1144,7 +1255,7 @@ class KaraBot:
             # ⚡ PRE-TRADE VALIDATION (AUTO-ONLY)
             if config.FULL_AUTO and not getattr(user_signal, 'is_pyramid', False):
                 approved, reason = session.risk_mgr.pre_trade_check(
-                    user_signal, acc, session.executor.open_positions
+                    user_signal, sizing_acc, session.executor.open_positions
                 )
 
                 if not approved:
@@ -1176,12 +1287,25 @@ class KaraBot:
         session = await self.get_session(chat_id)
         if not session:
             return False, "Sesi user tidak ditemukan."
+
+        from core.execution_environment_policy import requires_demo_onboarding
+        if requires_demo_onboarding(session.user):
+            return False, "Paper sudah tidak menerima trade baru. Jalankan /demo untuk setup Bybit Demo."
         
         log.info(f" User {chat_id} confirmed trade: {signal.asset}")
 
         # Pre-check first so user gets the exact reason (cooldown, max pos, etc.)
         try:
             acc = await session.get_account_state()
+            allocation_usd = getattr(session.user, "capital_allocation_usd", None)
+            is_mainnet = getattr(
+                getattr(session.user, "bybit_environment", None), "value", None
+            ) == "mainnet"
+            if allocation_usd is not None and is_mainnet and session.user.config.bot_mode == BotMode.LIVE:
+                from core.capital_allocation import sizing_equity
+                acc = acc.model_copy(update={
+                    "total_equity": sizing_equity(acc.total_equity, allocation_usd)
+                })
             approved, reason = session.risk_mgr.pre_trade_check(
                 signal, acc, session.executor.open_positions
             )
@@ -1470,6 +1594,7 @@ class KaraBot:
 # ──────────────────────────────────────────────
 
 async def main():
+    run_total_reset_if_confirmed()
     bot = KaraBot()
 
     # 1. Start Dashboard FIRST in background to pass Railway Health Checks

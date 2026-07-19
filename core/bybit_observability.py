@@ -45,6 +45,8 @@ class BybitTelemetry:
     emergency_close_failures: int = 0
     risk_rejection_count: int = 0
     last_risk_rejection_reason: str = ""
+    venue_equity: float = 0.0
+    sizing_equity: float = 0.0
 
     def snapshot(self) -> Dict[str, object]:
         data = asdict(self)

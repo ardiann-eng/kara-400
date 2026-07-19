@@ -27,7 +27,7 @@ import config
 from core.db import user_db
 from models.schemas import (
     TradeSignal, AccountState, SignalStrength, Side, BotMode,
-    ExecutionMode
+    ExecutionMode, ExecutionEnvironment
 )
 from utils.helpers import format_usd, format_idr, format_pct, format_price, utcnow
 
@@ -38,6 +38,40 @@ WAITING_CODE = 1
 WAITING_CONFIG_VALUE = 2
 WAITING_BYBIT_KEY = 3
 WAITING_BYBIT_SECRET = 4
+WAITING_EXECUTION_ENVIRONMENT = 5
+WAITING_CAPITAL_ALLOCATION = 6
+
+BYBIT_HOME_URL = "https://www.bybit.com/"
+BYBIT_DEMO_GUIDE_URL = "https://bybit-exchange.github.io/docs/v5/demo"
+
+
+def bybit_preflight_failure_message(error: Exception, environment: Optional[str]) -> str:
+    """Translate safe preflight failures into an operator action."""
+    detail = str(error)
+    label = (environment or "testnet").upper()
+    if "non-JSON HTTP 403" in detail or "non-JSON HTTP 401" in detail:
+        return (
+            f"<b>Setup Bybit {label} berhenti: koneksi ditolak.</b>\n\n"
+            "Bybit menolak koneksi server sebelum credential dapat diperiksa. "
+            "Ini bukan bukti API Key atau API Secret salah.\n\n"
+            "<b>Jangan buat atau kirim credential baru dulu.</b> KARA belum aktif "
+            "dan tidak ada order dibuat.\n\n"
+            "Admin perlu cek akses server ke endpoint Bybit. "
+            "Untuk mencoba credential lagi, kirim API Key pada pesan berikutnya."
+        )
+    if "auth" in detail.lower() or "signature" in detail.lower() or "permission" in detail.lower():
+        return (
+            f"<b>Setup Bybit {label} berhenti: credential atau izin ditolak.</b>\n\n"
+            "Pastikan key dibuat di environment yang benar dan memiliki izin Account Read "
+            "serta Contract Trade. Withdrawal harus nonaktif.\n\n"
+            "Kirim API Key untuk mencoba lagi. KARA belum aktif dan tidak ada order dibuat."
+        )
+    return (
+        f"<b>Setup Bybit {label} berhenti saat preflight.</b>\n\n"
+        "Credential tidak disimpan dan tidak ada order dibuat. "
+        f"Detail aman: <code>{html.escape(detail)}</code>\n\n"
+        "Kirim API Key untuk mencoba lagi."
+    )
 
 DAILY_REPORT_TEMPLATE = """
 📊 <b>KARA DAILY INSIGHTS</b> 🌸
@@ -283,10 +317,32 @@ class KaraTelegram:
                 entry_points=[CommandHandler("start", self.cmd_start)],
                 states={
                     WAITING_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.cmd_access_code)],
+                    WAITING_EXECUTION_ENVIRONMENT: [CallbackQueryHandler(self.handle_onboarding_environment, pattern="^onboard_env:")],
+                    WAITING_CAPITAL_ALLOCATION: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_capital_allocation),
+                        CallbackQueryHandler(self.handle_allocation_confirmation, pattern="^onboard_allocation_"),
+                    ],
+                    WAITING_BYBIT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_key)],
+                    WAITING_BYBIT_SECRET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_secret)],
                 },
                 fallbacks=[CommandHandler("start", self.cmd_start)],
                 per_user=True,
                 per_chat=True,
+                allow_reentry=True,
+            )
+
+            demo_conv = ConversationHandler(
+                entry_points=[CommandHandler("demo", self.cmd_demo)],
+                states={
+                    WAITING_CAPITAL_ALLOCATION: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_capital_allocation),
+                        CallbackQueryHandler(self.handle_allocation_confirmation, pattern="^onboard_allocation_"),
+                    ],
+                    WAITING_BYBIT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_key)],
+                    WAITING_BYBIT_SECRET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_secret)],
+                },
+                fallbacks=[CommandHandler("cancel", self.cmd_cancel), CommandHandler("demo", self.cmd_demo)],
+                per_user=True,
                 allow_reentry=True,
             )
 
@@ -318,6 +374,7 @@ class KaraTelegram:
 
             handlers = [
                 access_conv,
+                demo_conv,
                 settings_conv,
                 live_conv,
                 CommandHandler("help",     self.cmd_help),
@@ -363,6 +420,7 @@ class KaraTelegram:
                         BotCommand("signal",   "Lihat sinyal trading terbaru"),
                         BotCommand("journal",  "Statistik & Jurnal performa trading"),
                         BotCommand("paper",    "Kembali ke Paper Mode & Reset Saldo"),
+                        BotCommand("demo",     "Setup Bybit Demo — mode utama"),
                         BotCommand("live",     "Setup Live Mode (Bybit)"),
                         BotCommand("settings", "Pusat Kendali (Threshold & Leverage)"),
                         BotCommand("help",     "Daftar instruksi lengkap"),
@@ -434,6 +492,20 @@ class KaraTelegram:
                 await update.effective_message.reply_html(TOS_TEXT, reply_markup=keyboard)
                 return ConversationHandler.END
 
+            from core.execution_environment_policy import requires_demo_onboarding
+            if requires_demo_onboarding(user):
+                session = await self.bot_app.get_session(chat_id) if self.bot_app else None
+                open_positions = list(getattr(getattr(session, "executor", None), "open_positions", []))
+                position_note = (
+                    " Tutup posisi Paper yang masih terbuka terlebih dahulu."
+                    if open_positions else ""
+                )
+                await update.effective_message.reply_html(
+                    "<b>Demo Bybit adalah environment utama KARA.</b>\n\n"
+                    "Akun ini masih Paper legacy. Ketik /demo untuk setup Demo. "
+                    "Paper tidak menerima trade baru." + position_note
+                )
+                return ConversationHandler.END
             reply_msg = (
                 f"✨ <b>Halo, {username}! Saya KARA, Intelligence Trading Partner Anda.</b> 🌸\n\n"
                 f"Selamat datang kembali! Saya siap memantau Hyperliquid untuk User.\n\n"
@@ -500,13 +572,81 @@ class KaraTelegram:
                 await self.bot_app.get_session(chat_id)
 
             log.info(f"✅ New user authorized: {username} ({chat_id})")
+            ctx.user_data["pending_execution_environment"] = "demo"
             await update.effective_message.reply_html(
-                f"✨ <b>Halo, {username}! Saya KARA, Intelligence Trading Partner Anda.</b> 🌸\n\n"
-                f"Selamat datang! Saya sudah menyiapkan akun virtual Anda untuk trading di Hyperliquid perp.\n\n"
-                f"💰 <b>Saldo Paper Anda: {format_idr(user.paper_balance_usd)}</b>\n\n"
-                f"Ketik /help untuk instruksi awal. Anda bisa mengetik /mode untuk memilih gaya trading (Standard / Scalper)."
+                "<b>Setup Bybit Demo: langkah 1/4</b>\n\n"
+                "Tujuan: menetapkan saldo virtual Demo yang dipakai penuh oleh KARA.\n"
+                "Tidak ada dana nyata dipindahkan.\n\n"
+                "Kirim modal virtual dalam IDR. Contoh: <code>1000000</code>.\n"
+                "Minimum Rp100.000.",
+            )
+            return WAITING_CAPITAL_ALLOCATION
+
+    async def cmd_demo(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Start Demo-first migration; existing Paper remains intact until confirmation."""
+        if not self._is_authorized(update):
+            return ConversationHandler.END
+        chat_id = str(update.effective_chat.id)
+        user = user_db.get_user(chat_id)
+        if not user:
+            return ConversationHandler.END
+        session = await self.bot_app.get_session(chat_id) if self.bot_app else None
+        try:
+            positions = await self._verified_mode_switch_positions(user, session)
+        except Exception:
+            await update.effective_message.reply_html(
+                "Demo setup diblok: posisi saat ini belum dapat diverifikasi."
             )
             return ConversationHandler.END
+        if positions:
+            await update.effective_message.reply_html(
+                "Demo setup diblok saat posisi masih terbuka. Tutup semua posisi terlebih dahulu."
+            )
+            return ConversationHandler.END
+        ctx.user_data["pending_execution_environment"] = "demo"
+        ctx.user_data.pop("pending_capital_allocation", None)
+        await update.effective_message.reply_html(
+            "<b>Setup Bybit Demo: langkah 1/4</b>\n\n"
+            "Tujuan: menetapkan saldo virtual Demo yang dipakai penuh oleh KARA.\n"
+            "Tidak ada dana nyata dipindahkan.\n\n"
+            "Kirim modal virtual dalam IDR. Contoh: <code>1000000</code>.\n"
+            "Minimum Rp100.000."
+        )
+        return WAITING_CAPITAL_ALLOCATION
+
+    async def handle_capital_allocation(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return ConversationHandler.END
+        from core.capital_allocation import CapitalAllocationError, convert_allocation_idr, parse_allocation_idr
+        try:
+            allocation = convert_allocation_idr(
+                parse_allocation_idr(update.effective_message.text), config.USD_TO_IDR
+            )
+        except CapitalAllocationError as exc:
+            await update.effective_message.reply_html(f"Allocation tidak valid: <code>{html.escape(str(exc))}</code>")
+            return WAITING_CAPITAL_ALLOCATION
+        environment = ctx.user_data.get("pending_execution_environment")
+        if environment not in ("demo", "mainnet"):
+            await update.effective_message.reply_html("Sesi environment kedaluwarsa. Ketik /start.")
+            return ConversationHandler.END
+        ctx.user_data["pending_capital_allocation"] = allocation
+        label = environment.upper()
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Konfirmasi modal", callback_data="onboard_allocation_confirm"),
+            InlineKeyboardButton("Batal", callback_data="onboard_allocation_cancel"),
+        ]])
+        await update.effective_message.reply_html(
+            f"<b>Setup Bybit {label}: langkah 2/4</b>\n\n"
+            f"Modal {'virtual Demo' if environment == 'demo' else 'alokasi Mainnet'}: <b>Rp{allocation.idr:,.0f}</b>\n"
+            f"Kurs tersimpan: <b>Rp{allocation.fx_rate:,.0f}/USD</b>\n"
+            f"Nilai USD: <b>${allocation.usd:,.2f}</b>\n\n"
+            + (
+                "KARA akan menyetarakan saldo virtual Demo ke nilai ini."
+                if environment == "demo" else
+                "Ini batas sizing, bukan perubahan saldo Mainnet."
+            ), reply_markup=keyboard,
+        )
+        return WAITING_CAPITAL_ALLOCATION
 
         # ── Wrong code ──
         user.access_attempts += 1
@@ -530,6 +670,18 @@ class KaraTelegram:
             f"<i>Sisa percobaan: <b>{remaining}</b></i>"
         )
         return WAITING_CODE
+
+    async def handle_onboarding_environment(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Keep access-code conversation alive after environment selection."""
+        await self.on_callback(update, ctx)
+        return WAITING_CAPITAL_ALLOCATION
+
+    async def handle_allocation_confirmation(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Route allocation confirmation into credential capture state."""
+        await self.on_callback(update, ctx)
+        if update.callback_query.data == "onboard_allocation_confirm":
+            return WAITING_BYBIT_KEY
+        return ConversationHandler.END
 
     async def cmd_settings(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Display and edit user-specific trading configuration."""
@@ -713,11 +865,18 @@ class KaraTelegram:
         except Exception:
             pass
         if len(api_key) < 8:
-            await update.effective_chat.send_message("API key tidak valid. Ketik /live untuk ulang.")
-            return ConversationHandler.END
+            await update.effective_chat.send_message("API Key terlalu pendek. Kirim API Key yang benar untuk lanjut.")
+            return WAITING_BYBIT_KEY
         ctx.user_data["pending_bybit_key"] = api_key
+        selected_environment = ctx.user_data.get("pending_execution_environment")
+        label = selected_environment.upper() if selected_environment else (
+            "TESTNET" if config.BYBIT_TESTNET else "MAINNET"
+        )
         await update.effective_chat.send_message(
-            "Kirim <b>API Secret Bybit testnet</b>. Pesan akan langsung dihapus.",
+            f"<b>Setup Bybit {label} — langkah 3/4</b>\n\n"
+            "API Key diterima dan dihapus dari chat.\n\n"
+            f"Kirim <b>API Secret Bybit {label}</b>. Pesan akan langsung dihapus.\n\n"
+            "Jangan kirim password akun, OTP, recovery code, atau seed phrase.",
             parse_mode=ParseMode.HTML,
         )
         return WAITING_BYBIT_SECRET
@@ -732,43 +891,73 @@ class KaraTelegram:
         api_key = ctx.user_data.get("pending_bybit_key")
         if not api_key or len(api_secret) < 8:
             ctx.user_data.pop("pending_bybit_key", None)
-            await update.effective_chat.send_message("Credential tidak lengkap. Ketik /live untuk ulang.")
-            return ConversationHandler.END
+            await update.effective_chat.send_message("Credential tidak lengkap. Kirim API Key untuk mencoba lagi.")
+            return WAITING_BYBIT_KEY
         from data.bybit_client import BybitClient
         from core.startup_validation import validate_bybit_preflight
+        selected_environment = ctx.user_data.get("pending_execution_environment")
+        if selected_environment not in (None, "demo", "mainnet"):
+            ctx.user_data.pop("pending_bybit_key", None)
+            await update.effective_chat.send_message("Environment setup tidak valid. Ketik /start untuk ulang.")
+            return ConversationHandler.END
+        is_demo = selected_environment == "demo"
+        if selected_environment == "mainnet" and config.BYBIT_TESTNET:
+            ctx.user_data.pop("pending_bybit_key", None)
+            await update.effective_chat.send_message("Mainnet diblok: server masih BYBIT_TESTNET.")
+            return ConversationHandler.END
         client = BybitClient(
             api_key=api_key,
             api_secret=api_secret,
-            testnet=True,
+            testnet=False if selected_environment else config.BYBIT_TESTNET,
+            demo=is_demo,
             recv_window=config.BYBIT_RECV_WINDOW,
         )
         try:
+            await update.effective_chat.send_message(
+                f"<b>Setup Bybit {(selected_environment or 'testnet').upper()} — langkah 4/4</b>\n\n"
+                "Memeriksa credential, waktu server, akun, dan izin trading. Jangan kirim ulang credential.",
+                parse_mode=ParseMode.HTML,
+            )
             await client.connect()
             await client.sync_clock()
             result = await client.preflight()
             errors = validate_bybit_preflight(result)
             if errors:
                 raise RuntimeError("; ".join(errors))
+            if is_demo:
+                allocation = ctx.user_data.get("pending_capital_allocation")
+                if allocation is None:
+                    raise RuntimeError("Demo capital allocation missing")
+                demo_account = await client.set_demo_usdt_balance(allocation.usd)
+                venue_equity = demo_account.total_equity
+            else:
+                venue_equity = (await client.get_account()).total_equity
         except Exception as e:
             ctx.user_data.pop("pending_bybit_key", None)
             await update.effective_chat.send_message(
-                f"Preflight Bybit gagal: <code>{html.escape(str(e))}</code>",
+                bybit_preflight_failure_message(e, selected_environment),
                 parse_mode=ParseMode.HTML,
             )
-            return ConversationHandler.END
+            return WAITING_BYBIT_KEY
         finally:
             await client.close()
         ctx.user_data["pending_bybit_secret"] = api_secret
+        ctx.user_data["pending_bybit_testnet"] = config.BYBIT_TESTNET
+        ctx.user_data["pending_bybit_venue_equity"] = venue_equity
+        environment = selected_environment.upper() if selected_environment else (
+            "TESTNET" if config.BYBIT_TESTNET else "MAINNET"
+        )
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Aktifkan Live Testnet", callback_data="bybit_live_confirm"),
+            InlineKeyboardButton(f"Aktifkan {environment}", callback_data="bybit_live_confirm"),
             InlineKeyboardButton("Batal", callback_data="bybit_live_cancel"),
         ]])
         await update.effective_chat.send_message(
-            "Preflight Bybit testnet lulus.\n\n"
+            f"<b>Preflight Bybit {environment} lulus.</b>\n\n"
+            f"Venue equity: <b>${venue_equity:,.2f}</b>\n"
             f"Saldo tersedia: <b>${result.available_usdt:,.2f}</b>\n"
             "Mode posisi: <b>one-way</b>\n"
-            "Environment: <b>TESTNET</b>\n\n"
-            "Konfirmasi untuk menyimpan credential terenkripsi dan mengaktifkan live testnet.",
+            f"Environment: <b>{environment}</b>\n\n"
+            f"Konfirmasi untuk menyimpan credential terenkripsi dan mengaktifkan {environment.lower()}.",
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard,
         )
@@ -842,7 +1031,8 @@ class KaraTelegram:
             "• /mode     — Pilih gaya trading (Standard/Scalper)\n"
             "• /settings — Atur threshold & leverage pribadi\n"
             "• /live     — Aktivasi Live Mode (Risiko Nyata)\n"
-            "• /paper    — Kembali ke Paper Mode & Reset saldo\n\n"
+            "• /demo     — Setup Bybit Demo (mode utama)\n"
+            "• /paper    — Paper shadow/research mode\n\n"
             "📊 <b>Informasi Portofolio</b>\n"
             "• /status   — Status bot, ekuitas, dan float\n"
             "• /pos      — Lihat daftar koin yang sedang jalan\n"
@@ -894,20 +1084,18 @@ class KaraTelegram:
 
         risk_status = session.risk_mgr.status
 
-        mode_str  = "PAPER" if acc.mode == BotMode.PAPER else "LIVE"
-        # Using the user's preferred emojis from the screenshot/request
+        bybit = session.bybit_status() if hasattr(session, "bybit_status") else None
+        mode_str  = "PAPER" if acc.mode == BotMode.PAPER else (
+            str(bybit.get("environment", "BYBIT")).replace("BYBIT ", "BYBIT ")
+            if bybit else "BYBIT"
+        )
         pause_str = "⏸️ PAUSED" if acc.is_paused else "▶️ Active"
-        kill_str  = "🚨 Aktif (STOP)" if acc.kill_switch_active else "✅ Aman"
+        kill_str  = "🚨 STOP" if acc.kill_switch_active else "✅ Aman"
 
         pnl_sign   = "+" if acc.unrealized_pnl > 0 else ""
         daily_sign = "+" if acc.daily_pnl > 0 else ""
         auto_str   = "🚀 Full-Auto" if config.FULL_AUTO else "🛡️ Semi-Auto"
         pos_len    = len([p for p in acc.positions if p.status.value == 'open'])
-
-        # Realized daily PnL = daily_pnl - unrealized (avoid double-counting float)
-        realized_pnl     = acc.daily_pnl - acc.unrealized_pnl
-        realized_sign    = "+" if realized_pnl > 0 else ""
-        realized_pnl_pct = realized_pnl / max(acc.wallet_balance - realized_pnl, 1) * 100
 
         text = (
             f"🌸 <b>KARA System Status</b>\n\n"
@@ -919,57 +1107,42 @@ class KaraTelegram:
             f"  • Ekuitas: <code>{format_idr(acc.total_equity)}</code>\n"
             f"  • Saldo Dompet: <code>{format_idr(acc.wallet_balance)}</code>\n"
             f"  • Saldo Tersedia: <code>{format_idr(acc.available)}</code>\n"
-            f"  • Unrealized PnL: <b>{pnl_sign}{format_idr(acc.unrealized_pnl)}</b> (posisi terbuka)\n\n"
-            f"📈 <b>Performa Harian</b>\n"
-            f"  • Realized PnL: <b>{realized_sign}{format_idr(realized_pnl)}</b> ({realized_sign}{realized_pnl_pct:.2f}%)\n"
-            f"  • Total PnL Hari Ini: <b>{daily_sign}{format_idr(acc.daily_pnl)}</b> ({daily_sign}{format_pct(acc.daily_pnl_pct)})\n"
+            f"  • PnL Posisi Terbuka: <b>{pnl_sign}{format_idr(acc.unrealized_pnl)}</b>\n\n"
+            f"📈 <b>Performa Hari Ini</b>\n"
+            f"  • Total PnL: <b>{daily_sign}{format_idr(acc.daily_pnl)}</b> "
+            f"({daily_sign}{format_pct(acc.daily_pnl_pct)})\n"
             f"  • Max Drawdown: <code>{format_pct(acc.current_drawdown_pct, show_sign=False)}</code>\n\n"
             f"🎯 <b>Posisi Terbuka:</b> {pos_len} aset\n"
         )
 
-        bybit = session.bybit_status() if hasattr(session, "bybit_status") else None
         if bybit:
             rest = "SEHAT" if bybit["rest_healthy"] else "GANGGUAN"
             ws = "CONNECTED" if bybit["ws_connected"] and not bybit["ws_stale"] else "STALE"
-            ws_stale_s = bybit.get("ws_stale_duration_s", 0)
-            reconcile = bybit["last_reconciliation_at"]
-            reconcile_text = (
-                datetime.fromtimestamp(reconcile, timezone.utc).strftime("%H:%M:%S UTC")
-                if reconcile
-                else "belum ada"
+            connection = f"<b>{rest}</b> · WS {ws}"
+            text = text.replace(
+                f"  • Kill-Switch: {kill_str}\n\n",
+                f"  • Kill-Switch: {kill_str}\n"
+                f"  • Koneksi Bybit: {connection}\n\n",
             )
-            text += (
-                f"\n<b>Bybit Execution</b>\n"
-                f"  • Venue: <code>{bybit['environment']}</code>\n"
-                f"  • REST: <b>{rest}</b> ({bybit['rest_latency_ms']:.0f} ms)\n"
-                f"  • Private WS: <b>{ws}</b> ({ws_stale_s:.0f}s stale)\n"
-                f"  • Reconciliation: <code>{reconcile_text}</code>\n"
-                f"  • Mismatch: {bybit['reconciliation_mismatch_count']}\n"
-                f"  • Hard SL: {bybit['hard_sl_healthy_count']} sehat, "
-                f"{bybit['hard_sl_missing_count']} hilang\n"
-                f"  • Entry/Fill/Close: {bybit['entry_latency_ms']:.0f}/"
-                f"{bybit['fill_latency_ms']:.0f}/{bybit['close_latency_ms']:.0f} ms\n"
-                f"  • Price gap: {bybit['price_bridge_gap_pct']:.3%}\n"
-                f"  • Circuit: {'OPEN' if bybit['circuit_open'] else 'CLOSED'}"
-                f" ({bybit['circuit_remaining_s']:.0f}s)\n"
-                f"  • Live risk reject: {bybit.get('risk_rejection_count', 0)}"
-                f" ({bybit.get('last_risk_rejection_reason') or 'none'})\n"
-            )
-            live_limits = bybit.get("live_risk_limits")
-            if live_limits:
-                text += (
-                    f"  • Live caps: {live_limits['max_leverage']}x, "
-                    f"{live_limits['max_positions']} posisi, "
-                    f"risk {live_limits['max_risk_per_trade_pct']:.1%}/trade\n"
-                    f"  • Allowlist: <code>{', '.join(live_limits['asset_allowlist'])}</code>\n"
-                    f"  • Spread/slippage: {live_limits['max_spread_pct']:.2%}/"
-                    f"{live_limits['max_slippage_pct']:.2%}\n"
+            if bybit.get("environment") == "BYBIT DEMO":
+                text = text.replace(
+                    f"🎯 <b>Posisi Terbuka:</b> {pos_len} aset\n",
+                    f"🎯 <b>Posisi Terbuka:</b> {pos_len} aset\n"
+                    f"  • Saldo Demo untuk trading: <b>${float(bybit.get('venue_equity') or acc.total_equity):,.2f}</b>\n",
+                )
+            elif bybit.get("capital_allocation_idr") is not None:
+                text = text.replace(
+                    f"🎯 <b>Posisi Terbuka:</b> {pos_len} aset\n",
+                    f"🎯 <b>Posisi Terbuka:</b> {pos_len} aset\n"
+                    f"  • Batas sizing KARA: <b>Rp{float(bybit['capital_allocation_idr']):,.0f}</b> "
+                    f"/ <b>${float(bybit.get('capital_allocation_usd') or 0):,.2f}</b>\n"
+                    f"  • Sizing equity aktif: <b>${float(bybit.get('sizing_equity') or 0):,.2f}</b>\n",
                 )
 
         if risk_status.get("in_cooldown"):
             text += "❄️ <i>Post-loss cooldown aktif. Break dulu yaa~</i>"
         else:
-            text += "<i>Semua sistem beroperasi maksimal, siap tangkap peluang~! ✨</i>"
+            text += "<i>Siap memantau peluang~ ✨</i>"
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -1112,10 +1285,7 @@ class KaraTelegram:
                 if pos.liquidation_price else "?"
             )
 
-            # Clean ticker for Hyperliquid URL (strip 'k' for 1000x assets)
-            url_ticker = pos.asset[1:] if pos.asset.startswith("k") and len(pos.asset) > 1 else pos.asset
-            hl_link = f"https://app.hyperliquid.xyz/trade/{url_ticker}"
-            asset_html = f"<a href='{hl_link}'>{pos.asset}</a>"
+            asset_html = pos.asset
 
             text += (
                 f"\n"
@@ -1569,7 +1739,7 @@ class KaraTelegram:
                     await self.send_text(text, target_chat_id=cid)
         except Exception as e:
             log.error(f"[DailyCard] Card generation failed: {e}", exc_info=True)
-            await self.send_text(text, target_chat_id=target_chat_id)
+            await self.send_text(text, target_chat_id=target_chat_id, reply_markup=chart_keyboard)
 
     async def cmd_enable_auto(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
@@ -1918,9 +2088,18 @@ class KaraTelegram:
                 await old.bybit_client.close()
 
     async def cmd_live(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Start encrypted Bybit testnet credential setup."""
+        """Start encrypted Bybit credential setup for configured environment."""
         if not self._is_authorized(update): return ConversationHandler.END
         if self._is_throttled(str(update.effective_chat.id), threshold=5, action_key="live"): return ConversationHandler.END
+        from core.startup_validation import StartupConfigurationError, validate_startup_config
+        try:
+            validate_startup_config(config)
+        except StartupConfigurationError as exc:
+            await update.effective_message.reply_html(
+                "<b>Setup Live diblok oleh konfigurasi server:</b> "
+                f"<code>{html.escape(str(exc))}</code>"
+            )
+            return ConversationHandler.END
         chat_id = str(update.effective_chat.id)
         user = user_db.get_user(chat_id)
         session = await self.bot_app.get_session(chat_id) if self.bot_app else None
@@ -1949,10 +2128,16 @@ class KaraTelegram:
         ctx.user_data.pop("pending_bybit_key", None)
         ctx.user_data.pop("pending_bybit_secret", None)
         await update.effective_message.reply_html(
-            "<b>Setup Live Bybit TESTNET</b>\n\n"
-            "Hyperliquid hanya untuk scanning dan sinyal. Eksekusi hanya di Bybit.\n"
-            "API key wajib read + contract trade, tanpa withdrawal permission.\n\n"
-            "Kirim <b>API Key Bybit testnet</b>. Pesan akan langsung dihapus."
+            f"<b>Setup Bybit {'Testnet' if config.BYBIT_TESTNET else 'Mainnet'} — langkah 1/2</b>\n\n"
+            + (
+                "Dana virtual Testnet. Tidak memakai dana nyata.\n\n"
+                if config.BYBIT_TESTNET else
+                "<b>Peringatan: Mainnet memakai dana nyata.</b> Alokasi sizing tidak membatasi "
+                "kerugian aktual saat gap, fee, atau slippage.\n\n"
+            )
+            + "API Key wajib memiliki Account Read dan Contract Trade. Withdrawal harus nonaktif.\n\n"
+            + f"Kirim <b>API Key Bybit {'Testnet' if config.BYBIT_TESTNET else 'Mainnet'}</b>. "
+            "Pesan akan langsung dihapus."
         )
         return WAITING_BYBIT_KEY
 
@@ -1965,8 +2150,9 @@ class KaraTelegram:
         ])
         await update.effective_message.reply_html(
             "⚠️ <b>PERINGATAN SCALPER MODE</b>\n\n"
-            "Mode ini menggunakan leverage 25-35x dan risk 13% per trade.\n"
-            "<b>Satu trade jelek bisa hilangkan 13% modal Anda.</b>\n\n"
+            f"Live Bybit dibatasi maksimum {config.BYBIT_LIVE_MAX_LEVERAGE}x leverage "
+            f"dan {config.BYBIT_LIVE_MAX_RISK_PER_TRADE_PCT * 100:.1f}% risk per trade.\n"
+            "Cap live tidak menjamin loss aktual saat gap, slippage, atau outage.\n\n"
             "Apakah Anda yakin?",
             reply_markup=keyboard
         )
@@ -2141,6 +2327,23 @@ class KaraTelegram:
         sign = "+" if v >= 0 else ""
         return f"{sign}{v:.2f}%"
 
+    @staticmethod
+    def _bybit_chart_url(asset: str, executor=None) -> Optional[str]:
+        """Build chart URL only from exact venue metadata when available."""
+        registry = getattr(executor, "registry", None)
+        if not registry:
+            return None
+        try:
+            symbol = registry.resolve(asset).symbol
+        except Exception:
+            return None
+        return f"https://www.bybit.com/en/trade/usdt/{symbol}"
+
+    @staticmethod
+    def _bybit_chart_label(user) -> str:
+        environment = getattr(getattr(user, "bybit_environment", None), "value", "")
+        return "Chart Bybit Demo" if environment == "demo" else "Chart Bybit Live"
+
     async def send_position_opened(self, pos, signal, target_chat_id: str = None):
         """Original open notification — do not change without explicit request."""
         # Use user_db for reliable mode labeling
@@ -2157,12 +2360,17 @@ class KaraTelegram:
         asset = pos.asset
         score = getattr(signal, "score", getattr(pos, "entry_score", 0)) or 0
         rr = getattr(signal, "risk_reward_ratio", 0) or 0
+        session = None
+        if self.bot_app and target_chat_id:
+            try:
+                session = await self.bot_app.get_session(target_chat_id)
+            except Exception:
+                log.warning("Bybit chart session unavailable for opened position %s", asset)
+        chart_url = self._bybit_chart_url(asset, getattr(session, "executor", None))
 
         text = (
             f"🌸 <b>KARA SYSTEM: Position Executed</b>\n"
-            f"<i>Saya baru saja menganalisis pasar dan berhasil membuka posisi "
-            f"<b>{side}</b> untuk <b>"
-            f"<a href='https://app.hyperliquid.xyz/trade/{asset}'>{asset}</a></b>.</i>\n\n"
+            f"<i>Posisi <b>{side}</b> {asset} sudah terbuka.</i>\n\n"
             f"📦 <b>Market Details</b>\n"
             f"  • Entry   : <code>${format_price(pos.entry_price)}</code>\n"
             f"  • Margin  : <b>{format_idr(pos.margin_usd)}</b> ({format_usd(pos.margin_usd)})\n"
@@ -2176,7 +2384,12 @@ class KaraTelegram:
             f"  • 📊 Score: <b>{score}/100</b>\n\n"
             f"<i>Eksekusi selesai. Memantau market untuk exit terbaik. ✨</i>"
         )
-        await self.send_text(text, target_chat_id=target_chat_id)
+        keyboard = (
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton(self._bybit_chart_label(user), url=chart_url)
+            ]]) if chart_url else None
+        )
+        await self.send_text(text, target_chat_id=target_chat_id, reply_markup=keyboard)
 
     async def send_position_event(self, action: dict, prices: dict, target_chat_id: str = None):
         """
@@ -2241,6 +2454,14 @@ class KaraTelegram:
         mode_text = "Scalper" if is_scl else "Standard"
         side = pos.side.value.upper()
         asset = pos.asset
+        chart_url = self._bybit_chart_url(asset, getattr(session, "executor", None))
+        chart_keyboard = (
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    self._bybit_chart_label(getattr(session, "user", None)), url=chart_url
+                )
+            ]]) if chart_url else None
+        )
 
         slice_roe = float(action.get("pnl_pct_slice") or action.get("pnl_pct") or 0.0)
         if abs(slice_roe) < 1e-12 and abs(price_frac) > 0:
@@ -2265,32 +2486,40 @@ class KaraTelegram:
         hold_str = self._fmt_hold_duration(duration_sec)
 
         if action_type == "tp1":
-            # Medium: light emoji + bold on numbers that matter
-            text = (
-                f"🎯 <b>TP1 Hit — {asset} {side}</b>\n"
-                f"<i>Partial locked · sisa masih open</i>\n\n"
-                f"📈 <code>${format_price(entry)}</code> → "
-                f"<code>${format_price(current)}</code>  <b>({price_signed})</b>\n"
-                f"💰 This cut: <b>{slice_sign}{format_idr(pnl_slice)}</b> "
-                f"<b>({slice_sign}{slice_roe_pct:.2f}% @ {lev}x)</b>\n"
-                f"📦 Size: closed <b>{tp1_r*100:.0f}%</b> · remaining "
-                f"<b>{remain_after_tp1*100:.0f}%</b>\n"
-                f"🛡️ SL → <b>breakeven</b> · {mode_text} {lev}x · {hold_str}"
+            stop_text = (
+                "SL digeser ke Entry ✅"
+                if action.get("stop_moved_to_entry") else
+                "Perubahan SL belum dikonfirmasi"
             )
-            await self.send_text(text, target_chat_id=target_chat_id)
+            text = (
+                "🌸 <b>KARA UPDATE: Target Reached</b>\n\n"
+                f"I have secured partial profits for <b>{asset}</b>. "
+                "Taking some chips off the table.\n\n"
+                "🎯 <b>TP1 HIT</b>\n"
+                f"  • Entry   : <code>${format_price(entry)}</code>\n"
+                f"  • Profit  : <b>{slice_sign}{format_idr(pnl_slice)}</b> "
+                f"({slice_sign}{slice_roe_pct:.2f}%)\n\n"
+                "🛡️ <b>Risk Adjustment</b>\n"
+                f"  • Status : Sisa <b>{remain_after_tp1*100:.0f}%</b> masih jalan\n"
+                f"  • Action : {stop_text}\n\n"
+                "Continuing to monitor for TP2. ✨"
+            )
+            await self.send_text(text, target_chat_id=target_chat_id, reply_markup=chart_keyboard)
             return
 
         if action_type == "tp2":
             text = (
-                f"🎯🎯 <b>TP2 Hit — {asset} {side}</b>\n"
-                f"<i>Partial #2 locked · sisa trailing</i>\n\n"
-                f"📈 <code>${format_price(entry)}</code> → "
-                f"<code>${format_price(current)}</code>  <b>({price_signed})</b>\n"
-                f"💰 This cut: <b>{slice_sign}{format_idr(pnl_slice)}</b> "
-                f"<b>({slice_sign}{slice_roe_pct:.2f}% @ {lev}x)</b>\n"
-                f"📊 Realized: <b>{total_sign}{format_idr(total_pnl)}</b> "
-                f"<i>(TP1+TP2, belum final)</i>\n"
-                f"📍 Next: <b>trailing</b> on remainder · {mode_text} {lev}x · {hold_str}"
+                "🌸 <b>KARA UPDATE: Second Target Reached</b>\n\n"
+                f"Another partial profit has been secured for <b>{asset}</b>.\n\n"
+                "🎯 <b>TP2 HIT</b>\n"
+                f"  • Entry   : <code>${format_price(entry)}</code>\n"
+                f"  • Profit  : <b>{slice_sign}{format_idr(pnl_slice)}</b> "
+                f"({slice_sign}{slice_roe_pct:.2f}%)\n"
+                f"  • Locked  : <b>{total_sign}{format_idr(total_pnl)}</b>\n\n"
+                "🛡️ <b>Risk Adjustment</b>\n"
+                f"  • Status : Sisa <b>{remain_after_tp2*100:.0f}%</b> masih jalan\n"
+                "  • Action : Trailing stop aktif ✅\n\n"
+                "Continuing to monitor the remaining position. ✨"
             )
             await self.send_text(text, target_chat_id=target_chat_id)
             return
@@ -2396,12 +2625,14 @@ class KaraTelegram:
                 "account": acc_state,
                 "chat_id": str(target_chat_id) if target_chat_id else None,
             }
-            gen_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "📊 PnL Card",
-                    callback_data=f"gen_pnl:{pos.position_id}",
-                )
-            ]])
+            buttons = [[InlineKeyboardButton(
+                "📊 PnL Card", callback_data=f"gen_pnl:{pos.position_id}"
+            )]]
+            if chart_url:
+                buttons.append([InlineKeyboardButton(
+                    self._bybit_chart_label(getattr(session, "user", None)), url=chart_url
+                )])
+            gen_markup = InlineKeyboardMarkup(buttons)
         except Exception as e:
             log.error(f"[PnLCard] failed to cache pending card data: {e}")
 
@@ -2776,11 +3007,75 @@ class KaraTelegram:
             await query.edit_message_text("Setup live Bybit dibatalkan.")
             return
 
+        if query.data.startswith("onboard_env:"):
+            environment = query.data.split(":", 1)[1]
+            if environment not in ("demo", "mainnet"):
+                await query.answer("Environment tidak valid.", show_alert=True)
+                return
+            ctx.user_data["pending_execution_environment"] = environment
+            ctx.user_data.pop("pending_capital_allocation", None)
+            await query.edit_message_text(
+                f"<b>{environment.upper()}</b> dipilih.\n\n"
+                "Kirim modal alokasi dalam IDR. Contoh: <code>1000000</code>.\n"
+                "Minimum Rp100.000. Allocation menjadi batas sizing, bukan saldo venue.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        if query.data == "onboard_allocation_cancel":
+            ctx.user_data.pop("pending_capital_allocation", None)
+            ctx.user_data.pop("pending_execution_environment", None)
+            await query.edit_message_text("Onboarding dibatalkan. Paper tetap tidak berubah.")
+            return
+
+        if query.data == "onboard_allocation_confirm":
+            environment = ctx.user_data.get("pending_execution_environment")
+            allocation = ctx.user_data.get("pending_capital_allocation")
+            if environment not in ("demo", "mainnet") or allocation is None:
+                await query.edit_message_text("Sesi onboarding kedaluwarsa. Ketik /start.")
+                return
+            tutorial = (
+                "<b>Setup Bybit Demo — langkah 3/4</b>\n\n"
+                "Buat API Key khusus Demo Trading.\n\n"
+                "1. Login ke Bybit.\n"
+                "2. Pindah ke <b>Demo Trading</b>.\n"
+                "3. Dari akun Demo, buka profil lalu menu API.\n"
+                "4. Buat key dengan izin: Account Read dan Contract Trade.\n"
+                "5. Withdrawal harus nonaktif.\n"
+                "6. Jangan pakai API Key Testnet atau Mainnet.\n\n"
+                "Kirim API Key Demo. Pesan akan langsung dihapus."
+                if environment == "demo" else
+                "<b>Setup Bybit Mainnet — langkah 2/2</b>\n\n"
+                "Dana nyata. Buat API Key Mainnet dengan Account Read dan Contract Trade. "
+                "Withdrawal harus nonaktif. Kirim API Key hanya bila server Mainnet sudah diizinkan. "
+                "Pesan akan langsung dihapus."
+            )
+            links = [[InlineKeyboardButton("Buka Bybit", url=BYBIT_HOME_URL)]]
+            if environment == "demo":
+                links.append([InlineKeyboardButton("Panduan resmi Demo API", url=BYBIT_DEMO_GUIDE_URL)])
+            links.append([InlineKeyboardButton("Batal", callback_data="onboard_allocation_cancel")])
+            await query.edit_message_text(
+                tutorial, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(links)
+            )
+            return WAITING_BYBIT_KEY
+
         if query.data == "bybit_live_confirm":
             api_key = ctx.user_data.pop("pending_bybit_key", None)
             api_secret = ctx.user_data.pop("pending_bybit_secret", None)
+            target_testnet = ctx.user_data.pop("pending_bybit_testnet", None)
+            environment_value = ctx.user_data.get("pending_execution_environment")
+            allocation = ctx.user_data.get("pending_capital_allocation")
+            venue_equity = ctx.user_data.pop("pending_bybit_venue_equity", None)
             if not api_key or not api_secret:
                 await query.edit_message_text("Credential sementara kedaluwarsa. Ketik /live lagi.")
+                return
+            if target_testnet is None or target_testnet != config.BYBIT_TESTNET:
+                await query.edit_message_text(
+                    "Aktivasi Live dibatalkan: environment berubah setelah preflight. Ketik /live lagi."
+                )
+                return
+            if environment_value == "mainnet" and config.BYBIT_TESTNET:
+                await query.edit_message_text("Aktivasi dibatalkan: Mainnet tidak konsisten dengan server Testnet.")
                 return
             user = user_db.get_user(chat_id)
             if not user:
@@ -2807,11 +3102,26 @@ class KaraTelegram:
                 "api_secret": user.bybit_api_secret,
                 "authorized": user.bybit_authorized,
                 "testnet": user.bybit_testnet,
+                "environment": getattr(user, "bybit_environment", ExecutionEnvironment.LEGACY_TESTNET),
+                "capital_allocation_idr": getattr(user, "capital_allocation_idr", None),
+                "capital_allocation_usd": getattr(user, "capital_allocation_usd", None),
+                "capital_fx_rate": getattr(user, "capital_fx_rate", None),
+                "capital_updated_at": getattr(user, "capital_updated_at", None),
                 "bot_mode": user.config.bot_mode,
             }
+            if environment_value == "mainnet":
+                from core.capital_allocation import CapitalAllocationError, apply_allocation
+                try:
+                    apply_allocation(user, allocation, float(venue_equity or 0), has_open_position=False)
+                except (CapitalAllocationError, TypeError) as exc:
+                    await query.edit_message_text(f"Aktivasi dibatalkan: {html.escape(str(exc))}")
+                    return
             user.bybit_api_key = api_key
             user.bybit_api_secret = api_secret
-            user.bybit_testnet = True
+            user.bybit_testnet = target_testnet
+            user.bybit_environment = ExecutionEnvironment(
+                environment_value or ("mainnet" if not target_testnet else "legacy_testnet")
+            )
             user.bybit_authorized = True
             user.config.bot_mode = BotMode.LIVE
             try:
@@ -2831,6 +3141,11 @@ class KaraTelegram:
                 user.bybit_api_secret = previous["api_secret"]
                 user.bybit_authorized = previous["authorized"]
                 user.bybit_testnet = previous["testnet"]
+                user.bybit_environment = previous["environment"]
+                user.capital_allocation_idr = previous["capital_allocation_idr"]
+                user.capital_allocation_usd = previous["capital_allocation_usd"]
+                user.capital_fx_rate = previous["capital_fx_rate"]
+                user.capital_updated_at = previous["capital_updated_at"]
                 user.config.bot_mode = previous["bot_mode"]
                 user_db.update_user(user)
                 if self.bot_app and previous["bot_mode"] == BotMode.LIVE:
@@ -2842,10 +3157,32 @@ class KaraTelegram:
                     f"Aktivasi gagal dan dibatalkan: {html.escape(str(e))}"
                 )
                 return
+            if environment_value == "demo":
+                activation_text = (
+                    "Bybit <b>DEMO</b> aktif. Credential tersimpan terenkripsi.\n"
+                    f"Saldo virtual Demo: <b>Rp{allocation.idr:,.0f}</b> / "
+                    f"<b>${float(venue_equity or 0):,.2f}</b>\n"
+                    "KARA memakai seluruh saldo Demo untuk menghitung trade."
+                )
+            elif environment_value == "mainnet":
+                activation_text = (
+                    "Bybit <b>MAINNET</b> aktif. Credential tersimpan terenkripsi.\n"
+                    f"Allocation Mainnet: <b>Rp{allocation.idr:,.0f}</b> / "
+                    f"<b>${allocation.usd:,.2f}</b>\n"
+                    f"Ekuitas venue: <b>${float(venue_equity or 0):,.2f}</b>\n"
+                    "Sizing mengikuti batas allocation."
+                )
+            else:
+                activation_text = (
+                    "Bybit <b>TESTNET</b> aktif. Credential tersimpan terenkripsi."
+                    if target_testnet else "Bybit <b>MAINNET</b> aktif. Credential tersimpan terenkripsi."
+                )
             await query.edit_message_text(
-                "Live Bybit <b>TESTNET</b> aktif. Credential tersimpan terenkripsi.",
+                activation_text,
                 parse_mode=ParseMode.HTML,
             )
+            ctx.user_data.pop("pending_execution_environment", None)
+            ctx.user_data.pop("pending_capital_allocation", None)
             return
 
         if query.data == "paper_cancel":

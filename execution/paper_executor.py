@@ -625,6 +625,9 @@ class PaperExecutor(BaseExecutor):
         total_roe = pnl_roe_fraction(pos.pnl_realized, full_notional, lev)
         return {
             **action,
+            "stop_moved_to_entry": bool(
+                action["action"] == "tp1" and pos.tp1_hit
+            ),
             "pnl": partial_pnl,                 # this slice only (status msgs)
             "pnl_slice": partial_pnl,
             "pnl_total": pos.pnl_realized,      # cumulative (TP1+TP2+final)

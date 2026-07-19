@@ -175,6 +175,13 @@ class FakePersistence:
     def remove_bybit_position(self, position_id):
         self.rows.pop(position_id, None)
 
+    def save_trade(self, chat_id, trade_data):
+        self.trade = (chat_id, trade_data)
+        self.trades = getattr(self, "trades", []) + [(chat_id, trade_data)]
+
+    def save_execution_candidate(self, chat_id, signal, **kwargs):
+        self.candidate = (chat_id, signal, kwargs)
+
 
 def make_signal():
     return TradeSignal(
@@ -249,8 +256,82 @@ async def test_close_uses_exchange_size_fill_price_and_fee():
 
     assert result["fully_closed"] is True
     assert result["exit_price"] == 101.0
-    assert result["pnl"] == pytest.approx((101 - 100.2) * 0.1 - 0.01)
+    assert result["pnl"] == pytest.approx((101 - 100.2) * 0.1 - 0.02)
     assert client.orders[-1]["reduce_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_final_live_close_persists_environment_allocation_fill_and_fee():
+    client = FakeClient()
+    persistence = FakePersistence()
+    user = type("User", (), {
+        "bybit_environment": type("Environment", (), {"value": "demo"})(),
+        "capital_allocation_idr": 1_000_000,
+        "capital_allocation_usd": 62.5,
+    })()
+    executor = make_executor(client, persistence=persistence, user=user)
+    position = await executor.open_position(make_signal())
+    client.positions = [VenuePosition("BTCUSDT", Side.LONG, 0.1, 100.2, 10, stop_loss=99.2)]
+
+    await executor.close_position(position.position_id, 101, reason="manual")
+
+    chat_id, row = persistence.trade
+    assert chat_id == "1"
+    assert row["execution_environment"] == "demo"
+    assert row["venue_equity"] == 1000
+    assert row["capital_allocation_idr"] == 1_000_000
+    assert row["capital_allocation_usd"] == 62.5
+    assert row["sizing_equity"] == 62.5
+    assert row["actual_fill_price"] == 101
+    assert row["fee"] == pytest.approx(0.02)
+
+
+@pytest.mark.asyncio
+async def test_demo_risk_rejection_persists_candidate_reason_and_equity():
+    class RejectRisk(FakeRisk):
+        def pre_trade_check(self, signal, account, positions):
+            return False, "daily_loss_limit"
+
+    client = FakeClient()
+    persistence = FakePersistence()
+    user = type("User", (), {
+        "bybit_environment": type("Environment", (), {"value": "demo"})(),
+        "capital_allocation_idr": 1_000_000,
+        "capital_allocation_usd": 62.5,
+    })()
+    executor = make_executor(client, persistence=persistence, user=user)
+    executor.risk = RejectRisk()
+
+    assert await executor.open_position(make_signal()) is None
+    chat_id, _signal, candidate = persistence.candidate
+    assert chat_id == "1"
+    assert candidate["status"] == "strategy_risk_gate"
+    assert candidate["reason"] == "daily_loss_limit"
+    assert candidate["extra"]["sizing_equity"] == 1000
+
+
+@pytest.mark.asyncio
+async def test_partial_close_persists_slice_then_final_cumulative_pnl():
+    client = FakeClient()
+    persistence = FakePersistence()
+    executor = make_executor(client, persistence=persistence)
+    position = await executor.open_position(make_signal())
+    client.positions = [VenuePosition("BTCUSDT", Side.LONG, 0.1, 100.2, 10, stop_loss=99.2)]
+
+    first = await executor.close_position(position.position_id, 101, reason="tp1", close_ratio=0.5)
+    client.positions = [VenuePosition("BTCUSDT", Side.LONG, 0.05, 100.2, 10, stop_loss=100.2)]
+    second = await executor.close_position(position.position_id, 101, reason="manual")
+
+    assert first["fully_closed"] is False
+    assert second["fully_closed"] is True
+    assert len(persistence.trades) == 2
+    partial = persistence.trades[0][1]
+    final = persistence.trades[1][1]
+    assert partial["pos_id"].endswith(":slice:1")
+    assert partial["close_slice"] is True
+    assert partial["pnl"] == partial["pnl_slice"]
+    assert final["fully_closed"] is True
+    assert final["pnl_total"] == pytest.approx(first["pnl"] + second["pnl"])
 
 
 @pytest.mark.asyncio
@@ -512,6 +593,49 @@ async def test_unknown_position_failed_emergency_close_remains_reconciliation_re
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_defers_in_flight_entry_without_recovery_or_emergency_close():
+    client = FakeClient()
+    client.positions = [VenuePosition("BTCUSDT", Side.LONG, 0.1, 100, 5)]
+    executor = make_executor(client)
+    executor._entry_symbols.add("BTCUSDT")
+
+    await executor.reconcile()
+
+    assert executor.open_positions == []
+    assert client.orders == []
+    assert executor.telemetry is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_recovered_position_never_generates_fabricated_tp_actions():
+    client = FakeClient()
+    client.positions = [VenuePosition("BTCUSDT", Side.LONG, 0.1, 100, 5, stop_loss=99)]
+    executor = make_executor(client)
+
+    await executor.reconcile()
+    recovered = executor.open_positions[0]
+
+    assert recovered.strategy_source == "exchange_recovery_unknown"
+    assert await executor.update_positions({"BTC": 101}) == []
+    assert recovered.tp1_hit is False
+    assert recovered.tp2_hit is False
+    assert client.orders == []
+
+
+@pytest.mark.asyncio
+async def test_emergency_close_order_link_id_stays_within_bybit_limit():
+    client = FakeClient()
+    executor = make_executor(client)
+
+    await executor._emergency_close(
+        "BTCUSDT", Side.LONG, 0.1, "unknown_recovered_position_with_long_reason"
+    )
+
+    assert client.orders[-1]["reduce_only"] is True
+    assert len(client.orders[-1]["client_order_id"]) <= 45
+
+
+@pytest.mark.asyncio
 async def test_protection_audit_returns_only_missing_stops():
     client = FakeClient()
     client.positions = [
@@ -543,7 +667,6 @@ async def test_live_risk_rejection_happens_before_leverage_or_order():
     client.get_execution_quote = execution_quote
     executor = make_executor(client)
     executor.live_risk_gate = BybitLiveRiskGate(LiveRiskLimits(
-        asset_allowlist=frozenset({"BTC", "ETH"}),
         max_leverage=20,
         max_positions=3,
         max_risk_per_trade_pct=0.035,
@@ -577,7 +700,7 @@ async def test_market_guard_transport_error_fails_closed_before_order():
     client.get_execution_quote = failed_quote
     executor = make_executor(client)
     executor.live_risk_gate = BybitLiveRiskGate(LiveRiskLimits(
-        asset_allowlist=frozenset({"BTC"}), max_leverage=20, max_positions=3,
+        max_leverage=20, max_positions=3,
         max_risk_per_trade_pct=0.035, max_total_open_risk_pct=0.105,
         max_symbol_notional_pct=7, max_total_notional_pct=21,
         max_signal_age_s=30, max_quote_age_s=5, max_spread_pct=0.0015,

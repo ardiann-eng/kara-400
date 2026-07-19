@@ -22,6 +22,7 @@ log = logging.getLogger("kara.bybit_private_ws")
 class BybitPrivateWebSocket:
     MAINNET_URL = "wss://stream.bybit.com/v5/private"
     TESTNET_URL = "wss://stream-testnet.bybit.com/v5/private"
+    DEMO_URL = "wss://stream-demo.bybit.com/v5/private"
     TOPICS = ["order", "execution", "position", "wallet"]
 
     def __init__(
@@ -30,14 +31,19 @@ class BybitPrivateWebSocket:
         api_key: str,
         api_secret: str,
         testnet: bool = True,
+        demo: bool = False,
         stale_after_s: float = 45.0,
         on_reconnect: Optional[Callable[[], Awaitable[None]]] = None,
         on_state_event: Optional[Callable[[str, dict], Awaitable[None]]] = None,
         telemetry=None,
     ):
+        if demo and testnet:
+            raise ValueError("Bybit demo and testnet cannot both be enabled")
         self.api_key = api_key
         self._api_secret = api_secret
-        self.url = self.TESTNET_URL if testnet else self.MAINNET_URL
+        self.url = self.DEMO_URL if demo else self.TESTNET_URL if testnet else self.MAINNET_URL
+        # Retained for caller compatibility. Private topic silence cannot prove
+        # a stale connection; transport state is determined by aiohttp heartbeat.
         self.stale_after_s = stale_after_s
         self.on_reconnect = on_reconnect
         self.on_state_event = on_state_event
@@ -68,11 +74,11 @@ class BybitPrivateWebSocket:
 
     @property
     def stale(self) -> bool:
-        value = (
-            not self._connected
-            or self._last_message_at <= 0
-            or time.monotonic() - self._last_message_at > self.stale_after_s
-        )
+        # Private account topics are event-driven. A quiet account receives no
+        # order, execution, position, or wallet payload, so message silence is
+        # not a disconnected transport. aiohttp heartbeat detects dead peers
+        # and _run marks the socket disconnected before REST fallback is used.
+        value = not self._connected
         if self.telemetry:
             self.telemetry.ws_connected = self._connected
             self.telemetry.ws_stale = value

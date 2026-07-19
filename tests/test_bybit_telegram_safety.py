@@ -10,6 +10,7 @@ from models.schemas import BotMode
 sys.modules.setdefault("eth_account", SimpleNamespace())
 
 from notify.telegram import KaraTelegram
+from execution.symbol_registry import BybitSymbolRegistry
 
 
 def test_config_has_single_fernet_assignment_with_hl_fallback():
@@ -43,6 +44,77 @@ class FakeBotApp:
 
     async def get_session(self, chat_id):
         return self.session
+
+
+def test_bybit_chart_url_uses_exact_registry_symbol_not_asset_guess():
+    registry = BybitSymbolRegistry(aliases={"KBONK": "1000BONKUSDT"})
+    registry.load([{
+        "symbol": "1000BONKUSDT", "status": "Trading",
+        "contractType": "LinearPerpetual", "settleCoin": "USDT", "baseCoin": "1000BONK",
+        "priceFilter": {"tickSize": "0.000001"},
+        "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "minNotionalValue": "5"},
+        "leverageFilter": {"maxLeverage": "20"},
+    }])
+
+    url = KaraTelegram._bybit_chart_url("kBONK", SimpleNamespace(registry=registry))
+
+    assert url == "https://www.bybit.com/en/trade/usdt/1000BONKUSDT"
+    assert KaraTelegram._bybit_chart_url("UNKNOWN", SimpleNamespace(registry=registry)) is None
+
+
+def test_bybit_chart_label_distinguishes_demo_from_live():
+    demo = SimpleNamespace(bybit_environment=SimpleNamespace(value="demo"))
+    mainnet = SimpleNamespace(bybit_environment=SimpleNamespace(value="mainnet"))
+
+    assert KaraTelegram._bybit_chart_label(demo) == "Chart Bybit Demo"
+    assert KaraTelegram._bybit_chart_label(mainnet) == "Chart Bybit Live"
+
+
+def test_positions_view_does_not_build_bybit_chart_buttons():
+    source = (Path(__file__).parents[1] / "notify" / "telegram.py").read_text(
+        encoding="utf-8"
+    )
+    positions_start = source.index("async def cmd_positions")
+    positions_end = source.index("def _fmt_hold_duration", positions_start)
+    positions_source = source[positions_start:positions_end]
+
+    assert "_bybit_chart_url(pos.asset" not in positions_source
+    assert "Chart Bybit" not in positions_source
+
+
+@pytest.mark.asyncio
+async def test_tp_updates_do_not_offer_final_pnl_card(monkeypatch):
+    from models.schemas import Position, PositionStatus, Side
+
+    position = Position(
+        position_id="p1", asset="MORPHO", side=Side.LONG,
+        entry_price=2.2045, size_initial=10, size_current=6,
+        leverage=10, margin_usd=2.2, stop_loss=2.2045,
+        tp1=2.21, tp2=2.22, status=PositionStatus.OPEN,
+    )
+    session = SimpleNamespace(
+        executor=SimpleNamespace(_positions={"p1": position}, registry=None),
+        user=SimpleNamespace(bybit_environment=SimpleNamespace(value="demo")),
+    )
+    sent = []
+    telegram = KaraTelegram.__new__(KaraTelegram)
+    telegram.bot_app = FakeBotApp(session)
+    async def send_text(text, **kwargs):
+        sent.append((text, kwargs))
+    telegram.send_text = send_text
+
+    await telegram.send_position_event({
+        "action": "tp1", "position_id": "p1", "pnl_slice": 1,
+        "pnl_total": 1, "pnl_pct_slice": 0.05, "exit_price": 2.21,
+        "stop_moved_to_entry": True,
+    }, {"MORPHO": 2.21}, target_chat_id="1")
+
+    text, kwargs = sent[0]
+    assert "KARA UPDATE: Target Reached" in text
+    assert "TP1 HIT" in text
+    assert "SL digeser ke Entry" in text
+    assert "Pnl Card" not in text
+    assert kwargs["reply_markup"] is None
 
 
 class ReconcilingExecutor:
@@ -232,6 +304,28 @@ async def test_failed_close_all_callback_cannot_activate_paper(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_scalper_warning_uses_actual_live_caps_not_stale_paper_values(monkeypatch):
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_chat=SimpleNamespace(id="1"),
+        effective_message=message,
+    )
+    telegram = KaraTelegram.__new__(KaraTelegram)
+    telegram._is_authorized = lambda _update: True
+    telegram._is_throttled = lambda *args, **kwargs: False
+    monkeypatch.setattr("notify.telegram.config.BYBIT_LIVE_MAX_LEVERAGE", 20)
+    monkeypatch.setattr("notify.telegram.config.BYBIT_LIVE_MAX_RISK_PER_TRADE_PCT", 0.035)
+
+    await telegram.cmd_scalper(update, SimpleNamespace())
+
+    text = message.replies[-1][0]
+    assert "20x" in text
+    assert "3.5%" in text
+    assert "25-35x" not in text
+    assert "13%" not in text
+
+
+@pytest.mark.asyncio
 async def test_live_status_shows_bybit_health_without_credentials():
     account = SimpleNamespace(
         mode=BotMode.LIVE,
@@ -277,11 +371,36 @@ async def test_live_status_shows_bybit_health_without_credentials():
 
     text, _keyboard = await telegram._get_status_content(Session())
 
-    assert "BYBIT TESTNET" in text
-    assert "REST: <b>SEHAT</b>" in text
-    assert "Private WS: <b>CONNECTED</b>" in text
+    assert "Koneksi Bybit: <b>SEHAT</b>" in text
+    assert "WS CONNECTED" in text
     assert "api" not in text.lower()
     assert "secret" not in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_demo_status_shows_environment_and_sizing_limit():
+    account = SimpleNamespace(
+        mode=BotMode.LIVE, is_paused=False, kill_switch_active=False,
+        unrealized_pnl=0, daily_pnl=0, daily_pnl_pct=0, wallet_balance=100,
+        total_equity=100, available=90, current_drawdown_pct=0, positions=[],
+    )
+    class Session:
+        user = SimpleNamespace(chat_id="1")
+        risk_mgr = SimpleNamespace(status={})
+        async def get_account_state(self): return account
+        def bybit_status(self):
+            return {
+                "environment": "BYBIT DEMO", "rest_healthy": True,
+                "ws_connected": True, "ws_stale": False,
+                "capital_allocation_idr": 1_000_000,
+                "capital_allocation_usd": 62.5, "sizing_equity": 62.5,
+            }
+
+    telegram = KaraTelegram.__new__(KaraTelegram)
+    text, _keyboard = await telegram._get_status_content(Session())
+
+    assert "Mode: <b>BYBIT DEMO</b>" in text
+    assert "Saldo Demo untuk trading: <b>$100.00</b>" in text
 
 
 @pytest.mark.asyncio
@@ -342,6 +461,7 @@ async def test_live_confirm_bootstraps_metadata_and_closes_old_ws_and_rest(monke
         SimpleNamespace(user_data={
             "pending_bybit_key": "new-api-key",
             "pending_bybit_secret": "new-api-secret",
+            "pending_bybit_testnet": True,
         }),
     )
 
@@ -400,6 +520,7 @@ async def test_failed_reactivation_restores_previous_live_user_state(monkeypatch
         SimpleNamespace(user_data={
             "pending_bybit_key": "new-key",
             "pending_bybit_secret": "new-secret",
+            "pending_bybit_testnet": True,
         }),
     )
 
@@ -409,3 +530,40 @@ async def test_failed_reactivation_restores_previous_live_user_state(monkeypatch
     assert user.config.bot_mode == BotMode.LIVE
     assert telegram.bot_app.attempts == 3
     assert "Aktivasi gagal" in query.edits[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_live_confirm_refuses_environment_changed_after_preflight(monkeypatch):
+    user = SimpleNamespace(
+        bybit_api_key=None,
+        bybit_api_secret=None,
+        bybit_testnet=True,
+        bybit_authorized=False,
+        config=SimpleNamespace(bot_mode=BotMode.PAPER),
+    )
+    query = FakeQuery()
+    query.data = "bybit_live_confirm"
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_chat=SimpleNamespace(id="1"),
+        effective_message=SimpleNamespace(),
+    )
+    telegram = KaraTelegram.__new__(KaraTelegram)
+    telegram.bot_app = FakeBotApp(SimpleNamespace(executor=ReconcilingExecutor()))
+    telegram._pending_pnl_cards = {}
+    telegram._pending_signals = {}
+    monkeypatch.setattr("notify.telegram.user_db.get_user", lambda chat_id: user)
+    monkeypatch.setattr("notify.telegram.config.BYBIT_TESTNET", False)
+
+    await telegram.on_callback(
+        update,
+        SimpleNamespace(user_data={
+            "pending_bybit_key": "new-key",
+            "pending_bybit_secret": "new-secret",
+            "pending_bybit_testnet": True,
+        }),
+    )
+
+    assert user.config.bot_mode == BotMode.PAPER
+    assert user.bybit_authorized is False
+    assert "environment berubah" in query.edits[-1][0]

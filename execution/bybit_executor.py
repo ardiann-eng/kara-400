@@ -63,6 +63,7 @@ class BybitExecutor(BaseExecutor):
         telemetry=None,
         alerts=None,
         live_risk_gate=None,
+        user=None,
     ):
         self.chat_id = str(chat_id)
         self.client = client
@@ -79,10 +80,13 @@ class BybitExecutor(BaseExecutor):
         self.telemetry = telemetry
         self.alerts = alerts
         self.live_risk_gate = live_risk_gate
+        self.user = user
         self._positions: Dict[str, Position] = {}
         self._position_symbols: Dict[str, str] = {}
         self._live_status: Dict[str, LivePositionStatus] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._reconcile_lock = asyncio.Lock()
+        self._entry_symbols: set[str] = set()
         self._entry_order_ids: Dict[str, str] = {}
         self._last_reconcile_at = 0.0
         self._consecutive_failures = 0
@@ -256,13 +260,33 @@ class BybitExecutor(BaseExecutor):
         if self.circuit_open:
             raise BybitExecutionError("Bybit entry circuit breaker is open")
         spec = self.registry.resolve(signal.asset)
+        # A private WS fill may arrive before entry finishes local registration
+        # and native SL installation. Reconciliation must not recover/emergency
+        # close that known in-flight symbol during this narrow lifecycle gap.
+        self._entry_symbols.add(spec.symbol)
         try:
             async with self._symbol_lock(spec.symbol):
                 account = await self.get_account_state()
+                allocation = getattr(self.user, "capital_allocation_usd", None)
+                environment = getattr(
+                    getattr(self.user, "bybit_environment", None), "value", None
+                )
+                effective_equity = (
+                    min(account.total_equity, allocation)
+                    if environment == "mainnet" and allocation is not None
+                    else account.total_equity
+                )
+                if self.telemetry:
+                    self.telemetry.venue_equity = account.total_equity
+                    self.telemetry.sizing_equity = effective_equity
+                sizing_account = account.model_copy(
+                    update={"total_equity": effective_equity}
+                )
                 approved, reason = self.risk.pre_trade_check(
-                    signal, account, self.open_positions
+                    signal, sizing_account, self.open_positions
                 )
                 if not approved:
+                    self._persist_rejected_candidate(signal, "strategy_risk_gate", reason, account)
                     log.warning(
                         "Bybit entry blocked for %s: %s", signal.asset, reason
                     )
@@ -280,7 +304,7 @@ class BybitExecutor(BaseExecutor):
                 if self.telemetry:
                     self.telemetry.price_bridge_gap_pct = bridge.price_gap_pct
                 _, contracts, leverage = self.risk.calculate_position_size(
-                    signal, account.total_equity
+                    signal, effective_equity
                 )
                 leverage = min(leverage, spec.max_leverage)
                 if self.live_risk_gate:
@@ -302,7 +326,7 @@ class BybitExecutor(BaseExecutor):
                         )
                         self.live_risk_gate.validate(
                             signal=signal,
-                            equity=account.total_equity,
+                            equity=effective_equity,
                             quantity=quantity,
                             leverage=leverage,
                             quote=quote,
@@ -314,6 +338,14 @@ class BybitExecutor(BaseExecutor):
                                 quote.estimated_slippage_pct
                             )
                     except LiveRiskViolation as exc:
+                        self._persist_rejected_candidate(
+                            signal, "bybit_live_risk_gate", exc.reason, account,
+                            extra={
+                                "spread_pct": quote.spread_pct,
+                                "estimated_slippage_pct": quote.estimated_slippage_pct,
+                                "available_depth_quantity": quote.available_quantity,
+                            },
+                        )
                         if self.telemetry:
                             self.telemetry.risk_rejection_count += 1
                             self.telemetry.last_risk_rejection_reason = exc.reason
@@ -321,6 +353,7 @@ class BybitExecutor(BaseExecutor):
                         return None
                     except Exception:
                         reason = "market_guard_error"
+                        self._persist_rejected_candidate(signal, "bybit_live_risk_gate", reason, account)
                         if self.telemetry:
                             self.telemetry.risk_rejection_count += 1
                             self.telemetry.last_risk_rejection_reason = reason
@@ -430,6 +463,10 @@ class BybitExecutor(BaseExecutor):
                     trend_pct=signal.trend_pct,
                     micro_invalidation_price=signal.micro_invalidation_price,
                     entry_location_quality=signal.entry_location_quality,
+                    execution_environment=getattr(
+                        getattr(self.user, "bybit_environment", None), "value", "legacy_testnet"
+                    ),
+                    entry_fee_paid=fill.fee_paid,
                 )
                 self._positions[position_id] = position
                 self._position_symbols[position_id] = spec.symbol
@@ -452,6 +489,38 @@ class BybitExecutor(BaseExecutor):
         except Exception:
             self._record_execution_failure()
             raise
+        finally:
+            self._entry_symbols.discard(spec.symbol)
+
+    def _persist_rejected_candidate(self, signal, status: str, reason: str, account, extra=None) -> None:
+        """Record only observed rejection inputs; never fabricate quote/fill values."""
+        if (
+            not self.persistence
+            or not hasattr(self.persistence, "save_execution_candidate")
+            or getattr(getattr(self.user, "bybit_environment", None), "value", None) != "demo"
+        ):
+            return
+        allocation_usd = getattr(self.user, "capital_allocation_usd", None)
+        environment = getattr(getattr(self.user, "bybit_environment", None), "value", None)
+        sizing = (
+            min(account.total_equity, allocation_usd)
+            if environment == "mainnet" and allocation_usd else account.total_equity
+        )
+        self.persistence.save_execution_candidate(
+            self.chat_id,
+            signal,
+            status=status,
+            reason=reason,
+            execution_environment="demo",
+            extra={
+                "venue": "bybit",
+                "venue_equity": account.total_equity,
+                "capital_allocation_idr": getattr(self.user, "capital_allocation_idr", None),
+                "capital_allocation_usd": allocation_usd,
+                "sizing_equity": sizing,
+                **(extra or {}),
+            },
+        )
 
     async def _emergency_close(
         self, symbol: str, entry_side: Side, quantity: float, reason: str
@@ -459,7 +528,8 @@ class BybitExecutor(BaseExecutor):
         if self.telemetry:
             self.telemetry.emergency_close_attempts += 1
         close_side = Side.SHORT if entry_side == Side.LONG else Side.LONG
-        client_order_id = gen_id(f"KARA-EMERGENCY-{reason}")
+        # Bybit caps orderLinkId at 45 characters. Reasons are unbounded.
+        client_order_id = gen_id("KARA-EMG")
         try:
             fill = await self._place_and_confirm(
                 symbol=symbol,
@@ -538,19 +608,27 @@ class BybitExecutor(BaseExecutor):
                 gross_pnl = (
                     position.entry_price - fill.average_fill_price
                 ) * fill.filled_qty
-            pnl = gross_pnl - fill.fee_paid
+            entry_fee_slice = position.entry_fee_paid * (
+                fill.filled_qty / max(position.size_initial, 1e-12)
+            )
+            pnl = gross_pnl - entry_fee_slice - fill.fee_paid
             position.pnl_realized += pnl
+            position.exit_fee_paid += fill.fee_paid
+            position.close_slices += 1
             position.size_current = max(0.0, venue.size - fill.filled_qty)
             fully_closed = position.size_current <= spec.qty_step / 2
+            balance = (await self.client.get_account()).total_equity
             if fully_closed:
                 position.size_current = 0
                 position.status = PositionStatus.CLOSED
                 position.closed_at = utcnow()
                 self._live_status[position_id] = LivePositionStatus.CLOSED
-                balance = (await self.client.get_account()).total_equity
                 self.risk.record_pnl(position.pnl_realized, balance)
             else:
                 self._live_status[position_id] = LivePositionStatus.OPEN_PROTECTED
+            self._persist_close_slice(
+                position, fill, reason, balance, pnl, entry_fee_slice, fully_closed
+            )
             if fully_closed and self.persistence:
                 self.persistence.remove_bybit_position(position_id)
             elif not fully_closed:
@@ -569,7 +647,57 @@ class BybitExecutor(BaseExecutor):
                 "fee_paid": fill.fee_paid,
                 "qty_closed": fill.filled_qty,
                 "fully_closed": fully_closed,
+                "execution_environment": position.execution_environment,
             }
+
+    def _persist_close_slice(
+        self, position, fill, reason: str, venue_equity: float, pnl_slice: float,
+        entry_fee_slice: float, fully_closed: bool,
+    ) -> None:
+        """Persist each actual close slice; final row retains cumulative lifecycle PnL."""
+        if not self.persistence or not hasattr(self.persistence, "save_trade"):
+            return
+        allocation_usd = getattr(self.user, "capital_allocation_usd", None)
+        allocation_idr = getattr(self.user, "capital_allocation_idr", None)
+        sizing_equity = min(venue_equity, allocation_usd) if allocation_usd else venue_equity
+        slice_fee = entry_fee_slice + fill.fee_paid
+        entry_notional = position.size_initial * position.entry_price
+        trade_id = (
+            position.position_id
+            if fully_closed else f"{position.position_id}:slice:{position.close_slices}"
+        )
+        self.persistence.save_trade(self.chat_id, {
+            "pos_id": trade_id,
+            "asset": position.asset,
+            "side": position.side.value,
+            "reason": reason,
+            "entry_price": position.entry_price,
+            "exit_price": fill.average_fill_price,
+            "size": position.size_initial,
+            "notional": entry_notional,
+            "pnl": pnl_slice,
+            "pnl_slice": pnl_slice,
+            "pnl_total": position.pnl_realized,
+            "pnl_pct": pnl_slice / max(entry_notional, 1e-12),
+            "execution_environment": position.execution_environment,
+            "venue": "bybit",
+            "venue_equity": venue_equity,
+            "capital_allocation_idr": allocation_idr,
+            "capital_allocation_usd": allocation_usd,
+            "sizing_equity": sizing_equity,
+            "actual_fill_price": fill.average_fill_price,
+            "fee": slice_fee,
+            "fee_total": position.entry_fee_paid + position.exit_fee_paid,
+            "close_slice": not fully_closed,
+            "fully_closed": fully_closed,
+            "planned_stop_loss": position.stop_loss,
+            "quantity": position.size_initial,
+            "leverage": position.leverage,
+            "strategy_profile": position.strategy_source,
+            "trade_mode": position.trade_mode,
+            "opened_at": position.opened_at.isoformat(),
+            "closed_at": position.closed_at.isoformat() if position.closed_at else None,
+        })
 
     async def update_positions(
         self,
@@ -578,6 +706,14 @@ class BybitExecutor(BaseExecutor):
     ) -> List[Dict]:
         actions = []
         for position in list(self.open_positions):
+            # Recovery has exchange size/side, but not original strategy levels.
+            # Never fabricate TP1/TP2 from entry price or run autonomous exits
+            # until reconciliation has established a safely managed lifecycle.
+            if position.strategy_source == "exchange_recovery_unknown":
+                log.warning(
+                    "Bybit exits deferred for recovered unknown position %s", position.asset
+                )
+                continue
             current = prices.get(position.asset, 0)
             if current <= 0:
                 continue
@@ -607,6 +743,8 @@ class BybitExecutor(BaseExecutor):
                         side=position.side,
                         stop_loss=position.stop_loss,
                     )
+                    result["native_stop_updated"] = True
+                    result["stop_moved_to_entry"] = True
                 elif action["action"] == "tp2":
                     position.tp2_hit = True
                 if position.status == PositionStatus.OPEN:
@@ -674,6 +812,10 @@ class BybitExecutor(BaseExecutor):
         return True
 
     async def reconcile(self) -> None:
+        async with self._reconcile_lock:
+            await self._reconcile_locked()
+
+    async def _reconcile_locked(self) -> None:
         venue_positions = await self.client.get_positions()
         mismatch_count = 0
         healthy_stops = 0
@@ -682,6 +824,11 @@ class BybitExecutor(BaseExecutor):
         seen_symbols = set()
         for venue in venue_positions:
             seen_symbols.add(venue.symbol)
+            if venue.symbol in self._entry_symbols:
+                log.info(
+                    "Bybit reconciliation defers in-flight entry for %s", venue.symbol
+                )
+                continue
             local_id = next(
                 (
                     position_id
@@ -769,6 +916,11 @@ class BybitExecutor(BaseExecutor):
                 tp2=venue.take_profit or venue.entry_price,
                 is_paper=False,
                 pnl_unrealized=venue.unrealized_pnl,
+                strategy_source="exchange_recovery_unknown",
+                trade_mode="recovery",
+                execution_environment=getattr(
+                    getattr(self.user, "bybit_environment", None), "value", "unknown"
+                ),
             )
             self._positions[position_id] = position
             self._position_symbols[position_id] = venue.symbol

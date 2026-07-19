@@ -51,6 +51,13 @@ class BotMode(str, Enum):
     PAPER = "paper"
     LIVE  = "live"
 
+
+class ExecutionEnvironment(str, Enum):
+    PAPER = "paper"
+    DEMO = "demo"
+    MAINNET = "mainnet"
+    LEGACY_TESTNET = "legacy_testnet"
+
 class ExecutionMode(str, Enum):
     SEMI_AUTO = "semi_auto"  # default - needs user confirmation
     FULL_AUTO = "full_auto"  # auto execute if score >= threshold
@@ -326,6 +333,10 @@ class Position(BaseModel):
     trend_pct:        float = 0.0        # entry higher-timeframe trend context
     micro_invalidation_price: Optional[float] = None
     entry_location_quality: str = "unknown"
+    execution_environment: str = "paper"
+    entry_fee_paid: float = 0.0
+    exit_fee_paid: float = 0.0
+    close_slices: int = 0
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:
@@ -412,6 +423,12 @@ class User(BaseModel):
     bybit_api_secret:   Optional[str] = None
     bybit_authorized:   bool = False
     bybit_testnet:      bool = True
+    # Explicit execution cohort. bybit_testnet remains only for legacy records.
+    bybit_environment:  ExecutionEnvironment = ExecutionEnvironment.PAPER
+    capital_allocation_idr: Optional[int] = None
+    capital_allocation_usd: Optional[float] = None
+    capital_fx_rate: Optional[float] = None
+    capital_updated_at: Optional[datetime] = None
     tos_agreed:        bool = False
 
     # Access Code Gate

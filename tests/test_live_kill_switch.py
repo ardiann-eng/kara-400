@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from models.schemas import AccountState, BotMode, ExecutionMode
 from risk.risk_manager import RiskManager
 from tests.test_bybit_executor import make_signal
@@ -36,3 +38,21 @@ def test_kill_switch_never_auto_resets_when_drawdown_recovers(monkeypatch):
     assert approved is False
     assert "KILL SWITCH ACTIVE" in reason
     assert risk._kill_switch is True
+
+
+def test_kill_switch_reset_requires_admin_and_persists(monkeypatch):
+    risk = RiskManager.__new__(RiskManager)
+    risk._chat_id = "user-1"
+    risk._kill_switch = True
+    persisted = []
+    risk._persist_risk_state = lambda: persisted.append(risk._kill_switch)
+    monkeypatch.setenv("ADMIN_CHAT_ID", "admin-1")
+
+    with pytest.raises(PermissionError, match="Hanya admin"):
+        risk.reset_kill_switch("not-admin")
+    assert risk._kill_switch is True
+    assert persisted == []
+
+    risk.reset_kill_switch("admin-1")
+    assert risk._kill_switch is False
+    assert persisted == [False]

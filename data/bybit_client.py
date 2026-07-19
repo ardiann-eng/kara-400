@@ -8,6 +8,7 @@ import hmac
 import json
 import time
 from typing import Any, Dict, List, Optional
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urlencode
 
 import aiohttp
@@ -50,6 +51,11 @@ class BybitAmbiguousOrderError(BybitError):
 class BybitClient(ExecutionClient):
     MAINNET_URL = "https://api.bybit.com"
     TESTNET_URL = "https://api-testnet.bybit.com"
+    DEMO_URL = "https://api-demo.bybit.com"
+    LEVERAGE_UNCHANGED_CODE = 110043
+    PROTECTION_UNCHANGED_CODE = 34040
+    MAX_ORDER_LINK_ID_LENGTH = 45
+    DEMO_APPLY_MONEY_MAX_USDT = Decimal("100000")
 
     def __init__(
         self,
@@ -57,15 +63,21 @@ class BybitClient(ExecutionClient):
         api_key: str,
         api_secret: str,
         testnet: bool = True,
+        demo: bool = False,
         recv_window: int = 5000,
         session: Optional[aiohttp.ClientSession] = None,
         telemetry=None,
     ):
         self.api_key = api_key
         self._api_secret = api_secret
+        if demo and testnet:
+            raise ValueError("Bybit demo and testnet cannot both be enabled")
         self.testnet = testnet
+        self.demo = demo
         self.recv_window = recv_window
-        self.base_url = self.TESTNET_URL if testnet else self.MAINNET_URL
+        self.base_url = (
+            self.DEMO_URL if demo else self.TESTNET_URL if testnet else self.MAINNET_URL
+        )
         self._session = session
         self._owns_session = session is None
         self._clock_offset_ms = 0
@@ -317,10 +329,48 @@ class BybitClient(ExecutionClient):
             unrealized_pnl=float(account.get("totalPerpUPL", 0) or 0),
         )
 
-    async def preflight(self) -> BybitPreflightResult:
-        api_info = await self._request(
-            "GET", "/v5/user/query-api", auth=True
+    async def set_demo_usdt_balance(self, target_usdt: Decimal | str | float) -> VenueAccount:
+        """Set Demo USDT wallet balance with one documented add or reduce request."""
+        if not self.demo or self.testnet:
+            raise BybitError("Demo virtual fund endpoint is permitted only for Bybit Demo")
+        try:
+            target = Decimal(str(target_usdt))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError("Demo USDT target must be a positive decimal") from exc
+        if not target.is_finite() or target <= 0 or target > self.DEMO_APPLY_MONEY_MAX_USDT:
+            raise ValueError("Demo USDT target is outside Bybit permitted range")
+        before = await self.get_account()
+        current = Decimal(str(before.wallet_balance))
+        delta = target - current
+        if not delta:
+            return before
+        amount = abs(delta)
+        await self._request(
+            "POST",
+            "/v5/account/demo-apply-money",
+            body={
+                "adjustType": 0 if delta > 0 else 1,
+                "utaDemoApplyMoney": [{
+                    "coin": "USDT",
+                    "amountStr": format(amount, "f"),
+                }],
+            },
+            auth=True,
+            retries=0,
         )
+        after = await self.get_account()
+        if abs(Decimal(str(after.wallet_balance)) - target) > Decimal("0.01"):
+            raise BybitError("Demo wallet readback does not match requested capital")
+        return after
+
+    async def apply_demo_money(self, amount_usdt: Decimal | str | float) -> VenueAccount:
+        """Compatibility wrapper: add virtual USDT to current Demo wallet."""
+        before = await self.get_account()
+        return await self.set_demo_usdt_balance(
+            Decimal(str(before.wallet_balance)) + Decimal(str(amount_usdt))
+        )
+
+    async def preflight(self) -> BybitPreflightResult:
         account = await self.get_account()
         raw_positions = await self._request(
             "GET",
@@ -328,16 +378,26 @@ class BybitClient(ExecutionClient):
             params={"category": "linear", "settleCoin": "USDT"},
             auth=True,
         )
-        permissions = api_info.get("permissions") or {}
-        contract_permissions = permissions.get("ContractTrade") or []
-        withdraw_permissions = permissions.get("Withdraw") or []
         position_rows = raw_positions.get("list") or []
         one_way = all(int(row.get("positionIdx", 0) or 0) == 0 for row in position_rows)
+        if self.demo:
+            # Demo API does not support /v5/user/query-api. Account and position
+            # access prove this key is accepted; order permission is checked by its
+            # explicitly confirmed, smallest-size order in the drill.
+            can_trade_contracts = True
+            withdrawal_enabled = None
+        else:
+            api_info = await self._request(
+                "GET", "/v5/user/query-api", auth=True
+            )
+            permissions = api_info.get("permissions") or {}
+            can_trade_contracts = bool(permissions.get("ContractTrade") or [])
+            withdrawal_enabled = bool(permissions.get("Withdraw") or [])
         return BybitPreflightResult(
             credentials_valid=True,
             can_read_account=True,
-            can_trade_contracts=bool(contract_permissions),
-            withdrawal_enabled=bool(withdraw_permissions),
+            can_trade_contracts=can_trade_contracts,
+            withdrawal_enabled=withdrawal_enabled,
             account_type="UNIFIED",
             position_mode="one_way" if one_way else "hedge",
             testnet=self.testnet,
@@ -373,17 +433,23 @@ class BybitClient(ExecutionClient):
         return positions
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
-        await self._request(
-            "POST",
-            "/v5/position/set-leverage",
-            body={
-                "category": "linear",
-                "symbol": symbol,
-                "buyLeverage": str(leverage),
-                "sellLeverage": str(leverage),
-            },
-            auth=True,
-        )
+        try:
+            await self._request(
+                "POST",
+                "/v5/position/set-leverage",
+                body={
+                    "category": "linear",
+                    "symbol": symbol,
+                    "buyLeverage": str(leverage),
+                    "sellLeverage": str(leverage),
+                },
+                auth=True,
+            )
+        except BybitAPIError as exc:
+            # Bybit uses 110043 when requested leverage already applies.
+            # Desired venue state is therefore satisfied without a retry.
+            if exc.code != self.LEVERAGE_UNCHANGED_CODE:
+                raise
 
     @staticmethod
     def _order_status(value: str) -> ExecutionOrderStatus:
@@ -421,6 +487,10 @@ class BybitClient(ExecutionClient):
         client_order_id: str,
         reduce_only: bool = False,
     ) -> VenueOrder:
+        if not client_order_id or len(client_order_id) > self.MAX_ORDER_LINK_ID_LENGTH:
+            raise ValueError(
+                f"Bybit orderLinkId must contain 1-{self.MAX_ORDER_LINK_ID_LENGTH} characters"
+            )
         body = {
             "category": "linear",
             "symbol": symbol,
@@ -502,6 +572,26 @@ class BybitClient(ExecutionClient):
         if take_profit is not None:
             body["takeProfit"] = str(take_profit)
             body["tpTriggerBy"] = "MarkPrice"
+        try:
+            await self._request(
+                "POST", "/v5/position/trading-stop", body=body, auth=True
+            )
+        except BybitAPIError as exc:
+            # Bybit 34040 means requested protection already matches venue state.
+            if exc.code != self.PROTECTION_UNCHANGED_CODE:
+                raise
+
+    async def clear_stop_loss(self, symbol: str) -> None:
+        """Cancel only full-position SL; caller must reconcile immediately."""
         await self._request(
-            "POST", "/v5/position/trading-stop", body=body, auth=True
+            "POST",
+            "/v5/position/trading-stop",
+            body={
+                "category": "linear",
+                "symbol": symbol,
+                "positionIdx": 0,
+                "tpslMode": "Full",
+                "stopLoss": "0",
+            },
+            auth=True,
         )

@@ -15,7 +15,6 @@ from tests.test_bybit_executor import make_signal
 
 def limits(**changes):
     base = LiveRiskLimits(
-        asset_allowlist=frozenset({"BTC", "ETH"}),
         max_leverage=20,
         max_positions=3,
         max_risk_per_trade_pct=0.035,
@@ -67,10 +66,10 @@ def test_current_scalper_aligned_limits_accept_safe_btc_entry():
     validate()
 
 
-def test_asset_leverage_and_position_caps():
+def test_scanned_asset_leverage_and_position_caps():
     signal = make_signal()
-    signal.asset = "SOL"
-    assert_rejected("asset_not_allowlisted", signal=signal)
+    signal.asset = "ARB"
+    validate(signal=signal)
     assert_rejected("leverage_cap", leverage=21)
     positions = [object(), object(), object()]
     assert_rejected("max_live_positions", positions=positions)

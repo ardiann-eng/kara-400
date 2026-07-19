@@ -4,6 +4,7 @@ import pytest
 
 from core.startup_validation import (
     BYBIT_MAINNET_ACK_VALUE,
+    BYBIT_MAINNET_AUTO_ACK_VALUE,
     BybitPreflightResult,
     StartupConfigurationError,
     validate_bybit_preflight,
@@ -14,6 +15,7 @@ from core.startup_validation import (
 def make_config(**overrides):
     values = {
         "TRADE_MODE": "paper",
+        "FULL_AUTO": False,
         "DATA_SOURCE": "mainnet",
         "EXECUTION_EXCHANGE": "bybit",
         "PRIVATE_KEY": "",
@@ -25,8 +27,8 @@ def make_config(**overrides):
         "BYBIT_MAX_PRICE_GAP_PCT": 0.003,
         "BYBIT_MAX_SLIPPAGE_PCT": 0.002,
         "BYBIT_MAINNET_ACK": "",
+        "BYBIT_MAINNET_AUTO_ACK": "",
         "BYBIT_TESTNET_ONLY": True,
-        "BYBIT_LIVE_ASSET_ALLOWLIST": ("BTC", "ETH"),
         "BYBIT_LIVE_MAX_LEVERAGE": 20,
         "BYBIT_LIVE_MAX_POSITIONS": 3,
         "BYBIT_LIVE_MAX_RISK_PER_TRADE_PCT": 0.035,
@@ -90,10 +92,25 @@ def test_bybit_mainnet_requires_exact_acknowledgement():
     validate_startup_config(cfg)
 
 
+def test_bybit_mainnet_full_auto_requires_separate_exact_acknowledgement():
+    cfg = make_config(
+        TRADE_MODE="live",
+        BYBIT_TESTNET=False,
+        BYBIT_TESTNET_ONLY=False,
+        BYBIT_MAINNET_ACK=BYBIT_MAINNET_ACK_VALUE,
+        FULL_AUTO=True,
+    )
+
+    with pytest.raises(StartupConfigurationError, match="BYBIT_MAINNET_AUTO_ACK"):
+        validate_startup_config(cfg)
+
+    cfg.BYBIT_MAINNET_AUTO_ACK = BYBIT_MAINNET_AUTO_ACK_VALUE
+    validate_startup_config(cfg)
+
+
 @pytest.mark.parametrize(
     "field,value,match",
     [
-        ("BYBIT_LIVE_ASSET_ALLOWLIST", (), "ALLOWLIST"),
         ("BYBIT_LIVE_MAX_LEVERAGE", 0, "MAX_LEVERAGE"),
         ("BYBIT_LIVE_MAX_POSITIONS", 0, "MAX_POSITIONS"),
         ("BYBIT_LIVE_MAX_RISK_PER_TRADE_PCT", 0.2, "RISK_PER_TRADE"),

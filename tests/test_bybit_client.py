@@ -3,7 +3,7 @@ import hmac
 
 import pytest
 
-from data.bybit_client import BybitClient
+from data.bybit_client import BybitAPIError, BybitClient
 from execution.exchange_client import ExecutionOrderStatus
 from models.schemas import Side
 from core.startup_validation import BybitPreflightResult
@@ -129,6 +129,75 @@ async def test_set_protection_uses_full_mark_price_stop(monkeypatch):
     assert captured["body"]["tpslMode"] == "Full"
     assert captured["body"]["slTriggerBy"] == "MarkPrice"
     assert "takeProfit" not in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_clear_stop_loss_sends_only_full_position_cancellation(monkeypatch):
+    client = BybitClient(api_key="key", api_secret="secret")
+    captured = {}
+
+    async def fake_request(method, path, **kwargs):
+        captured.update(method=method, path=path, **kwargs)
+        return {}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    await client.clear_stop_loss("BTCUSDT")
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/v5/position/trading-stop"
+    assert captured["body"] == {
+        "category": "linear",
+        "symbol": "BTCUSDT",
+        "positionIdx": 0,
+        "tpslMode": "Full",
+        "stopLoss": "0",
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_leverage_accepts_bybit_unchanged_response(monkeypatch):
+    client = BybitClient(api_key="key", api_secret="secret")
+
+    async def unchanged_request(*args, **kwargs):
+        raise BybitAPIError(110043, "Set leverage has not been modified.")
+
+    monkeypatch.setattr(client, "_request", unchanged_request)
+    await client.set_leverage("BTCUSDT", 1)
+
+
+@pytest.mark.asyncio
+async def test_set_leverage_preserves_non_idempotent_api_errors(monkeypatch):
+    client = BybitClient(api_key="key", api_secret="secret")
+
+    async def rejected_request(*args, **kwargs):
+        raise BybitAPIError(110013, "Cannot set leverage due to risk limit level.")
+
+    monkeypatch.setattr(client, "_request", rejected_request)
+    with pytest.raises(BybitAPIError, match="110013"):
+        await client.set_leverage("BTCUSDT", 1)
+
+
+@pytest.mark.asyncio
+async def test_set_protection_accepts_bybit_not_modified_response(monkeypatch):
+    client = BybitClient(api_key="key", api_secret="secret")
+
+    async def unchanged_request(*args, **kwargs):
+        raise BybitAPIError(34040, "not modified")
+
+    monkeypatch.setattr(client, "_request", unchanged_request)
+
+    await client.set_protection(symbol="BTCUSDT", side=Side.LONG, stop_loss=99)
+
+
+@pytest.mark.asyncio
+async def test_place_order_rejects_order_link_id_longer_than_bybit_limit():
+    client = BybitClient(api_key="key", api_secret="secret")
+
+    with pytest.raises(ValueError, match="1-45"):
+        await client.place_order(
+            symbol="BTCUSDT", side=Side.LONG, quantity=0.001,
+            client_order_id="x" * 46,
+        )
 
 
 @pytest.mark.asyncio

@@ -1074,11 +1074,6 @@ class RiskManager:
         self._persist_risk_state()
         log.info("▶️  Risk manager: trading resumed")
 
-    def reset_kill_switch(self):
-        """Only call after manual review. NEVER auto-reset."""
-        log.warning("🔓 Kill switch manually reset by user")
-        self._kill_switch = False
-
     @property
     def status(self) -> Dict:
         return {

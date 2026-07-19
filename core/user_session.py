@@ -5,7 +5,7 @@ Encapsulates all execution and risk state for a single user.
 
 from typing import Optional
 import logging
-from models.schemas import User, BotMode
+from models.schemas import User, BotMode, ExecutionEnvironment
 from risk.risk_manager import RiskManager
 
 log = logging.getLogger("kara.user_session")
@@ -52,14 +52,33 @@ class UserSession:
             from execution.live_risk_gate import BybitLiveRiskGate, LiveRiskLimits
             import config
 
-            self.bybit_telemetry = BybitTelemetry(
-                environment=(
-                    "BYBIT TESTNET" if self.user.bybit_testnet else "BYBIT MAINNET"
+            environment = self.user.bybit_environment
+            # Old JSON records have an explicit bybit_testnet boolean but no
+            # environment field. Use it only as a runtime compatibility view;
+            # never overwrite persisted credential environment by inference.
+            if environment == ExecutionEnvironment.PAPER:
+                environment = (
+                    ExecutionEnvironment.LEGACY_TESTNET
+                    if self.user.bybit_testnet else ExecutionEnvironment.MAINNET
                 )
+            if environment not in (
+                ExecutionEnvironment.DEMO,
+                ExecutionEnvironment.MAINNET,
+                ExecutionEnvironment.LEGACY_TESTNET,
+            ):
+                raise RuntimeError(
+                    "User Bybit credential environment is not executable"
+                )
+            if environment == ExecutionEnvironment.MAINNET and config.BYBIT_TESTNET:
+                raise RuntimeError("User Bybit credential environment does not match server BYBIT_TESTNET")
+            if environment == ExecutionEnvironment.LEGACY_TESTNET and not config.BYBIT_TESTNET:
+                raise RuntimeError("User Bybit credential environment does not match server BYBIT_TESTNET")
+
+            self.bybit_telemetry = BybitTelemetry(
+                environment=f"BYBIT {environment.value.upper()}"
             )
             self.bybit_alerts = BybitAlertManager(alert_sink)
             live_risk_gate = BybitLiveRiskGate(LiveRiskLimits(
-                asset_allowlist=frozenset(config.BYBIT_LIVE_ASSET_ALLOWLIST),
                 max_leverage=config.BYBIT_LIVE_MAX_LEVERAGE,
                 max_positions=config.BYBIT_LIVE_MAX_POSITIONS,
                 max_risk_per_trade_pct=config.BYBIT_LIVE_MAX_RISK_PER_TRADE_PCT,
@@ -76,14 +95,16 @@ class UserSession:
             self.bybit_client = BybitClient(
                 api_key=self.user.bybit_api_key,
                 api_secret=self.user.bybit_api_secret,
-                testnet=self.user.bybit_testnet,
+                testnet=environment == ExecutionEnvironment.LEGACY_TESTNET,
+                demo=environment == ExecutionEnvironment.DEMO,
                 recv_window=config.BYBIT_RECV_WINDOW,
                 telemetry=self.bybit_telemetry,
             )
             self.bybit_ws = BybitPrivateWebSocket(
                 api_key=self.user.bybit_api_key,
                 api_secret=self.user.bybit_api_secret,
-                testnet=self.user.bybit_testnet,
+                testnet=environment == ExecutionEnvironment.LEGACY_TESTNET,
+                demo=environment == ExecutionEnvironment.DEMO,
                 telemetry=self.bybit_telemetry,
             )
 
@@ -100,6 +121,7 @@ class UserSession:
                 telemetry=self.bybit_telemetry,
                 alerts=self.bybit_alerts,
                 live_risk_gate=live_risk_gate,
+                user=self.user,
             )
             self.bybit_ws.on_reconnect = self._reconcile_after_ws_reconnect
             self.bybit_ws.on_state_event = self._handle_bybit_state_event
@@ -112,6 +134,8 @@ class UserSession:
         if self.user.config.bot_mode == BotMode.LIVE:
             await self.bybit_client.connect()
             await self.bybit_client.sync_clock()
+            await self.bybit_client.load_instruments()
+            self.executor.registry = self.bybit_client.symbol_registry
             await self.bybit_ws.start()
             self.executor.load_persisted_positions()
             await self.executor.reconcile_if_due(force=True)
@@ -129,7 +153,12 @@ class UserSession:
 
     async def _handle_bybit_state_event(self, topic: str, row: dict):
         if topic in ("execution", "position", "wallet"):
-            await self.executor.reconcile_if_due(force=True)
+            try:
+                await self.executor.reconcile_if_due(force=True)
+            except Exception:
+                # WS callbacks run as detached tasks. Log failure without leaving
+                # an unhandled task exception that hides the actual lifecycle error.
+                log.exception("Bybit WS state-event reconciliation failed")
 
     async def get_account_state(self):
         return await self.executor.get_account_state()
@@ -147,11 +176,16 @@ class UserSession:
                 0.0, self.executor._circuit_open_until - __import__("time").monotonic()
             )
         snapshot = telemetry.snapshot()
+        if self.user.bybit_environment in (
+            ExecutionEnvironment.DEMO, ExecutionEnvironment.MAINNET,
+        ):
+            snapshot["capital_allocation_idr"] = self.user.capital_allocation_idr
+            snapshot["capital_allocation_usd"] = self.user.capital_allocation_usd
+            snapshot["capital_fx_rate"] = self.user.capital_fx_rate
         gate = getattr(getattr(self, "executor", None), "live_risk_gate", None)
         if gate:
             limits = gate.limits
             snapshot["live_risk_limits"] = {
-                "asset_allowlist": sorted(limits.asset_allowlist),
                 "max_leverage": limits.max_leverage,
                 "max_positions": limits.max_positions,
                 "max_risk_per_trade_pct": limits.max_risk_per_trade_pct,

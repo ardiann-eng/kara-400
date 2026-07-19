@@ -18,6 +18,13 @@ def test_private_ws_auth_signature():
     assert BybitPrivateWebSocket.auth_signature("secret", expires) == expected
 
 
+def test_private_ws_selects_explicit_demo_endpoint():
+    ws = BybitPrivateWebSocket(api_key="key", api_secret="secret", testnet=False, demo=True)
+    assert ws.url == "wss://stream-demo.bybit.com/v5/private"
+    with pytest.raises(ValueError, match="cannot both"):
+        BybitPrivateWebSocket(api_key="key", api_secret="secret", testnet=True, demo=True)
+
+
 @pytest.mark.asyncio
 async def test_order_event_is_cached_and_wakes_waiter():
     ws = BybitPrivateWebSocket(api_key="key", api_secret="secret")
@@ -48,6 +55,15 @@ async def test_stale_ws_returns_none_for_rest_fallback():
     ws = BybitPrivateWebSocket(api_key="key", api_secret="secret")
     assert ws.stale is True
     assert await ws.wait_for_order("missing", 1) is None
+
+
+def test_connected_idle_private_ws_is_not_stale():
+    ws = BybitPrivateWebSocket(api_key="key", api_secret="secret")
+    ws._connected = True
+    # Bybit private topics emit on account changes, not as a periodic heartbeat.
+    ws._last_message_at = time.monotonic() - 3600
+
+    assert ws.stale is False
 
 
 @pytest.mark.asyncio

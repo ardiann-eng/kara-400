@@ -7,6 +7,7 @@ from typing import List, Optional
 
 
 BYBIT_MAINNET_ACK_VALUE = "I_UNDERSTAND_BYBIT_MAINNET_RISK"
+BYBIT_MAINNET_AUTO_ACK_VALUE = "I_UNDERSTAND_BYBIT_MAINNET_AUTO_RISK"
 
 
 class StartupConfigurationError(RuntimeError):
@@ -74,9 +75,6 @@ def validate_startup_config(cfg) -> None:
             errors.append("BYBIT_MAX_PRICE_GAP_PCT must be within (0, 0.02]")
         if not 0 < cfg.BYBIT_MAX_SLIPPAGE_PCT <= 0.02:
             errors.append("BYBIT_MAX_SLIPPAGE_PCT must be within (0, 0.02]")
-        allowlist = tuple(getattr(cfg, "BYBIT_LIVE_ASSET_ALLOWLIST", ()))
-        if not allowlist or any(not str(asset).strip() for asset in allowlist):
-            errors.append("BYBIT_LIVE_ASSET_ALLOWLIST must not be empty")
         if not 1 <= getattr(cfg, "BYBIT_LIVE_MAX_LEVERAGE", 0) <= 100:
             errors.append("BYBIT_LIVE_MAX_LEVERAGE must be within [1, 100]")
         if not 1 <= getattr(cfg, "BYBIT_LIVE_MAX_POSITIONS", 0) <= 20:
@@ -111,6 +109,16 @@ def validate_startup_config(cfg) -> None:
                 )
             if getattr(cfg, "BYBIT_TESTNET_ONLY", True) and not cfg.BYBIT_TESTNET:
                 errors.append("Bybit mainnet is locked while BYBIT_TESTNET_ONLY=true")
+            if (
+                not cfg.BYBIT_TESTNET
+                and getattr(cfg, "FULL_AUTO", False)
+                and getattr(cfg, "BYBIT_MAINNET_AUTO_ACK", "")
+                != BYBIT_MAINNET_AUTO_ACK_VALUE
+            ):
+                errors.append(
+                    "Bybit mainnet full-auto requires BYBIT_MAINNET_AUTO_ACK="
+                    f"{BYBIT_MAINNET_AUTO_ACK_VALUE}"
+                )
 
     if errors:
         raise StartupConfigurationError("; ".join(errors))
