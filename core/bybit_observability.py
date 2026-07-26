@@ -79,12 +79,33 @@ class BybitAlertManager:
         self.sink = sink
         self.cooldown_s = cooldown_s
         self._last_sent: Dict[str, float] = {}
+        self._suppressed: Dict[str, int] = {}
+
+    @staticmethod
+    def _level(message: str) -> int:
+        if message.startswith("CRITICAL"):
+            return logging.CRITICAL
+        if message.startswith("WARNING"):
+            return logging.WARNING
+        return logging.INFO
 
     async def emit(self, key: str, message: str) -> bool:
+        # Telegram is throttled, may be unconfigured, and is not retained for audit.
+        # These alerts are the only record that venue protection failed, so log every
+        # occurrence before delivery is even attempted. Without this the deployment
+        # log cannot answer when a position lost its hard SL.
+        log.log(self._level(message), "BYBIT_ALERT key=%s %s", key, message)
         if not self.sink:
             return False
         now = time.monotonic()
         if now - self._last_sent.get(key, -self.cooldown_s) < self.cooldown_s:
+            self._suppressed[key] = self._suppressed.get(key, 0) + 1
+            log.info(
+                "BYBIT_ALERT_SUPPRESSED key=%s repeat=%s cooldown_s=%s",
+                key,
+                self._suppressed[key],
+                self.cooldown_s,
+            )
             return False
         try:
             await self.sink(message)
@@ -92,6 +113,11 @@ class BybitAlertManager:
             log.exception("Bybit alert delivery failed for key=%s", key)
             return False
         self._last_sent[key] = now
+        swallowed = self._suppressed.pop(key, 0)
+        if swallowed:
+            log.info(
+                "BYBIT_ALERT_DELIVERED key=%s after_suppressed=%s", key, swallowed
+            )
         return True
 
     def schedule(self, key: str, message: str) -> None:

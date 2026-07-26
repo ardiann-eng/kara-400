@@ -98,6 +98,12 @@
 - `2026-07-19_BYBIT_ENTRY_RECONCILIATION_RACE.md`
   - Incident LDO: race private WS/reconcile saat entry, limit orderLinkId emergency close, idempotensi native SL, dan guard lokal sebelum deploy.
 
+- `2026-07-19_BYBIT_NATIVE_PARTIAL_TP_SETUP.md`
+   - Native TP1/TP2 partial setup untuk entry baru, guard duplicate close, dan gate karena attribution fill exchange belum tersedia.
+
+- `2026-07-26_BYBIT_LIVE_PROTECTION_AND_OBSERVABILITY_FIXES.md`
+   - Audit live Railway: drift deploy vs working tree, validator SL yang menolak stop break-even/trailing, guard break-even TP1, logging alert dan disconnect WS. TP native belum diperbaiki dan menunggu Demo drill.
+
 ## Reading Order
 
 - Baca note scalper exit dan fallback untuk perubahan entry serta time exit.

@@ -132,6 +132,31 @@ async def test_set_protection_uses_full_mark_price_stop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_partial_tp_sl_uses_equal_mark_price_pair_sizes(monkeypatch):
+    client = BybitClient(api_key="key", api_secret="secret")
+    captured = {}
+
+    async def fake_request(method, path, **kwargs):
+        captured.update(method=method, path=path, **kwargs)
+        return {}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    await client.add_partial_tp_sl(
+        symbol="BTCUSDT", side=Side.LONG, take_profit=101, stop_loss=99, quantity=0.025
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/v5/position/trading-stop"
+    assert captured["body"] == {
+        "category": "linear", "symbol": "BTCUSDT", "positionIdx": 0,
+        "tpslMode": "Partial", "takeProfit": "101", "stopLoss": "99",
+        "tpTriggerBy": "MarkPrice", "slTriggerBy": "MarkPrice",
+        "tpOrderType": "Market", "slOrderType": "Market",
+        "tpSize": "0.025", "slSize": "0.025",
+    }
+
+
+@pytest.mark.asyncio
 async def test_clear_stop_loss_sends_only_full_position_cancellation(monkeypatch):
     client = BybitClient(api_key="key", api_secret="secret")
     captured = {}

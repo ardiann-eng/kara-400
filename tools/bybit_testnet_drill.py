@@ -54,6 +54,15 @@ class DrillEvidence:
     forced_rest_reconciliation: bool = False
     multi_position_symbols: Optional[list[str]] = None
     close_all_closed_symbols: Optional[list[str]] = None
+    probe_observations: Optional[dict] = None
+    partial_tp_clears_full_sl: Optional[bool] = None
+    partial_calls_accumulate: Optional[bool] = None
+    full_sl_reapply_clears_partial_tp: Optional[bool] = None
+    partial_tp_visible_as_stop_order: Optional[bool] = None
+    native_tp_order_ids_captured: Optional[bool] = None
+    native_tp_targets_live: Optional[int] = None
+    native_tp_trigger_prices: Optional[list] = None
+    native_tp_planned_prices: Optional[list] = None
     reconciliation_result: str = "not_run"
     ws_state: str = "not_used"
     final_position_size: float = 0.0
@@ -87,6 +96,25 @@ def partial_drill_quantity(spec: InstrumentSpec, mark_price: float) -> float:
     if notional > MAX_PARTIAL_DRILL_NOTIONAL_USDT:
         raise DrillSafetyError(
             f"Partial drill notional {notional:.2f} exceeds "
+            f"{MAX_PARTIAL_DRILL_NOTIONAL_USDT:.2f} USDT cap"
+        )
+    return float(f"{quantity:.12g}")
+
+
+def native_target_drill_quantity(spec: InstrumentSpec, mark_price: float) -> float:
+    """Smallest size whose TP1 slice still clears the venue step.
+
+    KARA closes 25% at TP1, so a native target needs roughly four steps of size.
+    Anything smaller legitimately skips native targets, which this drill is not
+    trying to exercise.
+    """
+    base = smallest_valid_quantity(spec, mark_price)
+    steps = math.ceil(spec.qty_step / (0.25 * spec.qty_step))
+    quantity = max(base, steps * spec.qty_step)
+    notional = quantity * mark_price
+    if notional > MAX_PARTIAL_DRILL_NOTIONAL_USDT:
+        raise DrillSafetyError(
+            f"Native target drill notional {notional:.2f} exceeds "
             f"{MAX_PARTIAL_DRILL_NOTIONAL_USDT:.2f} USDT cap"
         )
     return float(f"{quantity:.12g}")
@@ -291,6 +319,536 @@ async def run_hold_protected(
         evidence.final_position_size = sum(item.size for item in positions)
         if evidence.final_position_size:
             evidence.reconciliation_result = "unresolved_position"
+    evidence.fee = total_fee
+    return evidence
+
+
+async def run_partial_tp_mode_probe(
+    client: BybitClient,
+    *,
+    asset: str,
+    side: Side,
+    environment: str = "testnet",
+    confirm: Callable[[str], str] = input,
+    output: Callable[[str], None] = print,
+) -> DrillEvidence:
+    """Settle, by observation, how Bybit V5 tpslMode Full and Partial interact.
+
+    Bybit's set-trading-stop documentation does not state whether installing a
+    Partial TP clears a Full-mode stopLoss, whether repeated Partial calls add or
+    overwrite, or whether position.stopLoss reflects Partial stops. KARA cannot
+    install native partial TPs without those answers, because a wrong assumption
+    silently removes hard protection from a live position.
+    """
+    spec, mark_price, _ = await prepare_drill(
+        client, asset=asset, environment=environment, require_funds=True
+    )
+    if await client.get_positions(spec.symbol):
+        raise DrillSafetyError(f"Refusing probe: existing {spec.symbol} position")
+    quantity = partial_drill_quantity(spec, mark_price)
+    evidence = DrillEvidence(
+        timestamp_utc=datetime.now(timezone.utc).isoformat(),
+        environment=environment_label(environment),
+        account_masked=mask(client.api_key),
+        symbol=spec.symbol,
+        side=side.value,
+        quantity=quantity,
+        scenario="partial_tp_mode_probe",
+    )
+    output(
+        f"Environment: {evidence.environment} | Account: {evidence.account_masked} | "
+        f"Scenario: PARTIAL TP MODE PROBE | Symbol: {spec.symbol} | Quantity: {quantity}"
+    )
+    prompt = (
+        f"Type {environment.upper()} to probe tpslMode with {side.value.upper()} "
+        f"{quantity} {spec.symbol}: "
+    )
+    if confirm(prompt).strip() != environment.upper():
+        raise DrillSafetyError("Operator confirmation rejected")
+
+    registry = client.symbol_registry
+    observations: dict = {}
+    total_fee = 0.0
+
+    async def snapshot(stage: str) -> dict:
+        positions = await client.get_positions(spec.symbol)
+        venue = next((item for item in positions if item.side == side), None)
+        try:
+            stop_orders = await client.get_open_orders(
+                spec.symbol, order_filter="StopOrder"
+            )
+        except Exception as exc:
+            stop_orders = []
+            observations.setdefault("stop_order_read_errors", []).append(
+                f"{stage}: {type(exc).__name__}: {exc}"
+            )
+        record = {
+            "position_size": venue.size if venue else 0.0,
+            "position_stop_loss": float(venue.stop_loss or 0) if venue else 0.0,
+            "position_take_profit": float(venue.take_profit or 0) if venue else 0.0,
+            "stop_order_count": len(stop_orders),
+            "stop_orders": [
+                {
+                    "stopOrderType": row.get("stopOrderType"),
+                    "tpslMode": row.get("tpslMode"),
+                    "triggerPrice": row.get("triggerPrice"),
+                    "qty": row.get("qty"),
+                    "reduceOnly": row.get("reduceOnly"),
+                }
+                for row in stop_orders
+            ],
+        }
+        observations[stage] = record
+        output(
+            f"  [{stage}] position SL={record['position_stop_loss']} "
+            f"TP={record['position_take_profit']} "
+            f"stop_orders={record['stop_order_count']}"
+        )
+        return record
+
+    try:
+        await client.set_leverage(spec.symbol, 1)
+        entry = await place_and_confirm(
+            client,
+            symbol=spec.symbol,
+            side=side,
+            quantity=quantity,
+            prefix="KARA-DRILL-TPMODE",
+        )
+        evidence.entry_order_link_id_masked = mask(entry.client_order_id)
+        evidence.entry_fill_price = entry.average_fill_price
+        total_fee += entry.fee_paid
+        if entry.status != ExecutionOrderStatus.FILLED or entry.filled_qty != quantity:
+            raise BybitError("Probe entry was not fully filled")
+
+        fill = entry.average_fill_price
+        long_side = side == Side.LONG
+        stop_loss = registry.normalize_price(spec, fill * (0.98 if long_side else 1.02))
+        tp1 = registry.normalize_price(spec, fill * (1.02 if long_side else 0.98))
+        tp2 = registry.normalize_price(spec, fill * (1.04 if long_side else 0.96))
+        slice_qty = registry.normalize_quantity(spec, entry.filled_qty / 2)
+        if slice_qty <= 0 or slice_qty >= entry.filled_qty:
+            raise DrillSafetyError("Probe requires two non-empty quantity slices")
+
+        # Stage 1 establishes the baseline: a Full-mode stop on the whole position.
+        await client.set_protection(symbol=spec.symbol, side=side, stop_loss=stop_loss)
+        baseline = await snapshot("1_after_full_sl")
+        evidence.hard_sl_present = bool(baseline["position_stop_loss"])
+        evidence.observed_stop_loss = baseline["position_stop_loss"]
+        if not evidence.hard_sl_present:
+            raise BybitError("Probe baseline failed: Full-mode stop loss not visible")
+
+        # Stage 2 is the decisive question for KARA.
+        await client.add_partial_tp_sl(
+            symbol=spec.symbol,
+            side=side,
+            take_profit=tp1,
+            stop_loss=stop_loss,
+            quantity=slice_qty,
+        )
+        after_first = await snapshot("2_after_partial_tp1")
+
+        # Stage 3 shows whether a second Partial call adds or replaces.
+        await client.add_partial_tp_sl(
+            symbol=spec.symbol,
+            side=side,
+            take_profit=tp2,
+            stop_loss=stop_loss,
+            quantity=registry.normalize_quantity(spec, entry.filled_qty - slice_qty),
+        )
+        after_second = await snapshot("3_after_partial_tp2")
+
+        # Stage 4 shows whether KARA's own reconcile reinstall would wipe the targets.
+        await client.set_protection(symbol=spec.symbol, side=side, stop_loss=stop_loss)
+        after_reapply = await snapshot("4_after_full_sl_reapplied")
+
+        evidence.partial_tp_clears_full_sl = bool(
+            baseline["position_stop_loss"] and not after_first["position_stop_loss"]
+        )
+        evidence.partial_tp_visible_as_stop_order = (
+            after_first["stop_order_count"] > baseline["stop_order_count"]
+        )
+        evidence.partial_calls_accumulate = (
+            after_second["stop_order_count"] > after_first["stop_order_count"]
+        )
+        evidence.full_sl_reapply_clears_partial_tp = (
+            after_first["stop_order_count"] > 0
+            and after_reapply["stop_order_count"] < after_second["stop_order_count"]
+        )
+        evidence.probe_observations = observations
+        evidence.result = "passed"
+    except Exception as exc:
+        evidence.error = f"{type(exc).__name__}: {exc}"
+        evidence.probe_observations = observations
+    finally:
+        try:
+            cleanup = await close_exchange_position(
+                client, symbol=spec.symbol, entry_side=side
+            )
+            if cleanup:
+                evidence.exit_fill_price = cleanup.average_fill_price
+                total_fee += cleanup.fee_paid
+        except Exception as cleanup_exc:
+            evidence.error = (
+                f"{evidence.error}; cleanup: "
+                f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+            ).lstrip("; ")
+        remaining = await client.get_positions(spec.symbol)
+        evidence.final_position_size = sum(item.size for item in remaining)
+        evidence.reconciliation_result = (
+            "unresolved_position" if evidence.final_position_size else "exchange_zero"
+        )
+        if evidence.final_position_size:
+            evidence.result = "failed"
+    evidence.fee = total_fee
+    return evidence
+
+
+class _DrillRiskManager:
+    """Forces one pre-validated quantity so the drill exercises the real executor
+    entry path without pulling in live risk configuration."""
+
+    def __init__(self, contracts: float, leverage: int = 1):
+        self.status = {
+            "peak_balance": 0, "daily_pnl": 0, "paused": False, "kill_switch": False
+        }
+        self._contracts = contracts
+        self._leverage = leverage
+
+    def pre_trade_check(self, signal, account, positions):
+        return True, "drill"
+
+    def calculate_position_size(self, signal, equity):
+        return 0.0, self._contracts, self._leverage
+
+    def check_tp_trail(self, position, price, market_state=None):
+        return None
+
+    def record_pnl(self, pnl, balance):
+        return None
+
+
+async def run_native_tp_lifecycle(
+    client: BybitClient,
+    *,
+    asset: str,
+    side: Side,
+    environment: str = "testnet",
+    confirm: Callable[[str], str] = input,
+    output: Callable[[str], None] = print,
+) -> DrillEvidence:
+    """Drive BybitExecutor.open_position against the venue and prove the native
+    targets it installs are actually live and attributable.
+
+    This exercises production code, not the raw client, so a passing run is
+    evidence that a real KARA entry leaves visible TP1/TP2 on Bybit.
+    """
+    from execution.bybit_executor import BybitExecutor
+    from execution.price_bridge import HyperliquidBybitPriceBridge
+    from models.schemas import (
+        MarketRegime, ScoreBreakdown, SignalStrength, TradeSignal,
+    )
+
+    spec, mark_price, _ = await prepare_drill(
+        client, asset=asset, environment=environment, require_funds=True
+    )
+    if await client.get_positions(spec.symbol):
+        raise DrillSafetyError(f"Refusing drill: existing {spec.symbol} position")
+    quantity = native_target_drill_quantity(spec, mark_price)
+    evidence = DrillEvidence(
+        timestamp_utc=datetime.now(timezone.utc).isoformat(),
+        environment=environment_label(environment),
+        account_masked=mask(client.api_key),
+        symbol=spec.symbol,
+        side=side.value,
+        quantity=quantity,
+        scenario="native_tp_lifecycle",
+    )
+    output(
+        f"Environment: {evidence.environment} | Account: {evidence.account_masked} | "
+        f"Scenario: NATIVE TP LIFECYCLE | Symbol: {spec.symbol} | Quantity: {quantity}"
+    )
+    prompt = (
+        f"Type {environment.upper()} to run executor entry with "
+        f"{side.value.upper()} {quantity} {spec.symbol}: "
+    )
+    if confirm(prompt).strip() != environment.upper():
+        raise DrillSafetyError("Operator confirmation rejected")
+
+    long_side = side == Side.LONG
+    executor = BybitExecutor(
+        chat_id="drill",
+        client=client,
+        risk_manager=_DrillRiskManager(quantity),
+        symbol_registry=client.symbol_registry,
+        price_bridge=HyperliquidBybitPriceBridge(0.01),
+        fill_timeout_s=10.0,
+        poll_interval_s=0.5,
+    )
+    signal = TradeSignal(
+        signal_id="drill-native-tp",
+        asset=asset.upper(),
+        side=side,
+        score=70,
+        strength=SignalStrength.MODERATE,
+        regime=MarketRegime.NORMAL,
+        breakdown=ScoreBreakdown(),
+        entry_price=mark_price,
+        stop_loss=mark_price * (0.98 if long_side else 1.02),
+        tp1=mark_price * (1.02 if long_side else 0.98),
+        tp2=mark_price * (1.04 if long_side else 0.96),
+        suggested_leverage=1,
+    )
+
+    total_fee = 0.0
+    try:
+        position = await executor.open_position(signal)
+        if position is None:
+            raise BybitError("Executor declined the drill entry")
+        evidence.entry_fill_price = position.entry_price
+        evidence.hard_sl_present = bool(position.stop_loss)
+        total_fee += position.entry_fee_paid
+        evidence.native_tp_planned_prices = [position.tp1, position.tp2]
+        evidence.native_tp_order_ids_captured = bool(
+            position.native_tp1_order_id and position.native_tp2_order_id
+        )
+
+        rows = await client.get_open_orders(spec.symbol, order_filter="StopOrder")
+        targets = [
+            row
+            for row in rows
+            if str(row.get("stopOrderType", "")).endswith("TakeProfit")
+        ]
+        evidence.native_tp_targets_live = len(targets)
+        evidence.native_tp_trigger_prices = sorted(
+            float(row.get("triggerPrice") or 0) for row in targets
+        )
+        evidence.partial_tp_visible_as_stop_order = len(targets) == 2
+
+        venue_positions = await client.get_positions(spec.symbol)
+        venue = next((p for p in venue_positions if p.side == side), None)
+        evidence.observed_stop_loss = float(venue.stop_loss or 0) if venue else 0.0
+        evidence.partial_tp_clears_full_sl = not evidence.observed_stop_loss
+
+        live_ids = {str(row.get("orderId") or "") for row in targets}
+        ids_match = {
+            position.native_tp1_order_id, position.native_tp2_order_id
+        } <= live_ids
+        evidence.probe_observations = {
+            "planned_tp1": position.tp1,
+            "planned_tp2": position.tp2,
+            "live_target_triggers": evidence.native_tp_trigger_prices,
+            "stored_ids_match_live_orders": ids_match,
+            "position_stop_loss": evidence.observed_stop_loss,
+            "targets": [
+                {
+                    "stopOrderType": row.get("stopOrderType"),
+                    "tpslMode": row.get("tpslMode"),
+                    "triggerPrice": row.get("triggerPrice"),
+                    "qty": row.get("qty"),
+                    "orderId_masked": mask(str(row.get("orderId", ""))),
+                }
+                for row in targets
+            ],
+        }
+        output(
+            f"  planned TP1/TP2 = {position.tp1} / {position.tp2}; "
+            f"live target triggers = {evidence.native_tp_trigger_prices}; "
+            f"position SL = {evidence.observed_stop_loss}"
+        )
+        if len(targets) != 2 or not ids_match or not evidence.observed_stop_loss:
+            raise BybitError(
+                "Native TP lifecycle verification failed: "
+                f"targets={len(targets)} ids_match={ids_match} "
+                f"sl={evidence.observed_stop_loss}"
+            )
+        evidence.result = "passed"
+    except Exception as exc:
+        evidence.error = f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            cleanup = await close_exchange_position(
+                client, symbol=spec.symbol, entry_side=side
+            )
+            if cleanup:
+                evidence.exit_fill_price = cleanup.average_fill_price
+                total_fee += cleanup.fee_paid
+        except Exception as cleanup_exc:
+            evidence.error = (
+                f"{evidence.error}; cleanup: "
+                f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+            ).lstrip("; ")
+        remaining = await client.get_positions(spec.symbol)
+        evidence.final_position_size = sum(item.size for item in remaining)
+        evidence.reconciliation_result = (
+            "unresolved_position" if evidence.final_position_size else "exchange_zero"
+        )
+        if evidence.final_position_size:
+            evidence.result = "failed"
+    evidence.fee = total_fee
+    return evidence
+
+
+async def run_partial_tp_solo_probe(
+    client: BybitClient,
+    *,
+    asset: str,
+    side: Side,
+    environment: str = "testnet",
+    confirm: Callable[[str], str] = input,
+    output: Callable[[str], None] = print,
+) -> DrillEvidence:
+    """Check whether a partial take-profit installs without a paired partial stop,
+    and whether each installed target exposes a retrievable venue order id.
+
+    KARA needs both answers: the pairing requirement stacks redundant stops on top
+    of the full-position stop, and without order ids a native target fill cannot be
+    attributed to a slice.
+    """
+    spec, mark_price, _ = await prepare_drill(
+        client, asset=asset, environment=environment, require_funds=True
+    )
+    if await client.get_positions(spec.symbol):
+        raise DrillSafetyError(f"Refusing probe: existing {spec.symbol} position")
+    quantity = partial_drill_quantity(spec, mark_price)
+    evidence = DrillEvidence(
+        timestamp_utc=datetime.now(timezone.utc).isoformat(),
+        environment=environment_label(environment),
+        account_masked=mask(client.api_key),
+        symbol=spec.symbol,
+        side=side.value,
+        quantity=quantity,
+        scenario="partial_tp_solo_probe",
+    )
+    output(
+        f"Environment: {evidence.environment} | Account: {evidence.account_masked} | "
+        f"Scenario: PARTIAL TP SOLO PROBE | Symbol: {spec.symbol} | Quantity: {quantity}"
+    )
+    prompt = (
+        f"Type {environment.upper()} to probe solo partial TP with "
+        f"{side.value.upper()} {quantity} {spec.symbol}: "
+    )
+    if confirm(prompt).strip() != environment.upper():
+        raise DrillSafetyError("Operator confirmation rejected")
+
+    registry = client.symbol_registry
+    observations: dict = {}
+    total_fee = 0.0
+
+    async def snapshot(stage: str) -> dict:
+        positions = await client.get_positions(spec.symbol)
+        venue = next((item for item in positions if item.side == side), None)
+        rows = await client.get_open_orders(spec.symbol, order_filter="StopOrder")
+        record = {
+            "position_size": venue.size if venue else 0.0,
+            "position_stop_loss": float(venue.stop_loss or 0) if venue else 0.0,
+            "position_take_profit": float(venue.take_profit or 0) if venue else 0.0,
+            "stop_order_count": len(rows),
+            "stop_orders": [
+                {
+                    "orderId_masked": mask(str(row.get("orderId", ""))),
+                    "has_order_id": bool(row.get("orderId")),
+                    "stopOrderType": row.get("stopOrderType"),
+                    "tpslMode": row.get("tpslMode"),
+                    "triggerPrice": row.get("triggerPrice"),
+                    "qty": row.get("qty"),
+                }
+                for row in rows
+            ],
+        }
+        observations[stage] = record
+        output(
+            f"  [{stage}] SL={record['position_stop_loss']} "
+            f"TP={record['position_take_profit']} orders={record['stop_order_count']}"
+        )
+        return record
+
+    try:
+        await client.set_leverage(spec.symbol, 1)
+        entry = await place_and_confirm(
+            client,
+            symbol=spec.symbol,
+            side=side,
+            quantity=quantity,
+            prefix="KARA-DRILL-TPSOLO",
+        )
+        evidence.entry_order_link_id_masked = mask(entry.client_order_id)
+        evidence.entry_fill_price = entry.average_fill_price
+        total_fee += entry.fee_paid
+        if entry.status != ExecutionOrderStatus.FILLED or entry.filled_qty != quantity:
+            raise BybitError("Solo probe entry was not fully filled")
+
+        fill = entry.average_fill_price
+        long_side = side == Side.LONG
+        stop_loss = registry.normalize_price(spec, fill * (0.98 if long_side else 1.02))
+        tp1 = registry.normalize_price(spec, fill * (1.02 if long_side else 0.98))
+        tp2 = registry.normalize_price(spec, fill * (1.04 if long_side else 0.96))
+        slice_qty = registry.normalize_quantity(spec, entry.filled_qty / 2)
+
+        await client.set_protection(symbol=spec.symbol, side=side, stop_loss=stop_loss)
+        baseline = await snapshot("1_after_full_sl")
+        evidence.hard_sl_present = bool(baseline["position_stop_loss"])
+        evidence.observed_stop_loss = baseline["position_stop_loss"]
+
+        # Decisive call: a target with no paired stop.
+        await client.add_partial_tp_sl(
+            symbol=spec.symbol, side=side, take_profit=tp1, quantity=slice_qty
+        )
+        solo_first = await snapshot("2_after_solo_tp1")
+        await client.add_partial_tp_sl(
+            symbol=spec.symbol,
+            side=side,
+            take_profit=tp2,
+            quantity=registry.normalize_quantity(spec, entry.filled_qty - slice_qty),
+        )
+        solo_second = await snapshot("3_after_solo_tp2")
+
+        targets = [
+            row
+            for row in solo_second["stop_orders"]
+            if str(row["stopOrderType"] or "").endswith("TakeProfit")
+        ]
+        extra_stops = [
+            row
+            for row in solo_second["stop_orders"]
+            if str(row["stopOrderType"] or "") == "PartialStopLoss"
+        ]
+        observations["verdict"] = {
+            "solo_tp_accepted": len(targets) >= 1,
+            "both_targets_installed": len(targets) == 2,
+            "paired_stop_created_anyway": len(extra_stops) > 0,
+            "every_target_has_order_id": bool(targets)
+            and all(row["has_order_id"] for row in targets),
+            "full_stop_survived": bool(solo_first["position_stop_loss"]),
+        }
+        evidence.partial_tp_clears_full_sl = not solo_first["position_stop_loss"]
+        evidence.partial_tp_visible_as_stop_order = len(targets) >= 1
+        evidence.partial_calls_accumulate = len(targets) == 2
+        evidence.probe_observations = observations
+        evidence.result = "passed"
+    except Exception as exc:
+        evidence.error = f"{type(exc).__name__}: {exc}"
+        evidence.probe_observations = observations
+    finally:
+        try:
+            cleanup = await close_exchange_position(
+                client, symbol=spec.symbol, entry_side=side
+            )
+            if cleanup:
+                evidence.exit_fill_price = cleanup.average_fill_price
+                total_fee += cleanup.fee_paid
+        except Exception as cleanup_exc:
+            evidence.error = (
+                f"{evidence.error}; cleanup: "
+                f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+            ).lstrip("; ")
+        remaining = await client.get_positions(spec.symbol)
+        evidence.final_position_size = sum(item.size for item in remaining)
+        evidence.reconciliation_result = (
+            "unresolved_position" if evidence.final_position_size else "exchange_zero"
+        )
+        if evidence.final_position_size:
+            evidence.result = "failed"
     evidence.fee = total_fee
     return evidence
 
@@ -746,6 +1304,9 @@ def parse_args(argv=None):
     mode.add_argument("--simulate-missing-sl", action="store_true")
     mode.add_argument("--ws-reconnect-check", action="store_true")
     mode.add_argument("--multi-close-all", action="store_true")
+    mode.add_argument("--partial-tp-mode-probe", action="store_true")
+    mode.add_argument("--partial-tp-solo-probe", action="store_true")
+    mode.add_argument("--native-tp-lifecycle", action="store_true")
     parser.add_argument(
         "--report",
         type=Path,
@@ -816,6 +1377,31 @@ async def async_main(argv=None) -> int:
             if args.partial_close:
                 raise DrillSafetyError("--multi-close-all cannot combine with --partial-close")
             evidence = await run_multi_position_close_all(client, environment=args.environment)
+        elif args.native_tp_lifecycle:
+            evidence = await run_native_tp_lifecycle(
+                client,
+                asset=args.symbol,
+                side=Side(args.side),
+                environment=args.environment,
+            )
+        elif args.partial_tp_solo_probe:
+            evidence = await run_partial_tp_solo_probe(
+                client,
+                asset=args.symbol,
+                side=Side(args.side),
+                environment=args.environment,
+            )
+        elif args.partial_tp_mode_probe:
+            if args.partial_close:
+                raise DrillSafetyError(
+                    "--partial-tp-mode-probe cannot combine with --partial-close"
+                )
+            evidence = await run_partial_tp_mode_probe(
+                client,
+                asset=args.symbol,
+                side=Side(args.side),
+                environment=args.environment,
+            )
         else:
             evidence = await run_lifecycle(
                 client,

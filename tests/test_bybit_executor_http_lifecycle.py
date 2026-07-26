@@ -51,7 +51,9 @@ class StatefulBybitHTTP:
         self.orders = {}
         self.position = None
         self.stop_loss = None
+        self.partial_protections = []
         self.order_number = 0
+        self.stop_orders = []
 
     def request(self, method, url, *, data, headers):
         parsed = urlparse(url)
@@ -76,10 +78,25 @@ class StatefulBybitHTTP:
         if parsed.path == "/v5/order/create":
             return Response(self._create_order(body))
         if parsed.path == "/v5/order/realtime":
+            if query.get("orderFilter", [""])[0] == "StopOrder":
+                return Response({"list": list(self.stop_orders)})
             order_link_id = query["orderLinkId"][0]
             return Response({"list": [self.orders[order_link_id]]})
         if parsed.path == "/v5/position/trading-stop":
-            self.stop_loss = float(body["stopLoss"])
+            # Verified on Bybit Demo 2026-07-26: a Partial call carries only the
+            # target, leaves position stopLoss untouched, and surfaces the target
+            # as its own StopOrder row with an orderId.
+            if body["tpslMode"] == "Partial":
+                self.partial_protections.append(body)
+                self.stop_orders.append({
+                    "orderId": f"tp-{len(self.stop_orders) + 1}",
+                    "stopOrderType": "PartialTakeProfit",
+                    "tpslMode": "Partial",
+                    "triggerPrice": body["takeProfit"],
+                    "qty": body["tpSize"],
+                })
+            else:
+                self.stop_loss = float(body["stopLoss"])
             return Response({})
         if parsed.path == "/v5/position/list":
             return Response({"list": self._position_rows()})
@@ -187,6 +204,13 @@ async def test_full_executor_lifecycle_crosses_stateful_http_boundary():
     assert position.entry_price == 100.2
     assert transport.position["size"] == 0.1
     assert transport.stop_loss == 99.2
+    assert [body["tpSize"] for body in transport.partial_protections] == ["0.025", "0.037"]
+    # Targets are installed solo. Pairing a stop with each target would stack
+    # redundant stops on top of the full-position SL that is already installed.
+    assert not any("slSize" in body for body in transport.partial_protections)
+    assert transport.stop_loss == 99.2
+    assert position.native_tp1_order_id == "tp-1"
+    assert position.native_tp2_order_id == "tp-2"
 
     partial = await executor.close_position(
         position.position_id, 101, reason="tp1", close_ratio=0.5

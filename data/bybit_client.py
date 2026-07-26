@@ -541,6 +541,42 @@ class BybitClient(ExecutionClient):
             raise BybitError(f"Bybit order not found: {client_order_id}")
         return self._parse_order(rows[0])
 
+    async def get_order_by_id(
+        self, symbol: str, order_id: str
+    ) -> Optional[VenueOrder]:
+        """Resolve a venue order by exchange order id, live list first then history.
+
+        Native targets are identified by exchange order id rather than orderLinkId,
+        because Bybit creates them from trading-stop and assigns no client id.
+        """
+        params = {"category": "linear", "symbol": symbol, "orderId": order_id}
+        for path in ("/v5/order/realtime", "/v5/order/history"):
+            result = await self._request("GET", path, params=params, auth=True)
+            rows = result.get("list") or []
+            if rows:
+                return self._parse_order(rows[0])
+        return None
+
+    async def get_open_orders(
+        self, symbol: str, *, order_filter: str = "StopOrder"
+    ) -> List[Dict[str, Any]]:
+        """Read-only listing of live orders, including conditional TP/SL orders.
+
+        Rows are returned unparsed: a caller auditing venue TP/SL behaviour needs
+        `stopOrderType`, `tpslMode`, and `triggerPrice`, none of which fit VenueOrder.
+        """
+        result = await self._request(
+            "GET",
+            "/v5/order/realtime",
+            params={
+                "category": "linear",
+                "symbol": symbol,
+                "orderFilter": order_filter,
+            },
+            auth=True,
+        )
+        return list(result.get("list") or [])
+
     async def cancel_order(self, symbol: str, client_order_id: str) -> None:
         await self._request(
             "POST",
@@ -580,6 +616,46 @@ class BybitClient(ExecutionClient):
             # Bybit 34040 means requested protection already matches venue state.
             if exc.code != self.PROTECTION_UNCHANGED_CODE:
                 raise
+
+    async def add_partial_tp_sl(
+        self,
+        *,
+        symbol: str,
+        side: Side,
+        take_profit: float,
+        quantity: float,
+        stop_loss: Optional[float] = None,
+    ) -> None:
+        """Install one partial take-profit slice, optionally paired with a stop.
+
+        Bybit requires `tpSize` to equal `slSize` when both are sent, so pairing a
+        stop with every target stacks redundant stops on top of the full-position
+        stop KARA already holds. Omitting `stop_loss` sends the target alone.
+        """
+        if take_profit <= 0 or quantity <= 0:
+            raise ValueError("Partial TP price and quantity must be positive")
+        if stop_loss is not None and stop_loss <= 0:
+            raise ValueError("Partial SL price must be positive when supplied")
+        body = {
+            "category": "linear",
+            "symbol": symbol,
+            "positionIdx": 0,
+            "tpslMode": "Partial",
+            "takeProfit": str(take_profit),
+            "tpTriggerBy": "MarkPrice",
+            "tpOrderType": "Market",
+            "tpSize": str(quantity),
+        }
+        if stop_loss is not None:
+            body.update({
+                "stopLoss": str(stop_loss),
+                "slTriggerBy": "MarkPrice",
+                "slOrderType": "Market",
+                "slSize": str(quantity),
+            })
+        await self._request(
+            "POST", "/v5/position/trading-stop", body=body, auth=True
+        )
 
     async def clear_stop_loss(self, symbol: str) -> None:
         """Cancel only full-position SL; caller must reconcile immediately."""

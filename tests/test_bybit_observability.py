@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -123,3 +124,52 @@ async def test_executor_reconciliation_updates_sl_and_mismatch_metrics():
     assert telemetry.reconciliation_mismatch_count == 1
     assert telemetry.unknown_recovered_positions == 1
     assert telemetry.hard_sl_healthy_count == 1
+
+
+@pytest.mark.asyncio
+async def test_alert_is_logged_even_when_telegram_sink_is_absent(caplog):
+    """Regression: protection alerts existed only in Telegram, so Railway logs held
+    no record of when a position lost its hard SL."""
+    manager = BybitAlertManager(sink=None)
+
+    with caplog.at_level(logging.CRITICAL, logger="kara.bybit_observability"):
+        delivered = await manager.emit(
+            "missing_sl:LDOUSDT",
+            "CRITICAL BYBIT: posisi LDOUSDT tidak memiliki native hard SL.",
+        )
+
+    assert delivered is False
+    assert "missing_sl:LDOUSDT" in caplog.text
+    assert caplog.records[0].levelno == logging.CRITICAL
+
+
+@pytest.mark.asyncio
+async def test_cooldown_suppressed_alert_is_still_logged(caplog):
+    sent = []
+    manager = BybitAlertManager(sink=lambda m: _collect(sent, m), cooldown_s=300)
+    message = "CRITICAL BYBIT: posisi LDOUSDT tidak memiliki native hard SL."
+
+    assert await manager.emit("missing_sl:LDOUSDT", message) is True
+    with caplog.at_level(logging.INFO, logger="kara.bybit_observability"):
+        assert await manager.emit("missing_sl:LDOUSDT", message) is False
+
+    assert len(sent) == 1
+    assert "BYBIT_ALERT_SUPPRESSED" in caplog.text
+    assert "repeat=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_warning_alert_logs_at_warning_level(caplog):
+    manager = BybitAlertManager(sink=None)
+
+    with caplog.at_level(logging.WARNING, logger="kara.bybit_observability"):
+        await manager.emit(
+            "ws_stale",
+            "WARNING BYBIT: private WebSocket stale/disconnected; REST fallback tetap aktif.",
+        )
+
+    assert caplog.records[0].levelno == logging.WARNING
+
+
+async def _collect(bucket, message):
+    bucket.append(message)

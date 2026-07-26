@@ -123,6 +123,7 @@ class BybitPrivateWebSocket:
     async def _run(self) -> None:
         backoff = 1.0
         while self._running:
+            reason = "connect_failed"
             try:
                 self._ws = await self._session.ws_connect(self.url, heartbeat=20)
                 await self._authenticate()
@@ -140,6 +141,7 @@ class BybitPrivateWebSocket:
                 backoff = 1.0
                 if was_reconnect and self.on_reconnect:
                     await self.on_reconnect()
+                reason = "stream_ended"
                 async for message in self._ws:
                     if message.type == aiohttp.WSMsgType.TEXT:
                         self.handle_message(message.data)
@@ -147,12 +149,23 @@ class BybitPrivateWebSocket:
                         aiohttp.WSMsgType.CLOSED,
                         aiohttp.WSMsgType.ERROR,
                     ):
+                        reason = f"frame={message.type.name} detail={message.data!r}"
                         break
             except asyncio.CancelledError:
                 break
             except Exception as exc:
+                reason = f"{type(exc).__name__}: {exc}"
                 log.warning("Bybit private WS reconnecting: %s", exc)
             finally:
+                if self._connected:
+                    # aiohttp reports a dead peer (heartbeat pong timeout) and a
+                    # server close frame by ending the iterator, not by raising, so
+                    # those disconnects reach no except branch. Without this line the
+                    # operator gets a Telegram stale alert with no cause in the log.
+                    log.warning(
+                        "Bybit private WS disconnected (%s); REST fallback active",
+                        reason,
+                    )
                 self._connected = False
                 if self.telemetry:
                     self.telemetry.ws_connected = False

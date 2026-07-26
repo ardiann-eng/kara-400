@@ -337,6 +337,16 @@ class Position(BaseModel):
     entry_fee_paid: float = 0.0
     exit_fee_paid: float = 0.0
     close_slices: int = 0
+    # Bybit partial TP orders are exchange-native. State prevents local polling
+    # from submitting a duplicate reduce-only close while targets are armed.
+    native_tp_state: str = "none"  # none | armed | reconciliation_required
+    native_tp1_qty: float = 0.0
+    native_tp2_qty: float = 0.0
+    # Venue order ids for the native targets. Bybit's trading-stop response omits
+    # them, so they are read back from the conditional order list after install.
+    # Without them a target fill cannot be attributed to TP1 versus TP2.
+    native_tp1_order_id: str = ""
+    native_tp2_order_id: str = ""
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:

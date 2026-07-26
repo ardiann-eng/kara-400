@@ -1,8 +1,10 @@
 import hashlib
+import logging
 import hmac
 import json
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -196,3 +198,88 @@ async def test_ws_reconnect_reauthenticates_resubscribes_and_reconciles_once(mon
             "op": "subscribe",
             "args": ["order", "execution", "position", "wallet"],
         }
+
+
+@pytest.mark.asyncio
+async def test_dead_peer_disconnect_is_logged_with_reason(caplog):
+    """Regression: aiohttp reports a heartbeat pong timeout as an ERROR frame, not an
+    exception, so the disconnect exited _run without reaching any log call. The
+    operator got a Telegram stale alert with no cause anywhere in the Railway log.
+    """
+    import aiohttp
+
+    ws = BybitPrivateWebSocket(api_key="key", api_secret="secret")
+
+    class DeadPeerSocket:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if getattr(self, "_sent", False):
+                raise StopAsyncIteration
+            self._sent = True
+            return SimpleNamespace(
+                type=aiohttp.WSMsgType.ERROR, data="pong timeout"
+            )
+
+        async def send_json(self, payload):
+            return None
+
+    class FakeSession:
+        async def ws_connect(self, url, heartbeat=None):
+            return DeadPeerSocket()
+
+    ws._session = FakeSession()
+    ws._running = True
+
+    async def fake_auth():
+        return None
+
+    ws._authenticate = fake_auth
+
+    async def stop_after_first_cycle(delay):
+        ws._running = False
+
+    with caplog.at_level(logging.WARNING, logger="kara.bybit_private_ws"):
+        with patch("asyncio.sleep", stop_after_first_cycle):
+            await ws._run()
+
+    assert "private WS disconnected" in caplog.text
+    assert "ERROR" in caplog.text
+    assert ws.stale is True
+
+
+@pytest.mark.asyncio
+async def test_server_closed_stream_disconnect_is_logged(caplog):
+    ws = BybitPrivateWebSocket(api_key="key", api_secret="secret")
+
+    class ClosedStreamSocket:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def send_json(self, payload):
+            return None
+
+    class FakeSession:
+        async def ws_connect(self, url, heartbeat=None):
+            return ClosedStreamSocket()
+
+    ws._session = FakeSession()
+    ws._running = True
+
+    async def fake_auth():
+        return None
+
+    ws._authenticate = fake_auth
+
+    async def stop_after_first_cycle(delay):
+        ws._running = False
+
+    with caplog.at_level(logging.WARNING, logger="kara.bybit_private_ws"):
+        with patch("asyncio.sleep", stop_after_first_cycle):
+            await ws._run()
+
+    assert "stream_ended" in caplog.text

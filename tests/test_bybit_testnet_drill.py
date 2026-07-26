@@ -22,6 +22,7 @@ from tools.bybit_testnet_drill import (
     run_recover_protected,
     run_ws_reconnect_check,
     run_multi_position_close_all,
+    run_partial_tp_mode_probe,
     smallest_valid_quantity,
     validate_environment,
 )
@@ -625,3 +626,156 @@ async def test_zero_balance_refuses_before_operator_confirmation_or_order():
             confirm=lambda prompt: "TESTNET",
         )
     assert not any(isinstance(call, tuple) and call[0] == "place" for call in client.calls)
+
+
+class TpModeProbeClient(DrillClient):
+    """DrillClient plus tpslMode bookkeeping, so the probe can be exercised against
+    both candidate Bybit behaviours without touching a venue."""
+
+    def __init__(self, *, partial_clears_full_sl: bool, partial_accumulates: bool):
+        super().__init__()
+        self.partial_clears_full_sl = partial_clears_full_sl
+        self.partial_accumulates = partial_accumulates
+        self.stop_orders = []
+        self.take_profit = None
+
+    async def get_positions(self, symbol=None):
+        if not self.position:
+            return []
+        return [VenuePosition(
+            symbol="BTCUSDT",
+            side=self.position["side"],
+            size=self.position["size"],
+            entry_price=60000,
+            leverage=1,
+            stop_loss=self.stop_loss,
+            take_profit=self.take_profit,
+        )]
+
+    async def set_protection(self, **kwargs):
+        self.calls.append(("set_protection", kwargs))
+        self.stop_loss = kwargs["stop_loss"]
+        # A Full-mode write is documented to own the whole position.
+        self.stop_orders = []
+
+    async def add_partial_tp_sl(self, **kwargs):
+        self.calls.append(("add_partial_tp_sl", kwargs))
+        if self.partial_clears_full_sl:
+            self.stop_loss = None
+        entry = {
+            "stopOrderType": "PartialTakeProfit",
+            "tpslMode": "Partial",
+            "triggerPrice": str(kwargs["take_profit"]),
+            "qty": str(kwargs["quantity"]),
+            "reduceOnly": True,
+        }
+        if self.partial_accumulates:
+            self.stop_orders.append(entry)
+        else:
+            self.stop_orders = [entry]
+
+    async def get_open_orders(self, symbol, *, order_filter="StopOrder"):
+        return list(self.stop_orders)
+
+
+@pytest.mark.asyncio
+async def test_probe_detects_partial_tp_clearing_full_stop_loss():
+    """The dangerous outcome: installing a Partial TP silently drops the hard SL."""
+    client = TpModeProbeClient(partial_clears_full_sl=True, partial_accumulates=True)
+
+    evidence = await run_partial_tp_mode_probe(
+        client,
+        asset="BTC",
+        side=Side.LONG,
+        confirm=lambda prompt: "TESTNET",
+        output=lambda text: None,
+    )
+
+    assert evidence.partial_tp_clears_full_sl is True
+    assert evidence.partial_tp_visible_as_stop_order is True
+    assert evidence.partial_calls_accumulate is True
+    assert evidence.full_sl_reapply_clears_partial_tp is True
+    assert evidence.final_position_size == 0
+    assert evidence.probe_observations["1_after_full_sl"]["position_stop_loss"]
+    assert not evidence.probe_observations["2_after_partial_tp1"]["position_stop_loss"]
+
+
+@pytest.mark.asyncio
+async def test_probe_detects_partial_tp_coexisting_with_full_stop_loss():
+    """The safe outcome: the Full stop survives and Partial calls accumulate."""
+    client = TpModeProbeClient(partial_clears_full_sl=False, partial_accumulates=True)
+
+    evidence = await run_partial_tp_mode_probe(
+        client,
+        asset="BTC",
+        side=Side.LONG,
+        confirm=lambda prompt: "TESTNET",
+        output=lambda text: None,
+    )
+
+    assert evidence.result == "passed"
+    assert evidence.partial_tp_clears_full_sl is False
+    assert evidence.partial_calls_accumulate is True
+    assert evidence.probe_observations["3_after_partial_tp2"]["stop_order_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_probe_detects_second_partial_call_overwriting_the_first():
+    client = TpModeProbeClient(partial_clears_full_sl=False, partial_accumulates=False)
+
+    evidence = await run_partial_tp_mode_probe(
+        client,
+        asset="BTC",
+        side=Side.LONG,
+        confirm=lambda prompt: "TESTNET",
+        output=lambda text: None,
+    )
+
+    assert evidence.partial_calls_accumulate is False
+    assert evidence.probe_observations["3_after_partial_tp2"]["stop_order_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_refuses_existing_position_and_places_no_order():
+    client = TpModeProbeClient(partial_clears_full_sl=False, partial_accumulates=True)
+    client.position = {"side": Side.LONG, "size": 0.001}
+
+    with pytest.raises(DrillSafetyError, match="existing"):
+        await run_partial_tp_mode_probe(
+            client,
+            asset="BTC",
+            side=Side.LONG,
+            confirm=lambda prompt: "TESTNET",
+            output=lambda text: None,
+        )
+
+    assert not any(
+        isinstance(call, tuple) and call[0] == "place" for call in client.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_probe_refuses_without_operator_confirmation():
+    client = TpModeProbeClient(partial_clears_full_sl=False, partial_accumulates=True)
+
+    with pytest.raises(DrillSafetyError, match="confirmation rejected"):
+        await run_partial_tp_mode_probe(
+            client,
+            asset="BTC",
+            side=Side.LONG,
+            confirm=lambda prompt: "no",
+            output=lambda text: None,
+        )
+
+    assert not any(
+        isinstance(call, tuple) and call[0] == "place" for call in client.calls
+    )
+
+
+def test_probe_cli_flag_is_exclusive_and_parsed():
+    args = parse_args([
+        "--environment", "testnet", "--confirm-testnet",
+        "--symbol", "BTC", "--side", "long", "--partial-tp-mode-probe",
+    ])
+    assert args.partial_tp_mode_probe is True
+    assert args.hold_protected is False

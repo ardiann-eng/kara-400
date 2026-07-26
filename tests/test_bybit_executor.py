@@ -24,7 +24,9 @@ from execution.live_risk_gate import (
 from core.bybit_observability import BybitTelemetry
 from datetime import datetime, timezone
 from execution.symbol_registry import BybitSymbolRegistry
-from models.schemas import MarketRegime, ScoreBreakdown, Side, SignalStrength, TradeSignal
+from models.schemas import (
+    MarketRegime, PositionStatus, ScoreBreakdown, Side, SignalStrength, TradeSignal,
+)
 
 
 SPEC_RAW = {
@@ -66,6 +68,8 @@ class FakeClient:
         self.order_results = {}
         self.protections = []
         self.positions = []
+        self.stop_orders = []
+        self.filled_targets = {}
 
     async def get_account(self):
         return VenueAccount(1000, 1000, 900, 100, 0)
@@ -102,8 +106,86 @@ class FakeClient:
             raise RuntimeError("SL rejected")
         self.protections.append(kwargs)
 
+    async def add_partial_tp_sl(self, **kwargs):
+        self.partial_protections = getattr(self, "partial_protections", []) + [kwargs]
+        self.stop_orders.append({
+            "orderId": f"tp-{len(self.stop_orders) + 1}",
+            "stopOrderType": "PartialTakeProfit",
+            "tpslMode": "Partial",
+            "triggerPrice": str(kwargs["take_profit"]),
+            "qty": str(kwargs["quantity"]),
+        })
+
+    async def get_open_orders(self, symbol, *, order_filter="StopOrder"):
+        return list(self.stop_orders)
+
+    async def get_order_by_id(self, symbol, order_id):
+        return self.filled_targets.get(order_id)
+
+    def fill_target(self, order_id, *, price, quantity, fee=0.02):
+        """Simulate a venue-side conditional target execution."""
+        self.stop_orders = [
+            row for row in self.stop_orders if row["orderId"] != order_id
+        ]
+        self.filled_targets[order_id] = VenueOrder(
+            order_id=order_id,
+            client_order_id="",
+            symbol="BTCUSDT",
+            side=Side.SHORT,
+            requested_qty=quantity,
+            filled_qty=quantity,
+            average_fill_price=price,
+            fee_paid=fee,
+            status=ExecutionOrderStatus.FILLED,
+            reduce_only=True,
+        )
+
     async def get_positions(self, symbol=None):
         return self.positions
+
+
+@pytest.mark.asyncio
+async def test_open_arms_two_native_partial_targets_after_full_hard_stop():
+    client = FakeClient()
+    executor = make_executor(client)
+
+    position = await executor.open_position(make_signal())
+
+    assert client.protections == [{
+        "symbol": "BTCUSDT", "side": Side.LONG, "stop_loss": 99.2,
+    }]
+    # Targets carry no paired stop: the full-position SL above already protects
+    # the whole size, and pairing would stack redundant stops at one trigger.
+    assert client.partial_protections == [
+        {"symbol": "BTCUSDT", "side": Side.LONG, "take_profit": 101.2,
+         "quantity": 0.025},
+        {"symbol": "BTCUSDT", "side": Side.LONG, "take_profit": 102.2,
+         "quantity": 0.037},
+    ]
+    assert position.native_tp_state == "armed"
+    assert position.native_tp1_qty == 0.025
+    assert position.native_tp2_qty == 0.037
+    assert position.native_tp1_order_id == "tp-1"
+    assert position.native_tp2_order_id == "tp-2"
+
+
+@pytest.mark.asyncio
+async def test_native_armed_target_blocks_duplicate_local_tp_close():
+    client = FakeClient()
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+    executor.risk.check_tp_trail = lambda *_: {"action": "tp1", "close_ratio": 0.25}
+
+    actions = await executor.update_positions({"BTC": 101.2})
+
+    assert actions == []
+    assert [order for order in client.orders if order["reduce_only"]] == []
+
+    position.native_tp_state = "reconciliation_required"
+    actions = await executor.update_positions({"BTC": 101.2})
+
+    assert actions == []
+    assert [order for order in client.orders if order["reduce_only"]] == []
 
 
 class AmbiguousFakeClient(FakeClient):
@@ -711,3 +793,344 @@ async def test_market_guard_transport_error_fails_closed_before_order():
     assert await executor.open_position(make_signal()) is None
     assert client.orders == []
     assert executor.telemetry.last_risk_rejection_reason == "market_guard_error"
+
+
+@pytest.mark.asyncio
+async def test_missing_sl_on_breakeven_position_is_reinstalled_not_emergency_closed():
+    """Regression: LDOUSDT lost its hard SL after TP1 and was emergency-closed.
+
+    _valid_recovery_stop compared the stop against entry price, so the break-even
+    profit-lock stop installed at TP1 (stop == entry) failed validation and
+    reconciliation destroyed a position it could have reprotected.
+    """
+    client = FakeClient()
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+    # TP1 fired, so live price is above entry; the break-even stop is installable.
+    client.get_mark_price = lambda symbol: _async(101.5)
+    position.tp1_hit = True
+    position.stop_loss = position.entry_price
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.1, position.entry_price, 10, stop_loss=None)
+    ]
+
+    await executor.reconcile()
+
+    assert client.protections[-1] == {
+        "symbol": "BTCUSDT", "side": Side.LONG, "stop_loss": position.entry_price,
+    }
+    assert executor.live_status(position.position_id).value == "open_protected"
+    assert [o for o in client.orders if o.get("reduce_only")] == []
+
+
+@pytest.mark.asyncio
+async def test_missing_sl_with_trailing_stop_beyond_entry_is_reinstalled():
+    """A runner trailing stop legitimately sits above entry for a long."""
+    client = FakeClient()
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+    client.get_mark_price = lambda symbol: _async(120.0)
+    position.stop_loss = 110.0  # trailed far above entry 100.2
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.1, position.entry_price, 10, stop_loss=None)
+    ]
+
+    await executor.reconcile()
+
+    assert client.protections[-1]["stop_loss"] == 110.0
+    assert [o for o in client.orders if o.get("reduce_only")] == []
+
+
+@pytest.mark.asyncio
+async def test_missing_sl_stop_already_crossed_by_price_still_emergency_closes():
+    """Fail closed: a long stop above live price cannot protect and must close."""
+    client = FakeClient()
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+    client.get_mark_price = lambda symbol: _async(90.0)
+    position.stop_loss = 99.2  # above the 90.0 live price for a long
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.1, position.entry_price, 10, stop_loss=None)
+    ]
+
+    await executor.reconcile()
+
+    assert [o for o in client.orders if o.get("reduce_only")]
+
+
+@pytest.mark.asyncio
+async def test_missing_sl_defers_reinstall_when_reference_price_unavailable():
+    """A price-feed failure must not destroy a live position."""
+    client = FakeClient()
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+
+    async def broken_price(symbol):
+        raise RuntimeError("ticker down")
+
+    client.get_mark_price = broken_price
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.1, position.entry_price, 10, stop_loss=None)
+    ]
+
+    await executor.reconcile()
+
+    assert [o for o in client.orders if o.get("reduce_only")] == []
+    assert executor.live_status(position.position_id).value == "open_unprotected"
+
+
+@pytest.mark.asyncio
+async def test_rejected_breakeven_stop_keeps_local_stop_and_does_not_abort_loop():
+    """Regression: an unguarded set_protection after TP1 aborted every remaining exit
+    and left KARA claiming break-even while the venue still held the original stop."""
+    client = FakeClient()
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+    original_stop = position.stop_loss
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.1, position.entry_price, 10, stop_loss=99.2)
+    ]
+    position.native_tp_state = "none"
+    executor.risk.check_tp_trail = lambda *_, **__: {
+        "action": "tp1", "close_ratio": 0.25, "trigger_price": 101.2,
+    }
+
+    async def reject_after_entry(**kwargs):
+        raise RuntimeError("stop already crossed by mark price")
+
+    client.set_protection = reject_after_entry
+    actions = await executor.update_positions({"BTC": 101.2})
+
+    assert actions and actions[0]["native_stop_updated"] is False
+    assert position.stop_loss == original_stop
+    assert position.tp1_hit is True
+
+
+def _async(value):
+    async def _inner(*args, **kwargs):
+        return value
+    return _inner()
+
+
+@pytest.mark.asyncio
+async def test_native_tp1_fill_books_slice_pnl_once_and_moves_stop_to_breakeven():
+    """Native targets execute at the venue. KARA must learn of the fill, book the
+    slice at the actual fill price, and lock the remainder at entry."""
+    client = FakeClient()
+    persistence = FakePersistence()
+    executor = make_executor(client, persistence=persistence)
+    position = await executor.open_position(make_signal())
+    assert position.native_tp1_order_id == "tp-1"
+
+    client.fill_target("tp-1", price=101.2, quantity=0.025)
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.075, position.entry_price, 10, stop_loss=99.2)
+    ]
+    await executor.reconcile()
+
+    assert position.tp1_hit is True
+    assert position.close_slices == 1
+    assert position.stop_loss == position.entry_price
+    assert client.protections[-1]["stop_loss"] == position.entry_price
+    expected_gross = (101.2 - position.entry_price) * 0.025
+    assert position.pnl_realized == pytest.approx(
+        expected_gross - position.entry_fee_paid * (0.025 / 0.1) - 0.02
+    )
+
+    actions = await executor.update_positions({"BTC": 101.2})
+    tp1_actions = [item for item in actions if item["action"] == "tp1"]
+    assert len(tp1_actions) == 1
+    assert tp1_actions[0]["exit_price"] == 101.2
+    assert tp1_actions[0]["trigger_price"] == position.tp1
+    assert tp1_actions[0]["native_target_fill"] is True
+    assert tp1_actions[0]["stop_moved_to_entry"] is True
+
+    # A second reconciliation must not double-book the same target.
+    await executor.reconcile()
+    assert position.close_slices == 1
+    assert await executor.update_positions({"BTC": 101.2}) == []
+
+
+@pytest.mark.asyncio
+async def test_native_target_cancelled_without_fill_books_nothing():
+    client = FakeClient()
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+    client.stop_orders = [
+        row for row in client.stop_orders if row["orderId"] != "tp-1"
+    ]
+    client.filled_targets["tp-1"] = VenueOrder(
+        order_id="tp-1", client_order_id="", symbol="BTCUSDT", side=Side.SHORT,
+        requested_qty=0.025, filled_qty=0.0, average_fill_price=0.0, fee_paid=0.0,
+        status=ExecutionOrderStatus.CANCELLED, reduce_only=True,
+    )
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.09, position.entry_price, 10, stop_loss=99.2)
+    ]
+
+    await executor.reconcile()
+
+    assert position.tp1_hit is False
+    assert position.close_slices == 0
+    assert position.pnl_realized == 0
+    assert position.native_tp1_order_id == ""
+    # Size fell without an attributable target fill, so KARA must not proceed blind.
+    assert position.native_tp_state == "reconciliation_required"
+
+
+@pytest.mark.asyncio
+async def test_size_drop_beyond_target_fill_is_flagged_for_reconciliation():
+    client = FakeClient()
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+    client.fill_target("tp-1", price=101.2, quantity=0.025)
+    # Exchange lost far more size than the confirmed target accounts for.
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.02, position.entry_price, 10, stop_loss=99.2)
+    ]
+
+    await executor.reconcile()
+
+    assert position.tp1_hit is True
+    assert position.native_tp_state == "reconciliation_required"
+
+
+@pytest.mark.asyncio
+async def test_breakeven_failure_after_native_tp1_keeps_venue_stop_truth():
+    client = FakeClient()
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+    original_stop = position.stop_loss
+    client.fill_target("tp-1", price=101.2, quantity=0.025)
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.075, position.entry_price, 10, stop_loss=99.2)
+    ]
+
+    async def reject(**kwargs):
+        raise RuntimeError("stop already crossed")
+
+    client.set_protection = reject
+    await executor.reconcile()
+
+    assert position.tp1_hit is True
+    assert position.stop_loss == original_stop
+    actions = await executor.update_positions({"BTC": 101.2})
+    assert actions[0].get("stop_moved_to_entry") is not True
+
+
+@pytest.mark.asyncio
+async def test_entry_without_readable_target_ids_still_arms_but_records_empty():
+    """A venue that hides target ids must not produce invented attribution."""
+    client = FakeClient()
+
+    async def no_orders(symbol, *, order_filter="StopOrder"):
+        return []
+
+    client.get_open_orders = no_orders
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+
+    assert position.native_tp1_order_id == ""
+    assert position.native_tp2_order_id == ""
+    assert position.native_tp_state == "armed"
+
+
+@pytest.mark.asyncio
+async def test_position_too_small_to_split_keeps_trading_with_local_exits():
+    """Regression: normalize_quantity raises for a sub-step slice rather than
+    returning zero, so the `tp1_quantity <= 0` guard was dead code and the entry
+    escaped as an open position with a stop but no targets.
+
+    The correct behaviour is neither an orphan nor a refusal: native targets are an
+    enhancement, so an unsplittable fill keeps its hard SL and its local exits.
+    With TP1 at 25% the smallest splittable size is about four venue steps, which
+    is above many legitimate KARA position sizes."""
+    client = FakeClient()
+    # Coarse step, as on real ETHUSDT: the smallest notional-valid size cannot be
+    # cut into a 25% TP1 slice that still clears the step.
+    coarse = dict(SPEC_RAW, lotSizeFilter={
+        "qtyStep": "0.05", "minOrderQty": "0.05", "minNotionalValue": "5",
+    })
+    registry = BybitSymbolRegistry()
+    registry.load([coarse])
+    executor = BybitExecutor(
+        chat_id="1",
+        client=client,
+        risk_manager=FakeRisk(),
+        symbol_registry=registry,
+        price_bridge=HyperliquidBybitPriceBridge(0.003),
+        fill_timeout_s=0.1,
+        poll_interval_s=0,
+    )
+    executor.risk.calculate_position_size = lambda signal, equity: (100, 0.05, 10)
+
+    position = await executor.open_position(make_signal())
+
+    assert position is not None
+    assert position.native_tp_state == "none"
+    assert position.native_tp1_order_id == ""
+    assert client.protections[0]["stop_loss"] == 99.2
+    assert getattr(client, "partial_protections", []) == []
+    assert [order for order in client.orders if order.get("reduce_only")] == []
+    assert executor.live_status(position.position_id).value == "open_protected"
+
+    # A 25% slice of a one-step position rounds below the venue step. The partial
+    # is skipped rather than escalated into a full exit, and the stop still holds.
+    executor.risk.check_tp_trail = lambda *_, **__: {
+        "action": "tp1", "close_ratio": 0.25, "trigger_price": 101.2,
+    }
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.05, position.entry_price, 10, stop_loss=99.2)
+    ]
+    assert await executor.update_positions({"BTC": 101.2}) == []
+    assert [order for order in client.orders if order.get("reduce_only")] == []
+    assert position.status == PositionStatus.OPEN
+
+    # A full exit on the same position must still work.
+    executor.risk.check_tp_trail = lambda *_, **__: {
+        "action": "time_exit", "close_ratio": 1.0, "trigger_price": 101.2,
+    }
+    actions = await executor.update_positions({"BTC": 101.2})
+    assert [item["action"] for item in actions] == ["time_exit"]
+    assert actions[0]["fully_closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_target_ids_match_when_venue_reformats_trigger_price():
+    """Bybit formats the trigger price itself. Exact float equality would silently
+    lose attribution; matching allows half a tick."""
+    client = FakeClient()
+
+    async def reformatted(symbol, *, order_filter="StopOrder"):
+        return [
+            {"orderId": "tp-a", "stopOrderType": "PartialTakeProfit",
+             "tpslMode": "Partial", "triggerPrice": "101.2000", "qty": "0.025"},
+            {"orderId": "tp-b", "stopOrderType": "PartialTakeProfit",
+             "tpslMode": "Partial", "triggerPrice": "102.2000", "qty": "0.037"},
+        ]
+
+    client.get_open_orders = reformatted
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+
+    assert position.native_tp1_order_id == "tp-a"
+    assert position.native_tp2_order_id == "tp-b"
+
+
+@pytest.mark.asyncio
+async def test_two_targets_never_share_one_order_id():
+    """A single venue row must not be credited to both TP1 and TP2."""
+    client = FakeClient()
+
+    async def one_row(symbol, *, order_filter="StopOrder"):
+        return [
+            {"orderId": "tp-only", "stopOrderType": "PartialTakeProfit",
+             "tpslMode": "Partial", "triggerPrice": "101.2", "qty": "0.025"},
+        ]
+
+    client.get_open_orders = one_row
+    executor = make_executor(client)
+    position = await executor.open_position(make_signal())
+
+    assert position.native_tp1_order_id == "tp-only"
+    assert position.native_tp2_order_id == ""

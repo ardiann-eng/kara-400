@@ -136,3 +136,23 @@ class ExecutionClient(ABC):
         take_profit: Optional[float] = None,
     ) -> None:
         pass
+
+    @abstractmethod
+    async def add_partial_tp_sl(
+        self,
+        *,
+        symbol: str,
+        side: Side,
+        take_profit: float,
+        quantity: float,
+        stop_loss: Optional[float] = None,
+    ) -> None:
+        """Add one native partial take-profit slice without replacing full hard SL."""
+        pass
+
+    @abstractmethod
+    async def get_open_orders(
+        self, symbol: str, *, order_filter: str = "StopOrder"
+    ) -> List[dict]:
+        """Return live venue orders, including conditional TP/SL orders."""
+        pass

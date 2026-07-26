@@ -7,6 +7,7 @@ import logging
 import time
 from typing import Dict, List, Optional
 
+import config
 from execution.base_executor import BaseExecutor
 from data.bybit_client import BybitAmbiguousOrderError
 from execution.exchange_client import (
@@ -14,6 +15,7 @@ from execution.exchange_client import (
     ExecutionOrderStatus,
     LivePositionStatus,
     VenueOrder,
+    VenuePosition,
 )
 from execution.price_bridge import HyperliquidBybitPriceBridge
 from execution.symbol_registry import BybitSymbolRegistry
@@ -91,6 +93,10 @@ class BybitExecutor(BaseExecutor):
         self._last_reconcile_at = 0.0
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
+        # Native target fills are discovered during reconciliation, which has no
+        # notification channel. update_positions drains these so a native TP1/TP2
+        # reaches the operator through the same path as a local exit.
+        self._pending_target_actions: List[Dict] = []
 
     @property
     def open_positions(self) -> List[Position]:
@@ -438,6 +444,69 @@ class BybitExecutor(BaseExecutor):
                         "Hard SL failed; entry was emergency-closed"
                     ) from exc
 
+                target_cfg = (
+                    config.SCALPER
+                    if (signal.trade_mode or "standard") == "scalper"
+                    else config.RISK
+                )
+                tp1_ratio = float(getattr(target_cfg, "tp1_close_ratio", 0.25))
+                tp2_ratio = float(getattr(target_cfg, "tp2_close_ratio", 0.50))
+                split = self._split_native_targets(
+                    spec, fill.filled_qty, tp1_ratio, tp2_ratio
+                )
+                tp1_quantity = tp2_quantity = 0.0
+                tp1_order_id = tp2_order_id = ""
+                native_tp_state = "none"
+                if split is None:
+                    # A TP1 slice below the venue step cannot be installed. Native
+                    # targets are an enhancement over local exits, not a condition
+                    # of trading: keep the position, keep the hard SL, and let local
+                    # polling own TP1/TP2 as it did before.
+                    log.info(
+                        "Bybit native targets skipped for %s: filled %s cannot be "
+                        "split at step %s; local exits remain in control",
+                        spec.symbol,
+                        fill.filled_qty,
+                        spec.qty_step,
+                    )
+                else:
+                    tp1_quantity, tp2_quantity = split
+                    try:
+                        # Targets are installed without a paired partial stop: the
+                        # full SL above already covers the whole position, and
+                        # pairing would stack redundant stops at the same trigger.
+                        # Verified on Bybit Demo 2026-07-26 (partial_tp_solo_probe).
+                        await self.client.add_partial_tp_sl(
+                            symbol=spec.symbol, side=signal.side, take_profit=tp1,
+                            quantity=tp1_quantity,
+                        )
+                        await self.client.add_partial_tp_sl(
+                            symbol=spec.symbol, side=signal.side, take_profit=tp2,
+                            quantity=tp2_quantity,
+                        )
+                        tp1_order_id, tp2_order_id = await self._read_target_order_ids(
+                            spec.symbol, spec, tp1, tp2
+                        )
+                        native_tp_state = "armed"
+                    except Exception as exc:
+                        self._live_status[position_id] = LivePositionStatus.PENDING_CLOSE
+                        try:
+                            await self._emergency_close(
+                                spec.symbol, signal.side, fill.filled_qty,
+                                "native_tp_install_failed",
+                            )
+                            self._live_status[position_id] = LivePositionStatus.CLOSED
+                        except Exception as close_exc:
+                            self._live_status[position_id] = (
+                                LivePositionStatus.RECONCILIATION_REQUIRED
+                            )
+                            raise BybitProtectionError(
+                                "Native TP setup failed and emergency close was not confirmed"
+                            ) from close_exc
+                        raise BybitProtectionError(
+                            "Native TP setup failed; entry was emergency-closed"
+                        ) from exc
+
                 margin = fill.filled_qty * fill.average_fill_price / max(leverage, 1)
                 position = Position(
                     position_id=position_id,
@@ -467,6 +536,11 @@ class BybitExecutor(BaseExecutor):
                         getattr(self.user, "bybit_environment", None), "value", "legacy_testnet"
                     ),
                     entry_fee_paid=fill.fee_paid,
+                    native_tp_state=native_tp_state,
+                    native_tp1_qty=tp1_quantity,
+                    native_tp2_qty=tp2_quantity,
+                    native_tp1_order_id=tp1_order_id,
+                    native_tp2_order_id=tp2_order_id,
                 )
                 self._positions[position_id] = position
                 self._position_symbols[position_id] = spec.symbol
@@ -581,7 +655,23 @@ class BybitExecutor(BaseExecutor):
 
             spec = self.registry.resolve(position.asset)
             requested = venue.size if close_ratio >= 1 else venue.size * close_ratio
-            quantity = self.registry.normalize_quantity(spec, requested)
+            try:
+                quantity = self.registry.normalize_quantity(spec, requested)
+            except ValueError:
+                # A partial slice can round below the venue step on a position only
+                # a step or two wide. Skipping the partial leaves the position under
+                # its hard stop; submitting the full size instead would silently
+                # turn a scale-out into a full exit.
+                if close_ratio >= 1:
+                    raise
+                log.info(
+                    "Bybit partial close skipped for %s: %.4g of %s is below step %s",
+                    position.asset,
+                    close_ratio,
+                    venue.size,
+                    spec.qty_step,
+                )
+                return None
             self._live_status[position_id] = LivePositionStatus.PENDING_CLOSE
             close_side = Side.SHORT if position.side == Side.LONG else Side.LONG
             client_order_id = gen_id("KARA-CLOSE")
@@ -704,7 +794,12 @@ class BybitExecutor(BaseExecutor):
         prices: Dict[str, float],
         market_states: Optional[Dict[str, Dict]] = None,
     ) -> List[Dict]:
+        # Native target fills are detected during reconciliation, which cannot
+        # notify. Surface them here so TP1/TP2 reach the operator once.
         actions = []
+        if self._pending_target_actions:
+            actions.extend(self._pending_target_actions)
+            self._pending_target_actions = []
         for position in list(self.open_positions):
             # Recovery has exchange size/side, but not original strategy levels.
             # Never fabricate TP1/TP2 from entry price or run autonomous exits
@@ -723,6 +818,14 @@ class BybitExecutor(BaseExecutor):
             )
             if not action:
                 continue
+            if (
+                getattr(position, "native_tp_state", "none")
+                in ("armed", "reconciliation_required")
+                and action["action"] in ("tp1", "tp2")
+            ):
+                # Native target owns this slice. REST reconciliation must confirm
+                # its actual fill before lifecycle/accounting changes.
+                continue
             result = await self.close_position(
                 position.position_id,
                 current,
@@ -733,18 +836,37 @@ class BybitExecutor(BaseExecutor):
                 result["trigger_price"] = action.get("trigger_price")
                 if action["action"] == "tp1":
                     position.tp1_hit = True
-                    position.stop_loss = position.entry_price
                     spec = self.registry.resolve(position.asset)
-                    position.stop_loss = self.registry.normalize_price(
-                        spec, position.stop_loss
+                    breakeven_stop = self.registry.normalize_price(
+                        spec, position.entry_price
                     )
-                    await self.client.set_protection(
-                        symbol=self._position_symbols[position.position_id],
-                        side=position.side,
-                        stop_loss=position.stop_loss,
-                    )
-                    result["native_stop_updated"] = True
-                    result["stop_moved_to_entry"] = True
+                    try:
+                        await self.client.set_protection(
+                            symbol=self._position_symbols[position.position_id],
+                            side=position.side,
+                            stop_loss=breakeven_stop,
+                        )
+                    except Exception:
+                        # Bybit rejects a stop the mark price has already crossed.
+                        # Keep the local stop equal to the one the venue still holds:
+                        # claiming break-even here would desync KARA from actual
+                        # protection, and raising would abort exits for every
+                        # remaining open position in this loop.
+                        log.exception(
+                            "Bybit break-even stop rejected for %s; venue stop unchanged",
+                            position.asset,
+                        )
+                        result["native_stop_updated"] = False
+                        result["stop_moved_to_entry"] = False
+                        if self.alerts:
+                            await self.alerts.emit(
+                                f"breakeven_stop_failed:{position.asset}",
+                                f"CRITICAL BYBIT: gagal memindahkan SL ke break-even untuk {position.asset}; SL lama di bursa tetap berlaku.",
+                            )
+                    else:
+                        position.stop_loss = breakeven_stop
+                        result["native_stop_updated"] = True
+                        result["stop_moved_to_entry"] = True
                 elif action["action"] == "tp2":
                     position.tp2_hit = True
                 if position.status == PositionStatus.OPEN:
@@ -845,6 +967,13 @@ class BybitExecutor(BaseExecutor):
                     or abs(local.entry_price - venue.entry_price) > 1e-12
                 ):
                     mismatch_count += 1
+                # Settlement runs after the venue sync below, but the size delta it
+                # needs is only knowable before local size is overwritten.
+                targets_armed = (
+                    getattr(local, "native_tp_state", "none") == "armed"
+                    and venue.size < local.size_current - 1e-12
+                )
+                size_drop = local.size_current - venue.size
                 local.size_current = venue.size
                 local.entry_price = venue.entry_price
                 local.leverage = venue.leverage
@@ -863,7 +992,22 @@ class BybitExecutor(BaseExecutor):
                             f"CRITICAL BYBIT: posisi {venue.symbol} tidak memiliki native hard SL.",
                         )
                     self._live_status[local_id] = LivePositionStatus.OPEN_UNPROTECTED
-                    if self._valid_recovery_stop(local, local.stop_loss):
+                    reference_price = await self._reference_price(venue.symbol)
+                    if reference_price <= 0:
+                        # A price-feed failure is not proof the stop is unusable.
+                        # Retry next reconciliation rather than destroy a live position.
+                        log.error(
+                            "Bybit hard SL reinstall deferred for %s: no reference price",
+                            venue.symbol,
+                        )
+                        if self.alerts:
+                            await self.alerts.emit(
+                                f"missing_sl_deferred:{venue.symbol}",
+                                f"CRITICAL BYBIT: {venue.symbol} tanpa hard SL dan harga referensi tidak tersedia; pemasangan ulang ditunda.",
+                            )
+                    elif self._valid_recovery_stop(
+                        local, local.stop_loss, reference_price
+                    ):
                         await self.client.set_protection(
                             symbol=venue.symbol,
                             side=venue.side,
@@ -889,6 +1033,10 @@ class BybitExecutor(BaseExecutor):
                         if self.persistence:
                             self.persistence.remove_bybit_position(local_id)
                         continue
+                if targets_armed:
+                    # Runs last so the break-even stop it installs is not undone by
+                    # the venue stop_loss read taken at the top of this cycle.
+                    await self._settle_armed_targets(local, venue, size_drop)
                 self._persist(local_id)
                 continue
 
@@ -961,10 +1109,253 @@ class BybitExecutor(BaseExecutor):
             self.telemetry.hard_sl_missing_count = missing_stops
             self.telemetry.hard_sl_by_symbol = hard_sl_by_symbol
 
+    async def _settle_armed_targets(
+        self, position: Position, venue: VenuePosition, size_drop: float
+    ) -> None:
+        """Attribute an exchange size reduction to confirmed native target fills."""
+        settled = await self._settle_native_targets(position, venue.symbol)
+        self._pending_target_actions.extend(settled)
+        if any(item["action"] == "tp1" for item in settled):
+            await self._move_stop_to_breakeven(position, venue.symbol, settled)
+        booked = sum(item["qty_closed"] for item in settled)
+        shortfall = size_drop - booked
+        if shortfall > self.registry.resolve(position.asset).qty_step / 2:
+            # Part of the reduction has no confirmed target behind it. Never guess.
+            position.native_tp_state = "reconciliation_required"
+            if self.alerts:
+                await self.alerts.emit(
+                    f"native_tp_fill_unattributed:{venue.symbol}",
+                    f"WARNING BYBIT: ukuran {venue.symbol} berkurang {shortfall:g} "
+                    "di luar native TP yang terkonfirmasi. Rekonsiliasi manual diperlukan.",
+                )
+        elif not position.native_tp1_order_id and not position.native_tp2_order_id:
+            position.native_tp_state = "none"
+
+    async def _move_stop_to_breakeven(
+        self, position: Position, symbol: str, actions: List[Dict]
+    ) -> None:
+        """Lock the remainder at entry once TP1 is confirmed filled at the venue."""
+        spec = self.registry.resolve(position.asset)
+        breakeven = self.registry.normalize_price(spec, position.entry_price)
+        try:
+            await self.client.set_protection(
+                symbol=symbol, side=position.side, stop_loss=breakeven
+            )
+        except Exception:
+            log.exception(
+                "Bybit break-even stop rejected for %s after native TP1", position.asset
+            )
+            if self.alerts:
+                await self.alerts.emit(
+                    f"breakeven_stop_failed:{position.asset}",
+                    f"CRITICAL BYBIT: gagal memindahkan SL ke break-even untuk "
+                    f"{position.asset} setelah TP1 native; SL lama di bursa tetap berlaku.",
+                )
+            return
+        position.stop_loss = breakeven
+        for action in actions:
+            if action["action"] == "tp1":
+                action["native_stop_updated"] = True
+                action["stop_moved_to_entry"] = True
+
     @staticmethod
-    def _valid_recovery_stop(position: Position, stop_loss: float) -> bool:
-        if stop_loss <= 0 or position.entry_price <= 0:
+    def _clear_target_id(position: Position, name: str) -> None:
+        if name == "tp1":
+            position.native_tp1_order_id = ""
+        else:
+            position.native_tp2_order_id = ""
+
+    def _record_native_target_fill(
+        self, position: Position, name: str, order: VenueOrder, venue_equity: float
+    ) -> Dict:
+        """Book one native target fill at its actual venue price, exactly once."""
+        if position.side == Side.LONG:
+            gross = (order.average_fill_price - position.entry_price) * order.filled_qty
+        else:
+            gross = (position.entry_price - order.average_fill_price) * order.filled_qty
+        entry_fee_slice = position.entry_fee_paid * (
+            order.filled_qty / max(position.size_initial, 1e-12)
+        )
+        pnl = gross - entry_fee_slice - order.fee_paid
+        position.pnl_realized += pnl
+        position.exit_fee_paid += order.fee_paid
+        position.close_slices += 1
+        if name == "tp1":
+            position.tp1_hit = True
+        else:
+            position.tp2_hit = True
+        self._persist_close_slice(
+            position, order, name, venue_equity, pnl, entry_fee_slice, False
+        )
+        return {
+            "action": name,
+            "reason": name,
+            "position_id": position.position_id,
+            "asset": position.asset,
+            "side": position.side.value,
+            "pnl": pnl,
+            "pnl_slice": pnl,
+            "pnl_total": position.pnl_realized,
+            "exit_price": order.average_fill_price,
+            "trigger_price": position.tp1 if name == "tp1" else position.tp2,
+            "fee_paid": order.fee_paid,
+            "qty_closed": order.filled_qty,
+            "fully_closed": False,
+            "native_target_fill": True,
+            "execution_environment": position.execution_environment,
+        }
+
+    async def _settle_native_targets(
+        self, position: Position, symbol: str
+    ) -> List[Dict]:
+        """Attribute vanished native targets to TP1/TP2 using venue order state.
+
+        A target order id that is no longer live has either filled or been
+        cancelled. Only a confirmed FILLED order books a slice; anything else
+        drops the id without inventing lifecycle or PnL.
+        """
+        pending = [
+            (name, order_id)
+            for name, order_id in (
+                ("tp1", position.native_tp1_order_id),
+                ("tp2", position.native_tp2_order_id),
+            )
+            if order_id
+        ]
+        if not pending:
+            return []
+        try:
+            rows = await self.client.get_open_orders(symbol, order_filter="StopOrder")
+        except Exception:
+            log.exception("Bybit target settlement could not list orders for %s", symbol)
+            return []
+        live_ids = {str(row.get("orderId") or "") for row in rows}
+        settled: List[Dict] = []
+        venue_equity = 0.0
+        for name, order_id in pending:
+            if order_id in live_ids:
+                continue
+            try:
+                order = await self.client.get_order_by_id(symbol, order_id)
+            except Exception:
+                log.exception(
+                    "Bybit target lookup failed for %s %s; leaving id for retry",
+                    symbol,
+                    name,
+                )
+                continue
+            if order is None:
+                continue
+            if order.status != ExecutionOrderStatus.FILLED or order.filled_qty <= 0:
+                log.info(
+                    "Bybit native %s for %s ended %s without fill",
+                    name,
+                    symbol,
+                    order.status.value,
+                )
+                self._clear_target_id(position, name)
+                continue
+            if not venue_equity:
+                venue_equity = (await self.client.get_account()).total_equity
+            settled.append(
+                self._record_native_target_fill(position, name, order, venue_equity)
+            )
+            self._clear_target_id(position, name)
+        return settled
+
+    def _split_native_targets(
+        self, spec, filled_qty: float, tp1_ratio: float, tp2_ratio: float
+    ):
+        """Return (tp1_qty, tp2_qty), or None when the fill cannot carry targets.
+
+        normalize_quantity raises for a slice below the venue step, so the smallest
+        installable position is roughly qty_step / tp1_ratio. Smaller fills are
+        legitimate trades that simply keep local exits.
+        """
+        try:
+            tp1_quantity = self.registry.normalize_quantity(
+                spec, filled_qty * tp1_ratio
+            )
+            tp2_quantity = self.registry.normalize_quantity(
+                spec, max(0.0, filled_qty - tp1_quantity) * tp2_ratio
+            )
+        except ValueError:
+            return None
+        if filled_qty - tp1_quantity - tp2_quantity < -spec.qty_step / 2:
+            return None
+        return tp1_quantity, tp2_quantity
+
+    async def _read_target_order_ids(
+        self, symbol: str, spec, tp1: float, tp2: float
+    ) -> tuple[str, str]:
+        """Read back venue order ids for the two native targets just installed.
+
+        Bybit's trading-stop response carries no order id, so targets are matched
+        by trigger price in the conditional order list. Matching allows half a tick
+        rather than float equality, because the venue formats the price itself and
+        an exact-equality miss would silently cost us attribution. Each row is
+        consumed once so two targets can never share an id. A missing id stays
+        empty rather than guessed: attribution must fail loudly instead of
+        crediting a fill to the wrong slice.
+        """
+        try:
+            rows = await self.client.get_open_orders(symbol, order_filter="StopOrder")
+        except Exception:
+            log.exception("Bybit native target order ids unreadable for %s", symbol)
+            return "", ""
+        candidates: List[tuple[float, str]] = []
+        for row in rows:
+            if not str(row.get("stopOrderType", "")).endswith("TakeProfit"):
+                continue
+            try:
+                trigger = float(row.get("triggerPrice") or 0)
+            except (TypeError, ValueError):
+                continue
+            order_id = str(row.get("orderId") or "")
+            if trigger > 0 and order_id:
+                candidates.append((trigger, order_id))
+
+        tolerance = max(getattr(spec, "tick_size", 0.0), 0.0) / 2 or 1e-9
+
+        def take(target: float) -> str:
+            for index, (trigger, order_id) in enumerate(candidates):
+                if abs(trigger - target) <= tolerance:
+                    candidates.pop(index)
+                    return order_id
+            return ""
+
+        first, second = take(tp1), take(tp2)
+        if not first or not second:
+            log.warning(
+                "Bybit native target ids incomplete for %s: tp1=%s tp2=%s",
+                symbol,
+                bool(first),
+                bool(second),
+            )
+        return first, second
+
+    async def _reference_price(self, symbol: str) -> float:
+        """Live price used to prove a stop is still installable at the venue."""
+        try:
+            return float(await self.client.get_mark_price(symbol) or 0)
+        except Exception:
+            log.exception("Bybit mark price unavailable for %s", symbol)
+            return 0.0
+
+    @staticmethod
+    def _valid_recovery_stop(
+        position: Position, stop_loss: float, reference_price: float
+    ) -> bool:
+        """A stop is installable only when it sits on the protective side of the
+        live price.
+
+        Entry price is not a valid reference. After TP1 KARA moves the stop to
+        break-even, and a trailing stop can sit far beyond entry; both are
+        legitimate profit-lock states. Testing against entry rejected them and
+        made reconciliation emergency-close positions it could have reprotected.
+        """
+        if stop_loss <= 0 or reference_price <= 0:
             return False
         if position.side == Side.LONG:
-            return stop_loss < position.entry_price
-        return stop_loss > position.entry_price
+            return stop_loss < reference_price
+        return stop_loss > reference_price
