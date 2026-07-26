@@ -274,11 +274,113 @@ position SL     : 1855.84    partial_tp_clears_full_sl: False
 Target prices at the venue match the planned targets exactly. This is production code, not the raw
 client, so it is evidence that a real KARA entry leaves visible, attributable TP1/TP2 on Bybit.
 
+## Meta-Pattern Learning Loop (added same session)
+
+### Symptom
+
+`meta_pattern_stats` never grew. Every production signal logged `meta_delta=+0`.
+
+### Evidence, captured from Railway production before the authorized reset
+
+| Table | Rows | With `meta_pattern_key` |
+| --- | --- | --- |
+| `signals_history` | 1723 | **1723** (263 distinct keys) |
+| `trade_history` | 682 | **0** |
+| `meta_pattern_stats` | **0** | — |
+
+### Root cause
+
+`update_meta_pattern_outcome()` (`core/db.py:648`) is the only writer to
+`meta_pattern_stats`. It is called from exactly two places, both in
+`execution/paper_executor.py` (lines 342 and 573). `execution/bybit_executor.py`
+called it **zero** times.
+
+Live execution moved to Bybit in `6d54bfb`; the feedback call did not move with it, and the Paper
+path is blocked in production (`[PAPER-ENTRY-BLOCK] reason=demo_onboarding_required`). So no closed
+trade ever fed the table, `get_meta_pattern_stats()` always returned `None`, and the meta layer
+could never raise or lower a score. Confidence: High.
+
+Second defect compounding it: `_persist_close_slice()` omitted `meta_pattern_key`, `signal_id`,
+`meta_score_delta`, and `entry_score`, which is why zero of 682 historical trades carried a key and
+why no backfill was possible — the data was never written.
+
+### Survivorship bias, found while fixing
+
+Feeding meta only from `close_position()` would have been worse than the bug. A native stop
+executes at the venue, so the position simply disappears and is caught by reconciliation's
+"symbol not in seen_symbols" branch — which recorded **no PnL, no trade, and no risk update at all**.
+Wins exit locally through `close_position`; losses exit at the venue. Wiring only the local path
+would have trained the win-rate EMA on survivors alone and then used it to gate future entries.
+
+### Changes
+
+- `BybitClient.get_closed_pnl()` reads `/v5/position/closed-pnl`. A venue stop leaves no local
+  fill, so this is the only truthful record of what it realized; the stop price is not a
+  substitute because gap and slippage move the actual exit.
+- `_settle_vanished_position()` books the disappeared position: realized PnL from the venue record,
+  a `venue_stop_or_external_close` trade row, a risk PnL update, and the meta outcome. If no PnL
+  row is readable it logs and teaches the meta layer **nothing** rather than inventing an outcome.
+- `_record_meta_outcome()` feeds one closed position exactly once, guarded by the new
+  `Position.meta_outcome_recorded` flag, using cumulative `pnl_realized` so partial slices cannot
+  each count as a sample.
+- `_persist_close_slice()` now carries `signal_id`, `meta_pattern_key`, `meta_score_delta`, and
+  `entry_score`, so future trades can be joined back to the signal that produced them.
+
+### Verification
+
+```text
+252 passed
+python -m pytest tests/ -q
+python -m py_compile execution/bybit_executor.py data/bybit_client.py models/schemas.py execution/exchange_client.py
+git diff --check
+```
+
+New regression tests, both confirmed to fail against the pre-fix code by temporarily removing the
+two feed points:
+
+- `test_local_full_close_feeds_meta_pattern_once` — also asserts idempotency
+- `test_venue_stop_out_is_booked_as_a_loss_and_feeds_meta`
+- `test_vanished_position_without_pnl_record_teaches_meta_nothing`
+- `test_position_without_meta_key_is_never_recorded`
+
+### Residual risk
+
+- Attribution in `_settle_vanished_position` assumes at most one position per symbol, which holds
+  under current KARA sizing but is an assumption, not a venue guarantee.
+- Fees are not separated from `closedPnl` in that path; Bybit's figure is already net, so
+  `exit_fee_paid` stays unchanged for venue-side closes and fee reporting for those rows is
+  incomplete.
+- Statistics restart from zero after the reset. Do not read a pattern's win rate below 10 samples.
+
+## Production Reset — 2026-07-26, operator authorized
+
+Operator explicitly requested a full reset three times. Executed directly on the Railway volume via
+`railway ssh`, not through the repo's Option B token path (the 2026-07-19 one-shot marker was still
+present and would have skipped it).
+
+Deleted from `/data`: `kara_data.db`, `kara_ml.db`, `users.json`, `telegram_state.json`,
+`.kara_total_reset_done`. Pre-reset inventory is recorded in the meta-pattern evidence above.
+
+Post-reset verification: every history, user, and trading table is zero. `users.json` absent, so all
+encrypted Bybit credentials are gone and the operator must re-onboard. Non-KARA artifacts dated
+2026-07-10/11 (`decision-log.json`, `lessons.json`, `pool-memory.json`, `state.json`,
+`strategy-library.json`, `user-config.json`, `hivemind-cache.json`) were left untouched.
+
+**Exchange state was not modified.** Three positions were open at reset time — ENAUSDT (~3215 USDT),
+TAOUSDT (~3221 USDT), SOLUSDT (~23 USDT), all carrying a hard SL and no TP. KARA no longer holds
+credentials or records for them. After re-onboarding they will be recovered as
+`exchange_recovery_unknown`, for which KARA deliberately defers all exits, so they run on their
+venue stop until closed manually.
+
 ## Deployment Status
 
-- **Not deployed.** No commit, push, restart, credential access, or order was performed.
-- Changes are local working-tree only. Note that committing the current tree would also ship the
-  uncommitted native partial TP feature, which is not ready; stage selectively.
+- Commit `99608ad` (protection, observability, native TP) pushed to `main` and deployed to Railway.
+  The GitHub push did **not** trigger an automatic build; the deploy was issued explicitly and then
+  verified inside the container.
+- The meta-pattern changes above are committed separately and deployed in the same manner.
+- Adversarial multi-agent review of the native TP code was started but never completed; the
+  workflows were killed with the session. The code carries 252 passing tests, venue drills, and a
+  manual diff review, but not that independent second pass.
 
 ## Monitoring After Deploy
 

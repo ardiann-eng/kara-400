@@ -1134,3 +1134,113 @@ async def test_two_targets_never_share_one_order_id():
 
     assert position.native_tp1_order_id == "tp-only"
     assert position.native_tp2_order_id == ""
+
+
+def make_meta_signal(key="scalper_BTC_long_s65_71"):
+    return make_signal().model_copy(update={"meta_pattern_key": key})
+
+
+class MetaPersistence(FakePersistence):
+    def __init__(self):
+        super().__init__()
+        self.meta_calls = []
+        self.stats = {}
+
+    def update_meta_pattern_outcome(self, pattern_key, pnl_usd, alpha=0.20):
+        self.meta_calls.append((pattern_key, pnl_usd))
+        row = self.stats.setdefault(pattern_key, {"samples": 0})
+        row["samples"] += 1
+
+    def get_meta_pattern_stats(self, pattern_key):
+        return self.stats.get(pattern_key)
+
+
+@pytest.mark.asyncio
+async def test_local_full_close_feeds_meta_pattern_once():
+    """Regression: live execution moved to Bybit but the meta feedback call did
+    not move with it, so meta_pattern_stats stayed empty forever."""
+    client = FakeClient()
+    persistence = MetaPersistence()
+    executor = make_executor(client, persistence=persistence)
+    position = await executor.open_position(make_meta_signal())
+    client.positions = [
+        VenuePosition("BTCUSDT", Side.LONG, 0.1, position.entry_price, 10, stop_loss=99.2)
+    ]
+
+    result = await executor.close_position(position.position_id, 101.0, reason="tp2")
+
+    assert result["fully_closed"] is True
+    assert len(persistence.meta_calls) == 1
+    key, pnl = persistence.meta_calls[0]
+    assert key == position.meta_pattern_key
+    assert pnl == pytest.approx(position.pnl_realized)
+
+    trade = persistence.trades[-1][1]
+    assert trade["meta_pattern_key"] == position.meta_pattern_key
+    assert trade["signal_id"] == position.signal_id
+
+    # Idempotent: a later settlement attempt must not double count.
+    executor._record_meta_outcome(position)
+    assert len(persistence.meta_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_venue_stop_out_is_booked_as_a_loss_and_feeds_meta():
+    """A native SL closes at the venue with no local fill. Without this the loss
+    reached neither trade history nor meta learning, biasing win rate upward."""
+    client = FakeClient()
+    persistence = MetaPersistence()
+    executor = make_executor(client, persistence=persistence)
+    position = await executor.open_position(make_meta_signal())
+
+    async def closed_pnl(symbol, *, start_ms=None, limit=50):
+        return [{"closedPnl": "-4.25", "qty": "0.1", "avgExitPrice": "99.2"}]
+
+    client.get_closed_pnl = closed_pnl
+    client.positions = []  # venue stop fired; position is gone
+
+    await executor.reconcile()
+
+    assert position.status == PositionStatus.CLOSED
+    assert position.pnl_realized == pytest.approx(-4.25)
+    assert len(persistence.meta_calls) == 1
+    assert persistence.meta_calls[0] == (position.meta_pattern_key, pytest.approx(-4.25))
+    trade = persistence.trades[-1][1]
+    assert trade["reason"] == "venue_stop_or_external_close"
+    assert trade["pnl"] == pytest.approx(-4.25)
+    assert trade["fully_closed"] is True
+    assert trade["meta_pattern_key"] == position.meta_pattern_key
+
+
+@pytest.mark.asyncio
+async def test_vanished_position_without_pnl_record_teaches_meta_nothing():
+    """Never invent an outcome: an unmeasurable close must not train the model."""
+    client = FakeClient()
+    persistence = MetaPersistence()
+    executor = make_executor(client, persistence=persistence)
+    position = await executor.open_position(make_meta_signal())
+
+    async def no_rows(symbol, *, start_ms=None, limit=50):
+        return []
+
+    client.get_closed_pnl = no_rows
+    client.positions = []
+
+    await executor.reconcile()
+
+    assert position.status == PositionStatus.CLOSED
+    assert persistence.meta_calls == []
+    assert position.pnl_realized == 0
+
+
+@pytest.mark.asyncio
+async def test_position_without_meta_key_is_never_recorded():
+    client = FakeClient()
+    persistence = MetaPersistence()
+    executor = make_executor(client, persistence=persistence)
+    position = await executor.open_position(make_meta_signal())
+    position.meta_pattern_key = None
+
+    executor._record_meta_outcome(position)
+
+    assert persistence.meta_calls == []

@@ -151,6 +151,13 @@ class ExecutionClient(ABC):
         pass
 
     @abstractmethod
+    async def get_closed_pnl(
+        self, symbol: str, *, start_ms: Optional[int] = None, limit: int = 50
+    ) -> List[dict]:
+        """Return realized PnL rows for closed position slices."""
+        pass
+
+    @abstractmethod
     async def get_open_orders(
         self, symbol: str, *, order_filter: str = "StopOrder"
     ) -> List[dict]:

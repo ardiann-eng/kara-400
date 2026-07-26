@@ -347,6 +347,9 @@ class Position(BaseModel):
     # Without them a target fill cannot be attributed to TP1 versus TP2.
     native_tp1_order_id: str = ""
     native_tp2_order_id: str = ""
+    # Meta-pattern learning must see each closed position exactly once, whether it
+    # ended on a local exit or on a venue-side stop.
+    meta_outcome_recorded: bool = False
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == Side.LONG:

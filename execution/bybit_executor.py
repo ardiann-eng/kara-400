@@ -714,6 +714,7 @@ class BybitExecutor(BaseExecutor):
                 position.closed_at = utcnow()
                 self._live_status[position_id] = LivePositionStatus.CLOSED
                 self.risk.record_pnl(position.pnl_realized, balance)
+                self._record_meta_outcome(position)
             else:
                 self._live_status[position_id] = LivePositionStatus.OPEN_PROTECTED
             self._persist_close_slice(
@@ -785,6 +786,13 @@ class BybitExecutor(BaseExecutor):
             "leverage": position.leverage,
             "strategy_profile": position.strategy_source,
             "trade_mode": position.trade_mode,
+            # Without these a closed Bybit trade cannot be joined back to the
+            # signal that produced it, which is why no historical trade carried a
+            # meta pattern and no backfill was possible.
+            "signal_id": position.signal_id,
+            "meta_pattern_key": position.meta_pattern_key,
+            "meta_score_delta": position.meta_score_delta,
+            "entry_score": position.entry_score,
             "opened_at": position.opened_at.isoformat(),
             "closed_at": position.closed_at.isoformat() if position.closed_at else None,
         })
@@ -1096,6 +1104,10 @@ class BybitExecutor(BaseExecutor):
             if symbol not in seen_symbols:
                 mismatch_count += 1
                 position = self._positions[position_id]
+                if position.status == PositionStatus.OPEN:
+                    # A venue-side stop closed this. Book it before discarding the
+                    # position, or the loss never reaches history or meta learning.
+                    await self._settle_vanished_position(position_id, symbol)
                 position.status = PositionStatus.CLOSED
                 position.size_current = 0
                 position.closed_at = utcnow()
@@ -1130,6 +1142,101 @@ class BybitExecutor(BaseExecutor):
                 )
         elif not position.native_tp1_order_id and not position.native_tp2_order_id:
             position.native_tp_state = "none"
+
+    def _record_meta_outcome(self, position: Position) -> None:
+        """Feed one closed position into meta-pattern stats, exactly once.
+
+        Live execution moved to Bybit but this call did not move with it, so
+        meta_pattern_stats stayed empty and every signal scored meta_delta=+0.
+        Losses must arrive through the same path as wins: a venue-side stop that
+        never produces a local fill would otherwise be invisible, and the win-rate
+        EMA would drift upward on survivorship alone.
+        """
+        if position.meta_outcome_recorded or not position.meta_pattern_key:
+            return
+        if not self.persistence or not hasattr(
+            self.persistence, "update_meta_pattern_outcome"
+        ):
+            return
+        position.meta_outcome_recorded = True
+        try:
+            self.persistence.update_meta_pattern_outcome(
+                position.meta_pattern_key, position.pnl_realized
+            )
+            stats = None
+            if hasattr(self.persistence, "get_meta_pattern_stats"):
+                stats = self.persistence.get_meta_pattern_stats(
+                    position.meta_pattern_key
+                )
+            log.info(
+                "[META] %s pnl=%+.2f samples=%s",
+                position.meta_pattern_key,
+                position.pnl_realized,
+                stats["samples"] if stats else 1,
+            )
+        except Exception:
+            log.exception(
+                "Bybit meta pattern outcome failed for %s", position.meta_pattern_key
+            )
+
+    async def _settle_vanished_position(self, position_id: str, symbol: str) -> None:
+        """Account for a position that disappeared from the exchange.
+
+        This is the stop-out path: the venue closed the remainder, so there is no
+        local fill. Realized PnL is read from Bybit's closed-PnL record rather than
+        inferred from the stop price, which gap and slippage would make wrong.
+        KARA holds at most one position per symbol, so rows after this position
+        opened belong to it.
+        """
+        position = self._positions[position_id]
+        rows: List[Dict] = []
+        try:
+            rows = await self.client.get_closed_pnl(
+                symbol, start_ms=int(position.opened_at.timestamp() * 1000)
+            )
+        except Exception:
+            log.exception("Bybit closed PnL unavailable for %s", symbol)
+
+        realized = 0.0
+        closed_qty = 0.0
+        exit_price = 0.0
+        for row in rows:
+            try:
+                realized += float(row.get("closedPnl") or 0)
+                closed_qty += float(row.get("qty") or 0)
+                exit_price = float(row.get("avgExitPrice") or 0) or exit_price
+            except (TypeError, ValueError):
+                continue
+        if not rows:
+            # Never invent an outcome. The position is gone either way, but an
+            # unmeasured close must not teach the meta layer anything.
+            log.warning(
+                "Bybit vanished position %s closed without a readable PnL record",
+                position.asset,
+            )
+            return
+
+        position.pnl_realized += realized
+        position.exit_fee_paid += 0.0
+        position.close_slices += 1
+        fill = VenueOrder(
+            order_id="", client_order_id="", symbol=symbol, side=position.side,
+            requested_qty=closed_qty, filled_qty=closed_qty,
+            average_fill_price=exit_price or position.stop_loss,
+            fee_paid=0.0, status=ExecutionOrderStatus.FILLED, reduce_only=True,
+        )
+        try:
+            balance = (await self.client.get_account()).total_equity
+        except Exception:
+            balance = 0.0
+        self._persist_close_slice(
+            position, fill, "venue_stop_or_external_close", balance, realized, 0.0, True
+        )
+        try:
+            self.risk.record_pnl(position.pnl_realized, balance)
+        except Exception:
+            log.exception("Bybit risk PnL update failed for %s", position.asset)
+        self._record_meta_outcome(position)
 
     async def _move_stop_to_breakeven(
         self, position: Position, symbol: str, actions: List[Dict]

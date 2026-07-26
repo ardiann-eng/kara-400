@@ -541,6 +541,26 @@ class BybitClient(ExecutionClient):
             raise BybitError(f"Bybit order not found: {client_order_id}")
         return self._parse_order(rows[0])
 
+    async def get_closed_pnl(
+        self, symbol: str, *, start_ms: Optional[int] = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Realized PnL rows for closed position slices, newest first.
+
+        A venue-side stop leaves no local fill to account for, so this is the only
+        record of what a stop-out actually realized.
+        """
+        params: Dict[str, Any] = {
+            "category": "linear",
+            "symbol": symbol,
+            "limit": limit,
+        }
+        if start_ms:
+            params["startTime"] = int(start_ms)
+        result = await self._request(
+            "GET", "/v5/position/closed-pnl", params=params, auth=True
+        )
+        return list(result.get("list") or [])
+
     async def get_order_by_id(
         self, symbol: str, order_id: str
     ) -> Optional[VenueOrder]:
