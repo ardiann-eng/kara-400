@@ -146,11 +146,80 @@ async def test_tp_updates_do_not_offer_final_pnl_card(monkeypatch):
     }, {"MORPHO": 2.21}, target_chat_id="1")
 
     text, kwargs = sent[0]
-    assert "KARA UPDATE: Target Reached" in text
-    assert "TP1 HIT" in text
+    assert "TP1 — MORPHO LONG" in text
+    assert "$2.2045" in text
+    assert "$2.2100" in text
+    assert "Profit" in text
+    assert "Sisa <b>75%</b>" in text
     assert "SL digeser ke Entry" in text
+    assert "KARA UPDATE" not in text
+    assert "Risk Adjustment" not in text
     assert "Pnl Card" not in text
     assert kwargs["reply_markup"] is None
+
+
+@pytest.mark.asyncio
+async def test_tp2_compact_message_uses_actual_fill_and_total_pnl():
+    from models.schemas import Position, PositionStatus, Side
+
+    position = Position(
+        position_id="p1", asset="MORPHO", side=Side.LONG,
+        entry_price=2.2045, size_initial=10, size_current=3.75,
+        leverage=10, margin_usd=2.2, stop_loss=2.2045,
+        tp1=2.21, tp2=2.22, status=PositionStatus.OPEN,
+    )
+    session = SimpleNamespace(
+        executor=SimpleNamespace(_positions={"p1": position}, registry=None),
+        user=SimpleNamespace(bybit_environment=SimpleNamespace(value="demo")),
+    )
+    sent = []
+    telegram = KaraTelegram.__new__(KaraTelegram)
+    telegram.bot_app = FakeBotApp(session)
+    async def send_text(text, **kwargs): sent.append((text, kwargs))
+    telegram.send_text = send_text
+
+    await telegram.send_position_event({
+        "action": "tp2", "position_id": "p1", "pnl_slice": 1,
+        "pnl_total": 2.5, "exit_price": 2.2197,
+    }, {"MORPHO": 2.22}, target_chat_id="1")
+
+    text, kwargs = sent[0]
+    assert "TP2 — MORPHO LONG" in text
+    assert "$2.2197" in text
+    assert "Total" in text
+    assert "Sisa <b>38%</b>" in text
+    assert "Trailing aktif" in text
+    assert kwargs["reply_markup"] is None
+
+
+@pytest.mark.asyncio
+async def test_tp_message_does_not_invent_fill_when_exit_price_missing():
+    from models.schemas import Position, PositionStatus, Side
+
+    position = Position(
+        position_id="p1", asset="MORPHO", side=Side.LONG,
+        entry_price=2.2045, size_initial=10, size_current=7.5,
+        leverage=10, margin_usd=2.2, stop_loss=2.2045,
+        tp1=2.21, tp2=2.22, status=PositionStatus.OPEN,
+    )
+    session = SimpleNamespace(
+        executor=SimpleNamespace(_positions={"p1": position}, registry=None),
+        user=SimpleNamespace(bybit_environment=SimpleNamespace(value="demo")),
+    )
+    sent = []
+    telegram = KaraTelegram.__new__(KaraTelegram)
+    telegram.bot_app = FakeBotApp(session)
+    async def send_text(text, **kwargs): sent.append((text, kwargs))
+    telegram.send_text = send_text
+
+    await telegram.send_position_event({
+        "action": "tp1", "position_id": "p1", "pnl_slice": 1,
+        "pnl_total": 1,
+    }, {"MORPHO": 9.99}, target_chat_id="1")
+
+    text, _kwargs = sent[0]
+    assert "Harga jual belum terkonfirmasi" in text
+    assert "$9.9900" not in text
 
 
 @pytest.mark.asyncio

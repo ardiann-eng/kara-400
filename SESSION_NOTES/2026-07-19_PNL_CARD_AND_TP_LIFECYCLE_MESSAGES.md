@@ -45,3 +45,14 @@ git diff --check
 - Verification: `17 passed` in `tests/test_bybit_telegram_safety.py`; `python -m py_compile notify/telegram.py tests/test_bybit_telegram_safety.py`; `git diff --check`.
 - No deployment, restart, commit, credential access, Demo balance change, or order.
 - Next production measurement: trigger one Demo full close; notification must show exactly one `📊 PnL Card` button and no `Chart Bybit Demo` button.
+
+## 2026-07-30 Follow-up: Compact TP Fill Messages
+
+- TP1/TP2 messages now show entry price and actual confirmed exit fill price.
+- Missing `exit_price` is shown as `Harga jual belum terkonfirmasi`; current market price is never substituted as a fill.
+- TP1 retains slice profit, remaining percentage, and confirmed SL status.
+- TP2 retains slice profit, cumulative profit, remaining percentage, and trailing status.
+- Long English prose, duplicated headings, ROE percentage, and chart buttons were removed.
+- Focused Telegram tests: `20 passed`; full suite: `275 passed`.
+- `py_compile` and `git diff --check` passed.
+- Not committed, pushed, deployed, or restarted.

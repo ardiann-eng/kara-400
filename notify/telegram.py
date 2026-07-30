@@ -2483,14 +2483,6 @@ class KaraTelegram:
         mode_text = "Scalper" if is_scl else "Standard"
         side = pos.side.value.upper()
         asset = pos.asset
-        chart_url = self._bybit_chart_url(asset, getattr(session, "executor", None))
-        chart_keyboard = (
-            InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    self._bybit_chart_label(getattr(session, "user", None)), url=chart_url
-                )
-            ]]) if chart_url else None
-        )
 
         slice_roe = float(action.get("pnl_pct_slice") or action.get("pnl_pct") or 0.0)
         if abs(slice_roe) < 1e-12 and abs(price_frac) > 0:
@@ -2515,42 +2507,42 @@ class KaraTelegram:
         hold_str = self._fmt_hold_duration(duration_sec)
 
         if action_type == "tp1":
+            fill_value = action.get("exit_price")
+            price_line = (
+                f"<code>${format_price(entry)}</code> → <code>${format_price(float(fill_value))}</code>"
+                if fill_value is not None else
+                f"<code>${format_price(entry)}</code> → Harga jual belum terkonfirmasi"
+            )
             stop_text = (
                 "SL digeser ke Entry ✅"
                 if action.get("stop_moved_to_entry") else
                 "Perubahan SL belum dikonfirmasi"
             )
             text = (
-                "🌸 <b>KARA UPDATE: Target Reached</b>\n\n"
-                f"I have secured partial profits for <b>{asset}</b>. "
-                "Taking some chips off the table.\n\n"
-                "🎯 <b>TP1 HIT</b>\n"
-                f"  • Entry   : <code>${format_price(entry)}</code>\n"
-                f"  • Profit  : <b>{slice_sign}{format_idr(pnl_slice)}</b> "
-                f"({slice_sign}{slice_roe_pct:.2f}%)\n\n"
-                "🛡️ <b>Risk Adjustment</b>\n"
-                f"  • Status : Sisa <b>{remain_after_tp1*100:.0f}%</b> masih jalan\n"
-                f"  • Action : {stop_text}\n\n"
-                "Continuing to monitor for TP2. ✨"
+                f"🎯 <b>TP1 — {asset} {side}</b>\n"
+                f"{price_line}\n"
+                f"Profit <b>{slice_sign}{format_idr(pnl_slice)}</b> · "
+                f"Sisa <b>{remain_after_tp1*100:.0f}%</b>\n"
+                f"{stop_text}"
             )
-            await self.send_text(text, target_chat_id=target_chat_id, reply_markup=chart_keyboard)
+            await self.send_text(text, target_chat_id=target_chat_id, reply_markup=None)
             return
 
         if action_type == "tp2":
-            text = (
-                "🌸 <b>KARA UPDATE: Second Target Reached</b>\n\n"
-                f"Another partial profit has been secured for <b>{asset}</b>.\n\n"
-                "🎯 <b>TP2 HIT</b>\n"
-                f"  • Entry   : <code>${format_price(entry)}</code>\n"
-                f"  • Profit  : <b>{slice_sign}{format_idr(pnl_slice)}</b> "
-                f"({slice_sign}{slice_roe_pct:.2f}%)\n"
-                f"  • Locked  : <b>{total_sign}{format_idr(total_pnl)}</b>\n\n"
-                "🛡️ <b>Risk Adjustment</b>\n"
-                f"  • Status : Sisa <b>{remain_after_tp2*100:.0f}%</b> masih jalan\n"
-                "  • Action : Trailing stop aktif ✅\n\n"
-                "Continuing to monitor the remaining position. ✨"
+            fill_value = action.get("exit_price")
+            price_line = (
+                f"<code>${format_price(entry)}</code> → <code>${format_price(float(fill_value))}</code>"
+                if fill_value is not None else
+                f"<code>${format_price(entry)}</code> → Harga jual belum terkonfirmasi"
             )
-            await self.send_text(text, target_chat_id=target_chat_id)
+            text = (
+                f"🎯 <b>TP2 — {asset} {side}</b>\n"
+                f"{price_line}\n"
+                f"Profit <b>{slice_sign}{format_idr(pnl_slice)}</b> · "
+                f"Total <b>{total_sign}{format_idr(total_pnl)}</b>\n"
+                f"Sisa <b>{remain_after_tp2*100:.0f}%</b> · Trailing aktif ✅"
+            )
+            await self.send_text(text, target_chat_id=target_chat_id, reply_markup=None)
             return
 
         # ── FULL CLOSE (compact + light emoji) ────────────────────────
