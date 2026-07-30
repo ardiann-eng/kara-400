@@ -146,14 +146,15 @@ async def test_tp_updates_do_not_offer_final_pnl_card(monkeypatch):
     }, {"MORPHO": 2.21}, target_chat_id="1")
 
     text, kwargs = sent[0]
-    assert "TP1 — MORPHO LONG" in text
-    assert "$2.2045" in text
-    assert "$2.2100" in text
-    assert "Profit" in text
-    assert "Sisa <b>75%</b>" in text
+    assert "KARA UPDATE: Target Reached" in text
+    assert "TP1 HIT" in text
+    assert "Entry : <code>$2.2045</code>" in text
+    assert "Exit  : <code>$2.2100</code>" in text
+    assert "Profit:" in text
+    assert "Sisa <b>75%</b> masih berjalan" in text
     assert "SL digeser ke Entry" in text
-    assert "KARA UPDATE" not in text
-    assert "Risk Adjustment" not in text
+    assert "Risk Adjustment" in text
+    assert "Bot melanjutkan pemantauan menuju TP2" in text
     assert "Pnl Card" not in text
     assert kwargs["reply_markup"] is None
 
@@ -184,11 +185,12 @@ async def test_tp2_compact_message_uses_actual_fill_and_total_pnl():
     }, {"MORPHO": 2.22}, target_chat_id="1")
 
     text, kwargs = sent[0]
-    assert "TP2 — MORPHO LONG" in text
-    assert "$2.2197" in text
-    assert "Total" in text
-    assert "Sisa <b>38%</b>" in text
-    assert "Trailing aktif" in text
+    assert "KARA UPDATE: Second Target Reached" in text
+    assert "TP2 HIT" in text
+    assert "Exit  : <code>$2.2197</code>" in text
+    assert "Total :" in text
+    assert "Sisa <b>38%</b> masih berjalan" in text
+    assert "Trailing stop aktif" in text
     assert kwargs["reply_markup"] is None
 
 

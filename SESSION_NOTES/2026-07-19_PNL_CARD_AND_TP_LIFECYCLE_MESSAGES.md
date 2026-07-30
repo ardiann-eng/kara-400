@@ -56,3 +56,14 @@ git diff --check
 - Focused Telegram tests: `20 passed`; full suite: `275 passed`.
 - `py_compile` and `git diff --check` passed.
 - Not committed, pushed, deployed, or restarted.
+
+### Superseded same day
+
+- Operator clarified that only the actual exit-fill line should be added; the prior
+  long-form message structure must remain.
+- Restored `KARA UPDATE`, TP heading, Entry/Exit/Profit rows, Risk Adjustment, remaining
+  position, and monitoring status.
+- Actual confirmed `exit_price` remains explicit. Missing fill remains
+  `Harga jual belum terkonfirmasi` and is never replaced by current market price.
+- TP quantity, SL, trailing, and all trading behavior remain unchanged.
+- Final full suite: `275 passed`.

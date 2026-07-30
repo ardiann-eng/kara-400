@@ -2508,39 +2508,50 @@ class KaraTelegram:
 
         if action_type == "tp1":
             fill_value = action.get("exit_price")
-            price_line = (
-                f"<code>${format_price(entry)}</code> → <code>${format_price(float(fill_value))}</code>"
-                if fill_value is not None else
-                f"<code>${format_price(entry)}</code> → Harga jual belum terkonfirmasi"
-            )
             stop_text = (
                 "SL digeser ke Entry ✅"
                 if action.get("stop_moved_to_entry") else
                 "Perubahan SL belum dikonfirmasi"
             )
             text = (
-                f"🎯 <b>TP1 — {asset} {side}</b>\n"
-                f"{price_line}\n"
-                f"Profit <b>{slice_sign}{format_idr(pnl_slice)}</b> · "
-                f"Sisa <b>{remain_after_tp1*100:.0f}%</b>\n"
-                f"{stop_text}"
+                "🌸 <b>KARA UPDATE: Target Reached</b>\n\n"
+                f"Profit sebagian <b>{asset}</b> berhasil diamankan.\n\n"
+                "🎯 <b>TP1 HIT</b>\n"
+                f"  • Entry : <code>${format_price(entry)}</code>\n"
+                f"  • Exit  : "
+                + (
+                    f"<code>${format_price(float(fill_value))}</code>\n"
+                    if fill_value is not None else
+                    "Harga jual belum terkonfirmasi\n"
+                )
+                + f"  • Profit: <b>{slice_sign}{format_idr(pnl_slice)}</b>\n\n"
+                "🛡️ <b>Risk Adjustment</b>\n"
+                f"  • Status: Sisa <b>{remain_after_tp1*100:.0f}%</b> masih berjalan\n"
+                f"  • Action: {stop_text}\n\n"
+                "Bot melanjutkan pemantauan menuju TP2."
             )
             await self.send_text(text, target_chat_id=target_chat_id, reply_markup=None)
             return
 
         if action_type == "tp2":
             fill_value = action.get("exit_price")
-            price_line = (
-                f"<code>${format_price(entry)}</code> → <code>${format_price(float(fill_value))}</code>"
-                if fill_value is not None else
-                f"<code>${format_price(entry)}</code> → Harga jual belum terkonfirmasi"
-            )
             text = (
-                f"🎯 <b>TP2 — {asset} {side}</b>\n"
-                f"{price_line}\n"
-                f"Profit <b>{slice_sign}{format_idr(pnl_slice)}</b> · "
-                f"Total <b>{total_sign}{format_idr(total_pnl)}</b>\n"
-                f"Sisa <b>{remain_after_tp2*100:.0f}%</b> · Trailing aktif ✅"
+                "🌸 <b>KARA UPDATE: Second Target Reached</b>\n\n"
+                f"Profit sebagian berikutnya untuk <b>{asset}</b> berhasil diamankan.\n\n"
+                "🎯 <b>TP2 HIT</b>\n"
+                f"  • Entry : <code>${format_price(entry)}</code>\n"
+                f"  • Exit  : "
+                + (
+                    f"<code>${format_price(float(fill_value))}</code>\n"
+                    if fill_value is not None else
+                    "Harga jual belum terkonfirmasi\n"
+                )
+                + f"  • Profit: <b>{slice_sign}{format_idr(pnl_slice)}</b>\n"
+                f"  • Total : <b>{total_sign}{format_idr(total_pnl)}</b>\n\n"
+                "🛡️ <b>Risk Adjustment</b>\n"
+                f"  • Status: Sisa <b>{remain_after_tp2*100:.0f}%</b> masih berjalan\n"
+                "  • Action: Trailing stop aktif ✅\n\n"
+                "Bot melanjutkan pemantauan sisa posisi."
             )
             await self.send_text(text, target_chat_id=target_chat_id, reply_markup=None)
             return
