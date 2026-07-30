@@ -83,6 +83,42 @@ def test_positions_view_does_not_build_bybit_chart_buttons():
 
 
 @pytest.mark.asyncio
+async def test_position_opened_message_has_no_bybit_chart_button(monkeypatch):
+    from models.schemas import Position, PositionStatus, Side
+
+    position = Position(
+        position_id="p1", asset="BTC", side=Side.LONG,
+        entry_price=100, size_initial=1, size_current=1,
+        leverage=10, margin_usd=10, stop_loss=99,
+        tp1=101, tp2=102, status=PositionStatus.OPEN,
+    )
+    signal = SimpleNamespace(score=70, risk_reward_ratio=1.5)
+    user = SimpleNamespace(config=SimpleNamespace(trading_mode="scalper"))
+    sent = []
+    telegram = KaraTelegram.__new__(KaraTelegram)
+    telegram._authorized_chat_ids = {"1"}
+    telegram.bot_app = None
+    telegram.send_text = lambda *args, **kwargs: None
+
+    async def send_text(text, **kwargs):
+        sent.append((text, kwargs))
+
+    telegram.send_text = send_text
+    monkeypatch.setattr("notify.telegram.user_db.get_user", lambda *_: user)
+    monkeypatch.setattr(
+        KaraTelegram,
+        "_bybit_chart_url",
+        staticmethod(lambda *_: "https://www.bybit.com/en/trade/usdt/BTCUSDT"),
+    )
+
+    await telegram.send_position_opened(position, signal, target_chat_id="1")
+
+    text, kwargs = sent[0]
+    assert "Position Executed" in text
+    assert kwargs["reply_markup"] is None
+
+
+@pytest.mark.asyncio
 async def test_tp_updates_do_not_offer_final_pnl_card(monkeypatch):
     from models.schemas import Position, PositionStatus, Side
 

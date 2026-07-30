@@ -119,6 +119,7 @@ async def test_demo_allocation_confirmation_shows_official_demo_api_guide(monkey
     text, kwargs = edits[0]
     assert "langkah 3/4" in text
     assert "Jangan pakai API Key Testnet atau Mainnet" in text
+    assert "API_KEY,API_SECRET" in text
     urls = [button.url for row in kwargs["reply_markup"].inline_keyboard for button in row if button.url]
     assert "https://bybit-exchange.github.io/docs/v5/demo" in urls
 
@@ -139,7 +140,7 @@ async def test_demo_preflight_403_returns_to_key_step_without_losing_allocation(
     class Chat:
         async def send_message(self, text, **kwargs): sent.append(text)
     class CredentialMessage:
-        text = "demo-secret"
+        text = "demo-key,demo-secret"
         async def delete(self): deleted.append(True)
 
     bot = KaraTelegram.__new__(KaraTelegram)
@@ -149,11 +150,10 @@ async def test_demo_preflight_403_returns_to_key_step_without_losing_allocation(
     ctx = SimpleNamespace(user_data={
         "pending_execution_environment": "demo",
         "pending_capital_allocation": allocation,
-        "pending_bybit_key": "demo-key",
     })
     update = SimpleNamespace(effective_message=CredentialMessage(), effective_chat=Chat())
 
-    assert await bot.handle_bybit_secret(update, ctx) == WAITING_BYBIT_KEY
+    assert await bot.handle_bybit_credentials(update, ctx) == WAITING_BYBIT_KEY
     assert deleted == [True]
     assert "pending_bybit_key" not in ctx.user_data
     assert ctx.user_data["pending_capital_allocation"] is allocation
@@ -210,7 +210,7 @@ async def test_demo_onboarding_sets_requested_virtual_balance_then_activates(mon
     class Chat:
         async def send_message(self, text, **kwargs): sent.append((text, kwargs))
     class CredentialMessage:
-        text = "demo-secret"
+        text = "demo-key,demo-secret"
         async def delete(self): deleted.append(True)
     class Query:
         data = "bybit_live_confirm"
@@ -232,10 +232,9 @@ async def test_demo_onboarding_sets_requested_virtual_balance_then_activates(mon
     ctx = SimpleNamespace(user_data={
         "pending_execution_environment": "demo",
         "pending_capital_allocation": convert_allocation_idr(1_000_000, 16_000),
-        "pending_bybit_key": "demo-key",
     })
     update = SimpleNamespace(effective_message=CredentialMessage(), effective_chat=Chat())
-    await bot.handle_bybit_secret(update, ctx)
+    await bot.handle_bybit_credentials(update, ctx)
     assert deleted == [True]
     assert ctx.user_data["pending_bybit_venue_equity"] == 62.5
     confirm_update = SimpleNamespace(callback_query=Query(), effective_chat=SimpleNamespace(id="1"), effective_message=SimpleNamespace())

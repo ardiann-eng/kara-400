@@ -37,12 +37,55 @@ log = logging.getLogger("kara.telegram")
 WAITING_CODE = 1
 WAITING_CONFIG_VALUE = 2
 WAITING_BYBIT_KEY = 3
-WAITING_BYBIT_SECRET = 4
 WAITING_EXECUTION_ENVIRONMENT = 5
 WAITING_CAPITAL_ALLOCATION = 6
 
 BYBIT_HOME_URL = "https://www.bybit.com/"
 BYBIT_DEMO_GUIDE_URL = "https://bybit-exchange.github.io/docs/v5/demo"
+
+
+def parse_bybit_credentials(raw: str) -> Tuple[str, str]:
+    """Parse exactly `API_KEY,API_SECRET` without logging either value."""
+    parts = [part.strip() for part in str(raw or "").split(",")]
+    if len(parts) != 2 or any(len(part) < 8 for part in parts):
+        raise ValueError("credential_format")
+    return parts[0], parts[1]
+
+
+def collapse_trade_lifecycles(history):
+    """Collapse persisted close slices into honest position-level outcomes.
+
+    Partial TP rows are realized ledger events, not closed positions. A lifecycle
+    without a ``fully_closed`` row stays unresolved instead of becoming a win.
+    """
+    lifecycles = {}
+    for trade in history:
+        pos_id = str(trade.get("pos_id") or trade.get("position_id") or "")
+        lifecycle_id = pos_id.split(":slice:", 1)[0] if pos_id else pos_id
+        key = lifecycle_id or f"legacy:{len(lifecycles)}"
+        lifecycle = lifecycles.setdefault(
+            key, {"latest": trade, "pnl": 0.0, "reasons": [], "fully_closed": False}
+        )
+        lifecycle["pnl"] += float(trade.get("pnl") or trade.get("pnl_usd") or 0)
+        lifecycle["reasons"].append(
+            trade.get("reason") or trade.get("close_reason") or "manual"
+        )
+        fully_closed = trade.get("fully_closed")
+        if fully_closed is True or (
+            fully_closed is None and not trade.get("close_slice", False)
+        ):
+            lifecycle["latest"] = trade
+            lifecycle["fully_closed"] = True
+
+    closed = []
+    unresolved = []
+    for lifecycle in lifecycles.values():
+        row = dict(lifecycle["latest"])
+        row["pnl"] = lifecycle["pnl"]
+        row["pnl_usd"] = lifecycle["pnl"]
+        row["lifecycle_reasons"] = lifecycle["reasons"]
+        (closed if lifecycle["fully_closed"] else unresolved).append(row)
+    return closed, unresolved
 
 
 def bybit_preflight_failure_message(error: Exception, environment: Optional[str]) -> str:
@@ -322,8 +365,7 @@ class KaraTelegram:
                         MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_capital_allocation),
                         CallbackQueryHandler(self.handle_allocation_confirmation, pattern="^onboard_allocation_"),
                     ],
-                    WAITING_BYBIT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_key)],
-                    WAITING_BYBIT_SECRET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_secret)],
+                    WAITING_BYBIT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_credentials)],
                 },
                 fallbacks=[CommandHandler("start", self.cmd_start)],
                 per_user=True,
@@ -338,8 +380,7 @@ class KaraTelegram:
                         MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_capital_allocation),
                         CallbackQueryHandler(self.handle_allocation_confirmation, pattern="^onboard_allocation_"),
                     ],
-                    WAITING_BYBIT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_key)],
-                    WAITING_BYBIT_SECRET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_secret)],
+                    WAITING_BYBIT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_credentials)],
                 },
                 fallbacks=[CommandHandler("cancel", self.cmd_cancel), CommandHandler("demo", self.cmd_demo)],
                 per_user=True,
@@ -364,8 +405,7 @@ class KaraTelegram:
             live_conv = ConversationHandler(
                 entry_points=[CommandHandler("live", self.cmd_live)],
                 states={
-                    WAITING_BYBIT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_key)],
-                    WAITING_BYBIT_SECRET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_secret)],
+                    WAITING_BYBIT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_bybit_credentials)],
                 },
                 fallbacks=[CommandHandler("cancel", self.cmd_cancel), CommandHandler("live", self.cmd_live)],
                 per_user=True,
@@ -857,42 +897,30 @@ class KaraTelegram:
         )
         return ConversationHandler.END
 
-    async def handle_bybit_key(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    async def handle_bybit_credentials(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update): return ConversationHandler.END
-        api_key = (update.effective_message.text or "").strip()
+        raw = update.effective_message.text or ""
         try:
             await update.effective_message.delete()
         except Exception:
             pass
-        if len(api_key) < 8:
-            await update.effective_chat.send_message("API Key terlalu pendek. Kirim API Key yang benar untuk lanjut.")
+        try:
+            api_key, api_secret = parse_bybit_credentials(raw)
+        except ValueError:
+            await update.effective_chat.send_message(
+                "Format salah. Kirim dalam satu pesan: <code>API_KEY,API_SECRET</code>\n\n"
+                "Gunakan tepat satu koma. Jangan kirim password akun, OTP, recovery code, atau seed phrase.",
+                parse_mode=ParseMode.HTML,
+            )
             return WAITING_BYBIT_KEY
-        ctx.user_data["pending_bybit_key"] = api_key
-        selected_environment = ctx.user_data.get("pending_execution_environment")
-        label = selected_environment.upper() if selected_environment else (
-            "TESTNET" if config.BYBIT_TESTNET else "MAINNET"
+        return await self._preflight_bybit_credentials(
+            update, ctx, api_key, api_secret
         )
-        await update.effective_chat.send_message(
-            f"<b>Setup Bybit {label} — langkah 3/4</b>\n\n"
-            "API Key diterima dan dihapus dari chat.\n\n"
-            f"Kirim <b>API Secret Bybit {label}</b>. Pesan akan langsung dihapus.\n\n"
-            "Jangan kirim password akun, OTP, recovery code, atau seed phrase.",
-            parse_mode=ParseMode.HTML,
-        )
-        return WAITING_BYBIT_SECRET
 
-    async def handle_bybit_secret(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update): return ConversationHandler.END
-        api_secret = (update.effective_message.text or "").strip()
-        try:
-            await update.effective_message.delete()
-        except Exception:
-            pass
-        api_key = ctx.user_data.get("pending_bybit_key")
-        if not api_key or len(api_secret) < 8:
-            ctx.user_data.pop("pending_bybit_key", None)
-            await update.effective_chat.send_message("Credential tidak lengkap. Kirim API Key untuk mencoba lagi.")
-            return WAITING_BYBIT_KEY
+    async def _preflight_bybit_credentials(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+        api_key: str, api_secret: str,
+    ):
         from data.bybit_client import BybitClient
         from core.startup_validation import validate_bybit_preflight
         selected_environment = ctx.user_data.get("pending_execution_environment")
@@ -934,6 +962,7 @@ class KaraTelegram:
                 venue_equity = (await client.get_account()).total_equity
         except Exception as e:
             ctx.user_data.pop("pending_bybit_key", None)
+            ctx.user_data.pop("pending_bybit_secret", None)
             await update.effective_chat.send_message(
                 bybit_preflight_failure_message(e, selected_environment),
                 parse_mode=ParseMode.HTML,
@@ -942,6 +971,7 @@ class KaraTelegram:
         finally:
             await client.close()
         ctx.user_data["pending_bybit_secret"] = api_secret
+        ctx.user_data["pending_bybit_key"] = api_key
         ctx.user_data["pending_bybit_testnet"] = config.BYBIT_TESTNET
         ctx.user_data["pending_bybit_venue_equity"] = venue_equity
         environment = selected_environment.upper() if selected_environment else (
@@ -1350,13 +1380,16 @@ class KaraTelegram:
         try:
             # Ambil semua trade tanpa limit untuk statistik akurat
             from core.db import user_db
-            history = user_db.get_trade_history(chat_id, limit=9999)
+            history_rows = user_db.get_trade_history(chat_id, limit=9999)
 
             # [NEW] Sertakan posisi aktif juga di ringkasan jika ada
             open_positions = session.executor.open_positions if session else []
 
             # Hanya hitung trade "close" (bukan "open") untuk history
-            history = [t for t in history if t.get("type") == "close" or "pnl" in t]
+            history_rows = [
+                t for t in history_rows if t.get("type") == "close" or "pnl" in t
+            ]
+            history, unresolved_lifecycles = collapse_trade_lifecycles(history_rows)
 
             def get_pnl(t): return float(t.get("pnl") or t.get("pnl_usd") or 0)
             def get_reason(t): return t.get("reason") or t.get("close_reason") or "manual"
@@ -1386,7 +1419,7 @@ class KaraTelegram:
             win_rate  = (wins / trades * 100) if trades > 0 else 0
             total_pnl = sum(get_pnl(t) for t in history)
 
-            if trades == 0 and not open_positions:
+            if trades == 0 and not open_positions and not unresolved_lifecycles:
                 text = (
                     "📔 <b>Trade Journal</b>\n\n"
                     "Belum ada trade yang tercatat.\n\n"
@@ -1394,6 +1427,13 @@ class KaraTelegram:
                 )
             else:
                 text = f"📔 <b>Trade Journal</b>  <code>({trades} closed, {len(open_positions)} active)</code>\n\n"
+                if unresolved_lifecycles:
+                    unresolved_pnl = sum(get_pnl(t) for t in unresolved_lifecycles)
+                    text += (
+                        f"⚠️ <b>{len(unresolved_lifecycles)} lifecycle belum punya final close</b> "
+                        f"(slice tercatat {pnl_str(unresolved_pnl)}). "
+                        "Tidak dihitung sebagai posisi closed.\n\n"
+                    )
                 
                 # Tambahkan info posisi aktif jika ada
                 if open_positions:
@@ -2128,7 +2168,7 @@ class KaraTelegram:
         ctx.user_data.pop("pending_bybit_key", None)
         ctx.user_data.pop("pending_bybit_secret", None)
         await update.effective_message.reply_html(
-            f"<b>Setup Bybit {'Testnet' if config.BYBIT_TESTNET else 'Mainnet'} — langkah 1/2</b>\n\n"
+            f"<b>Setup Bybit {'Testnet' if config.BYBIT_TESTNET else 'Mainnet'}</b>\n\n"
             + (
                 "Dana virtual Testnet. Tidak memakai dana nyata.\n\n"
                 if config.BYBIT_TESTNET else
@@ -2136,8 +2176,9 @@ class KaraTelegram:
                 "kerugian aktual saat gap, fee, atau slippage.\n\n"
             )
             + "API Key wajib memiliki Account Read dan Contract Trade. Withdrawal harus nonaktif.\n\n"
-            + f"Kirim <b>API Key Bybit {'Testnet' if config.BYBIT_TESTNET else 'Mainnet'}</b>. "
-            "Pesan akan langsung dihapus."
+            + "Kirim API Key dan API Secret dalam satu pesan:\n"
+            + "<code>API_KEY,API_SECRET</code>\n\n"
+            + "Gunakan tepat satu koma. Pesan akan langsung dihapus."
         )
         return WAITING_BYBIT_KEY
 
@@ -2360,13 +2401,6 @@ class KaraTelegram:
         asset = pos.asset
         score = getattr(signal, "score", getattr(pos, "entry_score", 0)) or 0
         rr = getattr(signal, "risk_reward_ratio", 0) or 0
-        session = None
-        if self.bot_app and target_chat_id:
-            try:
-                session = await self.bot_app.get_session(target_chat_id)
-            except Exception:
-                log.warning("Bybit chart session unavailable for opened position %s", asset)
-        chart_url = self._bybit_chart_url(asset, getattr(session, "executor", None))
 
         text = (
             f"🌸 <b>KARA SYSTEM: Position Executed</b>\n"
@@ -2384,12 +2418,7 @@ class KaraTelegram:
             f"  • 📊 Score: <b>{score}/100</b>\n\n"
             f"<i>Eksekusi selesai. Memantau market untuk exit terbaik. ✨</i>"
         )
-        keyboard = (
-            InlineKeyboardMarkup([[
-                InlineKeyboardButton(self._bybit_chart_label(user), url=chart_url)
-            ]]) if chart_url else None
-        )
-        await self.send_text(text, target_chat_id=target_chat_id, reply_markup=keyboard)
+        await self.send_text(text, target_chat_id=target_chat_id, reply_markup=None)
 
     async def send_position_event(self, action: dict, prices: dict, target_chat_id: str = None):
         """
@@ -3038,12 +3067,13 @@ class KaraTelegram:
                 "4. Buat key dengan izin: Account Read dan Contract Trade.\n"
                 "5. Withdrawal harus nonaktif.\n"
                 "6. Jangan pakai API Key Testnet atau Mainnet.\n\n"
-                "Kirim API Key Demo. Pesan akan langsung dihapus."
+                "Kirim dalam satu pesan: <code>API_KEY,API_SECRET</code>. "
+                "Gunakan tepat satu koma. Pesan akan langsung dihapus."
                 if environment == "demo" else
                 "<b>Setup Bybit Mainnet — langkah 2/2</b>\n\n"
                 "Dana nyata. Buat API Key Mainnet dengan Account Read dan Contract Trade. "
-                "Withdrawal harus nonaktif. Kirim API Key hanya bila server Mainnet sudah diizinkan. "
-                "Pesan akan langsung dihapus."
+                "Withdrawal harus nonaktif. Jika server Mainnet sudah diizinkan, kirim "
+                "<code>API_KEY,API_SECRET</code> dalam satu pesan. Pesan langsung dihapus."
             )
             links = [[InlineKeyboardButton("Buka Bybit", url=BYBIT_HOME_URL)]]
             if environment == "demo":

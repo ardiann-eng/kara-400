@@ -104,6 +104,20 @@
 - `2026-07-26_BYBIT_LIVE_PROTECTION_AND_OBSERVABILITY_FIXES.md`
    - Audit live Railway: drift deploy vs working tree, validator SL yang menolak stop break-even/trailing, guard break-even TP1, logging alert dan disconnect WS. TP native belum diperbaiki dan menunggu Demo drill.
 
+## 2026-07-30
+
+- `2026-07-30_BYBIT_TP_RECONCILIATION_AND_JOURNAL_AUDIT.md`
+  - Audit read-only 204 journal rows / 188 lifecycle, stale closed-position match pada rekonsiliasi native TP, dan agregasi journal per posisi.
+
+- `2026-07-30_NOTIFICATION_POLICY_AND_PAPER_BYBIT_COMPARISON.md`
+  - Hapus chart pada pesan posisi dibuka, sinyal hanya setelah posisi berhasil dibuka, serta perbandingan jujur Paper lama dengan Bybit Demo.
+
+- `2026-07-30_PER_TRADE_EXECUTION_AUDIT_FIELDS.md`
+  - Sambungkan RSI/OB sinyal ke setiap trade lewat `signal_id`, tambah spread/fill/fee/trigger/MFE/MAE per posisi, dan alat audit read-only.
+
+- `2026-07-30_SINGLE_MESSAGE_BYBIT_CREDENTIAL_INPUT.md`
+  - Input API Key dan API Secret Bybit dalam satu pesan `API_KEY,API_SECRET`, tetap dihapus langsung dan disimpan hanya setelah preflight serta konfirmasi.
+
 ## Reading Order
 
 - Baca note scalper exit dan fallback untuk perubahan entry serta time exit.

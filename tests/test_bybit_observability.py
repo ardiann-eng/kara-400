@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -169,6 +170,18 @@ async def test_warning_alert_logs_at_warning_level(caplog):
         )
 
     assert caplog.records[0].levelno == logging.WARNING
+
+
+def test_position_monitor_does_not_send_routine_ws_disconnect_alert():
+    source = (Path(__file__).parents[1] / "main.py").read_text(encoding="utf-8")
+    start = source.index("async def _update_positions")
+    end = source.index("async def _scalper_exit_market_state", start)
+    monitor = source[start:end]
+
+    assert '"ws_stale"' not in monitor
+    assert "private WebSocket stale/disconnected" not in monitor
+    assert "await session.executor.reconcile_if_due()" in monitor
+    assert '"reconciliation_failed"' in monitor
 
 
 async def _collect(bucket, message):

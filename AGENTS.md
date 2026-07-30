@@ -141,6 +141,34 @@ Never mark task complete before verification.
 
 ## Communication Contract
 
+### Bahasa Sederhana untuk Operator
+
+- Jelaskan status, risiko, dan langkah berikutnya dengan bahasa Indonesia sehari-hari.
+- Anggap operator tidak memahami istilah software, database, statistik, atau trading internal kecuali ia meminta detail teknis.
+- Mulai dengan jawaban langsung tentang bot: `bot rugi karena...`, `fitur bekerja/tidak bekerja`, `sudah/belum diperbaiki`, dan `sudah/belum dipasang ke server`.
+- Jangan mulai jawaban dengan istilah teknis tanpa arti praktisnya.
+- Jika istilah teknis perlu dipakai, beri arti singkat dalam kurung pada penyebutan pertama.
+  Contoh: `preflight` (cek akun dan izin sebelum trading), `deployment` (memasang perubahan ke server), `lifecycle` (proses dari order buka sampai posisi tertutup).
+- Hindari kata berikut dalam bagian utama: `lifecycle`, `reconcile`, `telemetry`, `cohort`, `attribution`, `counterfactual`, `persistence`, `execution path`, `slice`, `venue`, dan nama fungsi/class. Ganti dengan bahasa biasa. Contoh:
+  - `lifecycle` → `satu posisi dari buka sampai tutup`;
+  - `reconcile` → `mencocokkan catatan bot dengan posisi di Bybit`;
+  - `slice` → `sebagian posisi yang dijual`;
+  - `attribution gagal` → `bot tidak tahu penjualan itu milik TP yang mana`;
+  - `telemetry kurang` → `data yang direkam belum cukup`.
+- Maksimal tiga gagasan utama sebelum bagian `Detail teknis`. Setiap gagasan wajib menjawab `apa yang terjadi`, `dampaknya`, dan `status perbaikannya`.
+- Gunakan contoh angka konkret dalam rupiah atau jumlah posisi. Hindari tabel dan rasio statistik bila satu kalimat biasa cukup.
+- Jika user berkata tidak paham, jelaskan ulang dari nol dengan analogi singkat. Jangan mengulang istilah teknis yang sama.
+- Utamakan format: **status sekarang → arti praktis → apa yang perlu dilakukan berikutnya**.
+- Bedakan dengan jelas:
+  - `siap diprogram` = code ada dan test lokal lulus;
+  - `siap dicoba` = sudah terpasang dan cek akun berhasil;
+  - `siap trading nyata` = bukti penggunaan nyata dan kontrol risiko sudah lulus.
+- Jangan gunakan daftar panjang istilah internal, nama class, nama file, atau command kecuali operator meminta detail teknis.
+- Untuk jawaban keputusan, beri kesimpulan satu kalimat di awal. Contoh: `Belum bisa trading Mainnet. Bot belum diuji dengan akun Mainnet nyata.`
+- Saat risiko tinggi, gunakan bahasa jelas: `jangan jalankan`, `masih berbahaya`, atau `butuh izin Anda`, lalu jelaskan alasannya dengan kalimat pendek.
+- Tetap laporkan bukti, confidence, residual risk, file changed, test, dan deployment status untuk perubahan substantif; ringkas bagian teknis di bawah judul `Detail teknis`.
+- Taruh confidence, file, command, test rinci, dan istilah internal di `Detail teknis`; jangan biarkan bagian itu mengaburkan jawaban utama operator.
+
 During work:
 
 - Give short progress updates only when discovery, trade-off, blocker, or major edit occurs.

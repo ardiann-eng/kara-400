@@ -309,6 +309,7 @@ class Position(BaseModel):
     tp2:              float
     trailing_active:  bool = False
     trailing_high:    float = 0.0    # highest price reached (for long trailing)
+    adverse_price:    float = 0.0    # worst observed price since entry
     early_profit_lock: bool = False  # legacy persisted field; pre-TP1 lock is disabled
     liquidation_price: Optional[float] = None  # estimated or actual liquidation price
 
@@ -337,6 +338,24 @@ class Position(BaseModel):
     entry_fee_paid: float = 0.0
     exit_fee_paid: float = 0.0
     close_slices: int = 0
+    # Exact entry evidence. RSI/orderbook research features remain owned by the
+    # joined TradeSignal; these fields record only venue execution facts.
+    signal_price: Optional[float] = None
+    initial_stop_loss: Optional[float] = None
+    initial_tp1: Optional[float] = None
+    initial_tp2: Optional[float] = None
+    entry_mark_price: Optional[float] = None
+    entry_best_bid: Optional[float] = None
+    entry_best_ask: Optional[float] = None
+    entry_spread_pct: Optional[float] = None
+    entry_estimated_fill_price: Optional[float] = None
+    entry_estimated_slippage_pct: Optional[float] = None
+    entry_actual_slippage_pct: Optional[float] = None
+    entry_fill_latency_ms: Optional[float] = None
+    entry_signal_age_ms: Optional[float] = None
+    entry_quote_at: Optional[datetime] = None
+    deployment_version: Optional[str] = None
+    deployment_commit: Optional[str] = None
     # Bybit partial TP orders are exchange-native. State prevents local polling
     # from submitting a duplicate reduce-only close while targets are armed.
     native_tp_state: str = "none"  # none | armed | reconciliation_required
@@ -363,6 +382,13 @@ class Position(BaseModel):
             return (current_price - self.entry_price) / self.entry_price
         else:
             return (self.entry_price - current_price) / self.entry_price
+
+    def mae_pct(self) -> Optional[float]:
+        if self.adverse_price <= 0 or self.entry_price <= 0:
+            return None
+        if self.side == Side.LONG:
+            return max(0.0, (self.entry_price - self.adverse_price) / self.entry_price)
+        return max(0.0, (self.adverse_price - self.entry_price) / self.entry_price)
 
 
 # ──────────────────────────────────────────────

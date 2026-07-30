@@ -1268,17 +1268,11 @@ class KaraBot:
                 # If approved, proceed to auto-execution
                 user_signal.auto_executed = True
                 user_db.save_signal(user_signal) # v17 Sync
-                await self.telegram.send_signal(user_signal, is_auto=True, target_chat_id=chat_id)
 
-                _t0 = time.monotonic()
-                pos = await session.executor.open_position(user_signal)
-                _latency_ms = (time.monotonic() - _t0) * 1000
-                log.info(
-                    f"[EXEC] {user_signal.asset} {user_signal.side.value.upper()} "
-                    f"score={user_signal.score} latency={_latency_ms:.0f}ms"
+                from execution.auto_entry import open_and_notify_auto_position
+                await open_and_notify_auto_position(
+                    session.executor, self.telegram, user_signal, chat_id
                 )
-                if pos:
-                    await self.telegram.send_position_opened(pos, user_signal, target_chat_id=chat_id)
             else:
                 # AUTO-ONLY policy: no manual signal dispatch.
                 continue
@@ -1384,11 +1378,6 @@ class KaraBot:
             )
             if isinstance(session.executor, BybitExecutor):
                 try:
-                    if getattr(session, "bybit_ws", None) and session.bybit_ws.stale:
-                        await session.bybit_alerts.emit(
-                            "ws_stale",
-                            "WARNING BYBIT: private WebSocket stale/disconnected; REST fallback tetap aktif.",
-                        )
                     await session.executor.reconcile_if_due()
                 except Exception as e:
                     log.error(f"[BYBIT] Reconciliation failed for {chat_id}: {e}")

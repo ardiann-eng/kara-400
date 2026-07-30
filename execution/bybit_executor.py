@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Dict, List, Optional
 
@@ -263,6 +264,7 @@ class BybitExecutor(BaseExecutor):
 
     async def open_position(self, signal: TradeSignal) -> Optional[Position]:
         entry_started_at = time.monotonic()
+        quote = None
         if self.circuit_open:
             raise BybitExecutionError("Bybit entry circuit breaker is open")
         spec = self.registry.resolve(signal.asset)
@@ -373,6 +375,7 @@ class BybitExecutor(BaseExecutor):
                 await self.client.set_leverage(spec.symbol, leverage)
 
                 client_order_id = gen_id("KARA-ENTRY")
+                fill_started_at = time.monotonic()
                 fill = await self._place_and_confirm(
                     symbol=spec.symbol,
                     side=signal.side,
@@ -521,6 +524,7 @@ class BybitExecutor(BaseExecutor):
                     tp1=tp1,
                     tp2=tp2,
                     trailing_high=fill.average_fill_price,
+                    adverse_price=fill.average_fill_price,
                     signal_id=signal.signal_id,
                     meta_pattern_key=signal.meta_pattern_key,
                     meta_score_delta=signal.meta_score_delta,
@@ -536,6 +540,36 @@ class BybitExecutor(BaseExecutor):
                         getattr(self.user, "bybit_environment", None), "value", "legacy_testnet"
                     ),
                     entry_fee_paid=fill.fee_paid,
+                    signal_price=signal.entry_price,
+                    initial_stop_loss=stop_loss,
+                    initial_tp1=tp1,
+                    initial_tp2=tp2,
+                    entry_mark_price=(quote.mark_price if quote else bybit_price),
+                    entry_best_bid=(quote.best_bid if quote else None),
+                    entry_best_ask=(quote.best_ask if quote else None),
+                    entry_spread_pct=(quote.spread_pct if quote else None),
+                    entry_estimated_fill_price=(
+                        quote.estimated_fill_price if quote else None
+                    ),
+                    entry_estimated_slippage_pct=(
+                        quote.estimated_slippage_pct if quote else None
+                    ),
+                    entry_actual_slippage_pct=abs(
+                        fill.average_fill_price - (quote.mark_price if quote else bybit_price)
+                    ) / max((quote.mark_price if quote else bybit_price), 1e-12),
+                    entry_fill_latency_ms=max(
+                        0.0, (time.monotonic() - fill_started_at) * 1000
+                    ),
+                    entry_signal_age_ms=max(
+                        0.0, (utcnow() - signal.timestamp).total_seconds() * 1000
+                    ),
+                    entry_quote_at=(quote.received_at if quote else None),
+                    deployment_version=getattr(config, "KARA_VERSION", None),
+                    deployment_commit=(
+                        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+                        or os.getenv("GIT_COMMIT_SHA")
+                        or None
+                    ),
                     native_tp_state=native_tp_state,
                     native_tp1_qty=tp1_quantity,
                     native_tp2_qty=tp2_quantity,
@@ -630,6 +664,7 @@ class BybitExecutor(BaseExecutor):
         current_price: float,
         reason: str = "manual",
         close_ratio: float = 1.0,
+        audit_context: Optional[Dict] = None,
     ) -> Optional[Dict]:
         close_started_at = time.monotonic()
         position = self._positions.get(position_id)
@@ -685,6 +720,16 @@ class BybitExecutor(BaseExecutor):
             if fill.filled_qty <= 0:
                 self._live_status[position_id] = LivePositionStatus.OPEN_PROTECTED
                 return None
+            exit_quote = None
+            if hasattr(self.client, "get_execution_quote"):
+                try:
+                    # Fill first. Audit collection must never delay a reduce-only
+                    # exit. This quote is explicitly timestamped after the fill.
+                    exit_quote = await self.client.get_execution_quote(
+                        symbol, close_side, fill.filled_qty
+                    )
+                except Exception:
+                    log.warning("Bybit post-fill exit quote unavailable for %s", symbol)
             if self.telemetry:
                 self.telemetry.close_latency_ms = max(
                     0.0, (time.monotonic() - close_started_at) * 1000
@@ -718,7 +763,12 @@ class BybitExecutor(BaseExecutor):
             else:
                 self._live_status[position_id] = LivePositionStatus.OPEN_PROTECTED
             self._persist_close_slice(
-                position, fill, reason, balance, pnl, entry_fee_slice, fully_closed
+                position, fill, reason, balance, pnl, entry_fee_slice, fully_closed,
+                exit_audit={
+                    **(audit_context or {}),
+                    "observed_price": current_price,
+                    "quote": exit_quote,
+                },
             )
             if fully_closed and self.persistence:
                 self.persistence.remove_bybit_position(position_id)
@@ -744,6 +794,7 @@ class BybitExecutor(BaseExecutor):
     def _persist_close_slice(
         self, position, fill, reason: str, venue_equity: float, pnl_slice: float,
         entry_fee_slice: float, fully_closed: bool,
+        exit_audit: Optional[Dict] = None,
     ) -> None:
         """Persist each actual close slice; final row retains cumulative lifecycle PnL."""
         if not self.persistence or not hasattr(self.persistence, "save_trade"):
@@ -756,6 +807,12 @@ class BybitExecutor(BaseExecutor):
         trade_id = (
             position.position_id
             if fully_closed else f"{position.position_id}:slice:{position.close_slices}"
+        )
+        exit_audit = exit_audit or {}
+        exit_quote = exit_audit.get("quote")
+        duration_sec = (
+            (position.closed_at - position.opened_at).total_seconds()
+            if position.closed_at else None
         )
         self.persistence.save_trade(self.chat_id, {
             "pos_id": trade_id,
@@ -777,11 +834,17 @@ class BybitExecutor(BaseExecutor):
             "capital_allocation_usd": allocation_usd,
             "sizing_equity": sizing_equity,
             "actual_fill_price": fill.average_fill_price,
+            "qty_closed": fill.filled_qty,
             "fee": slice_fee,
+            "entry_fee_allocated": entry_fee_slice,
+            "exit_fee_paid": fill.fee_paid,
             "fee_total": position.entry_fee_paid + position.exit_fee_paid,
             "close_slice": not fully_closed,
             "fully_closed": fully_closed,
-            "planned_stop_loss": position.stop_loss,
+            "planned_stop_loss": position.initial_stop_loss or position.stop_loss,
+            "planned_tp1": position.initial_tp1 or position.tp1,
+            "planned_tp2": position.initial_tp2 or position.tp2,
+            "protection_stop_at_exit": position.stop_loss,
             "quantity": position.size_initial,
             "leverage": position.leverage,
             "strategy_profile": position.strategy_source,
@@ -793,6 +856,46 @@ class BybitExecutor(BaseExecutor):
             "meta_pattern_key": position.meta_pattern_key,
             "meta_score_delta": position.meta_score_delta,
             "entry_score": position.entry_score,
+            "signal_price": position.signal_price,
+            "entry_mark_price": position.entry_mark_price,
+            "entry_best_bid": position.entry_best_bid,
+            "entry_best_ask": position.entry_best_ask,
+            "entry_spread_pct": position.entry_spread_pct,
+            "entry_estimated_fill_price": position.entry_estimated_fill_price,
+            "entry_estimated_slippage_pct": position.entry_estimated_slippage_pct,
+            "entry_actual_slippage_pct": position.entry_actual_slippage_pct,
+            "entry_fill_latency_ms": position.entry_fill_latency_ms,
+            "entry_signal_age_ms": position.entry_signal_age_ms,
+            "entry_quote_at": (
+                position.entry_quote_at.isoformat() if position.entry_quote_at else None
+            ),
+            "trigger_price": exit_audit.get("trigger_price"),
+            "observed_exit_price": exit_audit.get("observed_price"),
+            "time_exit_trigger": exit_audit.get("time_exit_trigger"),
+            "exit_mark_price": exit_quote.mark_price if exit_quote else None,
+            "exit_best_bid": exit_quote.best_bid if exit_quote else None,
+            "exit_best_ask": exit_quote.best_ask if exit_quote else None,
+            "exit_spread_pct": exit_quote.spread_pct if exit_quote else None,
+            "exit_estimated_fill_price": (
+                exit_quote.estimated_fill_price if exit_quote else None
+            ),
+            "exit_estimated_slippage_pct": (
+                exit_quote.estimated_slippage_pct if exit_quote else None
+            ),
+            "exit_fill_vs_post_quote_pct": (
+                abs(fill.average_fill_price - exit_quote.estimated_fill_price)
+                / max(exit_quote.estimated_fill_price, 1e-12)
+                if exit_quote else None
+            ),
+            "exit_quote_at": (
+                exit_quote.received_at.isoformat() if exit_quote else None
+            ),
+            "exit_quote_timing": "post_fill" if exit_quote else None,
+            "duration_sec": duration_sec,
+            "mfe_pct": max(0.0, position.floating_pct(position.trailing_high)),
+            "mae_pct": position.mae_pct(),
+            "deployment_version": position.deployment_version,
+            "deployment_commit": position.deployment_commit,
             "opened_at": position.opened_at.isoformat(),
             "closed_at": position.closed_at.isoformat() if position.closed_at else None,
         })
@@ -839,6 +942,16 @@ class BybitExecutor(BaseExecutor):
                 current,
                 reason=action["action"],
                 close_ratio=action.get("close_ratio", 1.0),
+                audit_context={
+                    "trigger_price": (
+                        action.get("trigger_price")
+                        or (position.tp1 if action["action"] == "tp1" else None)
+                        or (position.tp2 if action["action"] == "tp2" else None)
+                        or action.get("trail_price")
+                        or action.get("price")
+                    ),
+                    "time_exit_trigger": action.get("time_exit_trigger"),
+                },
             )
             if result:
                 result["trigger_price"] = action.get("trigger_price")
@@ -965,6 +1078,7 @@ class BybitExecutor(BaseExecutor):
                     for position_id, symbol in self._position_symbols.items()
                     if symbol == venue.symbol
                     and self._positions[position_id].side == venue.side
+                    and self._positions[position_id].status == PositionStatus.OPEN
                 ),
                 None,
             )
@@ -1229,6 +1343,7 @@ class BybitExecutor(BaseExecutor):
             balance = (await self.client.get_account()).total_equity
         except Exception:
             balance = 0.0
+        position.closed_at = utcnow()
         self._persist_close_slice(
             position, fill, "venue_stop_or_external_close", balance, realized, 0.0, True
         )
@@ -1292,7 +1407,11 @@ class BybitExecutor(BaseExecutor):
         else:
             position.tp2_hit = True
         self._persist_close_slice(
-            position, order, name, venue_equity, pnl, entry_fee_slice, False
+            position, order, name, venue_equity, pnl, entry_fee_slice, False,
+            exit_audit={
+                "trigger_price": position.tp1 if name == "tp1" else position.tp2,
+                "observed_price": order.average_fill_price,
+            },
         )
         return {
             "action": name,

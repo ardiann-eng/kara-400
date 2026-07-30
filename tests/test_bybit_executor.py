@@ -167,6 +167,15 @@ async def test_open_arms_two_native_partial_targets_after_full_hard_stop():
     assert position.native_tp2_qty == 0.037
     assert position.native_tp1_order_id == "tp-1"
     assert position.native_tp2_order_id == "tp-2"
+    assert position.signal_price == 100
+    assert position.entry_mark_price == pytest.approx(100.1)
+    assert position.entry_best_bid is None
+    assert position.entry_spread_pct is None
+    assert position.entry_actual_slippage_pct == pytest.approx(
+        abs(position.entry_price - 100.1) / 100.1
+    )
+    assert position.entry_fill_latency_ms is not None
+    assert position.deployment_version
 
 
 @pytest.mark.asyncio
@@ -328,7 +337,17 @@ async def test_protection_failure_emergency_closes_reduce_only():
 @pytest.mark.asyncio
 async def test_close_uses_exchange_size_fill_price_and_fee():
     client = FakeClient()
-    executor = make_executor(client)
+    async def quote_after_fill(symbol, side, quantity):
+        assert any(order.get("reduce_only") for order in client.orders)
+        return ExecutionQuote(
+            symbol=symbol, mark_price=101, best_bid=100.9, best_ask=101.1,
+            spread_pct=0.002, estimated_fill_price=100.9,
+            estimated_slippage_pct=0.001, available_quantity=10,
+            received_at=datetime.now(timezone.utc),
+        )
+    client.get_execution_quote = quote_after_fill
+    persistence = FakePersistence()
+    executor = make_executor(client, persistence=persistence)
     position = await executor.open_position(make_signal())
     client.positions = [
         VenuePosition("BTCUSDT", Side.LONG, 0.1, 100.2, 10, stop_loss=99.2)
@@ -340,6 +359,13 @@ async def test_close_uses_exchange_size_fill_price_and_fee():
     assert result["exit_price"] == 101.0
     assert result["pnl"] == pytest.approx((101 - 100.2) * 0.1 - 0.02)
     assert client.orders[-1]["reduce_only"] is True
+    trade = persistence.trades[-1][1]
+    assert trade["qty_closed"] == pytest.approx(0.1)
+    assert trade["observed_exit_price"] == 101
+    assert trade["exit_fee_paid"] == pytest.approx(0.01)
+    assert "entry_spread_pct" in trade
+    assert trade["exit_spread_pct"] == pytest.approx(0.002)
+    assert trade["exit_quote_timing"] == "post_fill"
 
 
 @pytest.mark.asyncio
@@ -796,6 +822,44 @@ async def test_market_guard_transport_error_fails_closed_before_order():
 
 
 @pytest.mark.asyncio
+async def test_successful_entry_persists_exact_quote_and_fill_audit_fields():
+    client = FakeClient()
+
+    async def execution_quote(symbol, side, quantity):
+        return ExecutionQuote(
+            symbol=symbol, mark_price=100.1, best_bid=100.0, best_ask=100.2,
+            spread_pct=0.001998, estimated_fill_price=100.2,
+            estimated_slippage_pct=0.000999, available_quantity=quantity * 10,
+            received_at=datetime.now(timezone.utc),
+        )
+
+    client.get_execution_quote = execution_quote
+    executor = make_executor(client)
+    executor.live_risk_gate = BybitLiveRiskGate(LiveRiskLimits(
+        max_leverage=20, max_positions=3, max_risk_per_trade_pct=0.1,
+        max_total_open_risk_pct=0.3, max_symbol_notional_pct=10,
+        max_total_notional_pct=30, max_signal_age_s=30, max_quote_age_s=5,
+        max_spread_pct=0.01, max_slippage_pct=0.01, min_depth_ratio=1,
+    ))
+
+    position = await executor.open_position(make_signal())
+
+    assert position.entry_mark_price == pytest.approx(100.1)
+    assert position.entry_best_bid == pytest.approx(100.0)
+    assert position.entry_best_ask == pytest.approx(100.2)
+    assert position.entry_spread_pct == pytest.approx(0.001998)
+    assert position.entry_estimated_fill_price == pytest.approx(100.2)
+    assert position.entry_estimated_slippage_pct == pytest.approx(0.000999)
+    assert position.entry_actual_slippage_pct == pytest.approx(
+        abs(position.entry_price - 100.1) / 100.1
+    )
+    assert position.entry_signal_age_ms is not None
+    assert position.initial_stop_loss == position.stop_loss
+    assert position.initial_tp1 == position.tp1
+    assert position.initial_tp2 == position.tp2
+
+
+@pytest.mark.asyncio
 async def test_missing_sl_on_breakeven_position_is_reinstalled_not_emergency_closed():
     """Regression: LDOUSDT lost its hard SL after TP1 and was emergency-closed.
 
@@ -976,6 +1040,32 @@ async def test_native_target_cancelled_without_fill_books_nothing():
     assert position.native_tp1_order_id == ""
     # Size fell without an attributable target fill, so KARA must not proceed blind.
     assert position.native_tp_state == "reconciliation_required"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_reused_symbol_targets_current_open_position_not_stale_closed_one():
+    """A closed lifecycle remains in memory. Reusing its symbol must reconcile
+    exchange size and native target fills against the current open lifecycle."""
+    client = FakeClient()
+    executor = make_executor(client)
+    stale = await executor.open_position(make_signal())
+    stale.status = PositionStatus.CLOSED
+    stale.size_current = 0
+
+    current = await executor.open_position(make_signal())
+    client.fill_target(current.native_tp1_order_id, price=101.2, quantity=0.025)
+    client.positions = [
+        VenuePosition(
+            "BTCUSDT", Side.LONG, 0.075, current.entry_price, 10, stop_loss=99.2
+        )
+    ]
+
+    await executor.reconcile()
+
+    assert stale.tp1_hit is False
+    assert stale.size_current == 0
+    assert current.tp1_hit is True
+    assert current.size_current == 0.075
 
 
 @pytest.mark.asyncio

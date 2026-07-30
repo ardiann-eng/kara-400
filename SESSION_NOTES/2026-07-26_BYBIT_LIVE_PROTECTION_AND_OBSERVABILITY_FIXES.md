@@ -399,3 +399,18 @@ venue stop until closed manually.
 
 - Supersedes the S4 diagnosis in `2026-07-19_DEMO_PRIVATE_WS_IDLE_STALE_FIX.md`: that fix is
   deployed and working; a current stale alert now means a real disconnect.
+
+## 2026-07-30 Follow-up: Routine WS Telegram Alert Disabled
+
+- Railway logs proved routine Demo private WebSocket disconnects repeat roughly every
+  11-12 minutes, predominantly `stream_ended`; one event recorded
+  `No PONG received after 10.0 seconds`.
+- REST fallback and automatic reconnect remain active. A short WS disconnect alone
+  does not mean positions are unmonitored.
+- Operator requested removal of notification spam. `_update_positions()` no longer
+  emits the routine Telegram `ws_stale` warning.
+- Internal disconnect logs, reconnect behavior, `/status` health, REST reconciliation,
+  and critical `reconciliation_failed` alerts remain unchanged.
+- Focused observability/private-WS/executor suite: `68 passed`.
+- `py_compile` and `git diff --check` passed.
+- Not deployed or restarted.

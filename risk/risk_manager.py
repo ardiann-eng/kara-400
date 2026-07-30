@@ -712,12 +712,16 @@ class RiskManager:
         # Without this, bounce after peak loses MFE and early-SHORT trail is blind.
         if position.trailing_high <= 0:
             position.trailing_high = position.entry_price
+        if position.adverse_price <= 0:
+            position.adverse_price = position.entry_price
         if position.side == Side.LONG:
             position.trailing_high = max(position.trailing_high, current_price)
+            position.adverse_price = min(position.adverse_price, current_price)
             new_high = position.trailing_high
             max_floating = (new_high - position.entry_price) / position.entry_price
         else:
             position.trailing_high = min(position.trailing_high, current_price)
+            position.adverse_price = max(position.adverse_price, current_price)
             new_low = position.trailing_high
             max_floating = (position.entry_price - new_low) / position.entry_price
 

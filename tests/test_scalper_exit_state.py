@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from models.schemas import Position, PositionStatus, Side
 from risk.risk_manager import RiskManager
 
@@ -88,6 +90,17 @@ def test_scalper_pre_tp1_impulse_does_not_move_stop():
     assert pos.early_profit_lock is False
     assert pos.stop_loss == original_stop
     assert pos.tp1_hit is False
+
+
+def test_position_tracks_worst_observed_price_for_mae_audit():
+    risk = RiskManager()
+    pos = make_scalper_position(5)
+
+    risk.check_tp_trail(pos, 99.7)
+    risk.check_tp_trail(pos, 100.2)
+
+    assert pos.adverse_price == 99.7
+    assert pos.mae_pct() == pytest.approx(0.003)
 
 
 def test_scalper_tp1_takes_partial_without_pre_tp1_lock():
