@@ -109,11 +109,21 @@ def bybit_preflight_failure_message(error: Exception, environment: Optional[str]
             "serta Contract Trade. Withdrawal harus nonaktif.\n\n"
             "Kirim API Key untuk mencoba lagi. KARA belum aktif dan tidak ada order dibuat."
         )
+    if "Demo wallet readback does not match requested capital" in detail:
+        return (
+            f"<b>Setup Bybit {label} berhenti: saldo Demo belum diperbarui.</b>\n\n"
+            "Bybit menerima perubahan saldo virtual, tetapi saldo yang terbaca belum sama "
+            "dengan modal pilihan Anda setelah menunggu beberapa detik. Credential bukan "
+            "penyebab yang terbukti.\n\n"
+            "Credential tidak disimpan dan tidak ada order dibuat. Tunggu minimal satu menit "
+            "sebelum mencoba lagi karena Bybit membatasi perubahan saldo Demo satu kali per menit.\n\n"
+            "Untuk mencoba lagi, kirim satu pesan: <code>API_KEY,API_SECRET</code>"
+        )
     return (
         f"<b>Setup Bybit {label} berhenti saat preflight.</b>\n\n"
         "Credential tidak disimpan dan tidak ada order dibuat. "
         f"Detail aman: <code>{html.escape(detail)}</code>\n\n"
-        "Kirim API Key untuk mencoba lagi."
+        "Untuk mencoba lagi, kirim satu pesan: <code>API_KEY,API_SECRET</code>"
     )
 
 DAILY_REPORT_TEMPLATE = """

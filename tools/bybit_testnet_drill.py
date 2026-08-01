@@ -135,7 +135,7 @@ def read_drill_credentials(
     environ=os.environ,
     prompt: Callable[[str], str] = getpass.getpass,
 ) -> tuple[str, str]:
-    """Read environment-specific credentials or fall back to hidden prompts."""
+    """Read environment-specific credentials or one hidden comma-separated prompt."""
     prefix = f"BYBIT_{environment.upper()}"
     key = str(environ.get(f"{prefix}_API_KEY", "")).strip()
     secret = str(environ.get(f"{prefix}_API_SECRET", "")).strip()
@@ -145,10 +145,17 @@ def read_drill_credentials(
         )
     if key:
         return key, secret
-    return (
-        prompt(f"Bybit {environment} API key: ").strip(),
-        prompt(f"Bybit {environment} API secret: ").strip(),
-    )
+    credential_pair = prompt(
+        f"Bybit {environment} API key,API secret: "
+    ).strip()
+    if credential_pair.count(",") != 1:
+        raise DrillSafetyError(
+            "Enter Demo credentials as API_KEY,API_SECRET with exactly one comma"
+        )
+    key, secret = (part.strip() for part in credential_pair.split(",", 1))
+    if not key or not secret:
+        raise DrillSafetyError("Bybit API key and API secret are required")
+    return key, secret
 
 
 async def wait_for_fill(

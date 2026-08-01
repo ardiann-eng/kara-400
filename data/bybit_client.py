@@ -6,9 +6,10 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import time
 from typing import Any, Dict, List, Optional
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import urlencode
 
 import aiohttp
@@ -25,6 +26,9 @@ from execution.symbol_registry import BybitSymbolRegistry
 from execution.live_risk_gate import ExecutionQuote
 from models.schemas import Side
 from core.startup_validation import BybitPreflightResult
+
+
+log = logging.getLogger("kara.bybit_client")
 
 
 class BybitError(RuntimeError):
@@ -56,6 +60,12 @@ class BybitClient(ExecutionClient):
     PROTECTION_UNCHANGED_CODE = 34040
     MAX_ORDER_LINK_ID_LENGTH = 45
     DEMO_APPLY_MONEY_MAX_USDT = Decimal("100000")
+    # Bybit Demo currently rejects USDT demo-fund amounts with more than one
+    # decimal place (resultCode 3410020), despite outer retCode=0.
+    DEMO_USDT_AMOUNT_STEP = Decimal("0.1")
+    DEMO_BALANCE_TOLERANCE = Decimal("0.05")
+    DEMO_BALANCE_READBACK_ATTEMPTS = 6
+    DEMO_BALANCE_READBACK_INTERVAL_SEC = 1.0
 
     def __init__(
         self,
@@ -137,6 +147,7 @@ class BybitClient(ExecutionClient):
         auth: bool = False,
         retries: int = 2,
         ambiguous_order_id: Optional[str] = None,
+        response_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         request_started_at = time.monotonic()
         await self.connect()
@@ -180,6 +191,25 @@ class BybitClient(ExecutionClient):
 
                     code = int(data.get("retCode", -1))
                     if code == 0:
+                        if response_metadata is not None:
+                            response_metadata.update({
+                                "http_status": response.status,
+                                "ret_code": code,
+                                "ret_msg": str(data.get("retMsg", "")),
+                                "ret_ext_info": data.get("retExtInfo") or {},
+                                "result": data.get("result") or {},
+                                "server_time_ms": data.get("time"),
+                                "trace_id": response.headers.get("Traceid", ""),
+                                "rate_limit_status": response.headers.get(
+                                    "X-Bapi-Limit-Status", ""
+                                ),
+                                "rate_limit_reset_timestamp": response.headers.get(
+                                    "X-Bapi-Limit-Reset-Timestamp", ""
+                                ),
+                                "response_elapsed_ms": round(
+                                    (time.monotonic() - request_started_at) * 1000, 1
+                                ),
+                            })
                         if self.telemetry:
                             self.telemetry.record_rest_success(request_started_at)
                         return data.get("result") or {}
@@ -329,6 +359,61 @@ class BybitClient(ExecutionClient):
             unrealized_pnl=float(account.get("totalPerpUPL", 0) or 0),
         )
 
+    @staticmethod
+    def _demo_funding_root_cause_classification(
+        *,
+        transaction_rows: List[Dict[str, Any]],
+        transaction_log_error: str,
+        requested_at_ms: int,
+        amount: Decimal,
+        adjustment: str,
+    ) -> tuple[str, str]:
+        """Classify only observable wallet/ledger evidence; never infer Bybit internals."""
+        if transaction_log_error:
+            return (
+                "insufficient_evidence_transaction_log_unavailable",
+                "Wallet did not change; Bybit transaction log could not be read",
+            )
+        relevant_rows = [
+            row for row in transaction_rows
+            if str(row.get("currency", "")).upper() == "USDT"
+            and int(str(row.get("transactionTime", "0") or "0")) >= requested_at_ms - 60_000
+        ]
+        deltas = []
+        for row in relevant_rows:
+            try:
+                deltas.append(
+                    Decimal(str(row.get("change", "0") or "0"))
+                    + Decimal(str(row.get("bonusChange", "0") or "0"))
+                )
+            except (InvalidOperation, ValueError):
+                continue
+        expected_sign = 1 if adjustment == "add" else -1
+        matching_direction = any(value * expected_sign > 0 for value in deltas)
+        matching_amount = any(
+            abs(abs(value) - amount) <= BybitClient.DEMO_BALANCE_TOLERANCE
+            for value in deltas
+        )
+        if matching_amount:
+            return (
+                "ledger_records_requested_demo_fund_wallet_readback_stale",
+                "Bybit ledger records requested USDT change but wallet did not update in readback window",
+            )
+        if matching_direction:
+            return (
+                "ledger_records_different_usdt_change",
+                "Bybit ledger records USDT change with requested direction but different amount",
+            )
+        if relevant_rows:
+            return (
+                "ledger_has_no_requested_demo_fund_credit",
+                "Bybit ledger has USDT activity but no matching requested fund change",
+            )
+        return (
+            "bybit_accepted_fund_request_without_usdt_ledger_record",
+            "Bybit accepted request but no matching USDT transaction record or wallet change appeared",
+        )
+
     async def set_demo_usdt_balance(self, target_usdt: Decimal | str | float) -> VenueAccount:
         """Set Demo USDT wallet balance with one documented add or reduce request."""
         if not self.demo or self.testnet:
@@ -342,9 +427,13 @@ class BybitClient(ExecutionClient):
         before = await self.get_account()
         current = Decimal(str(before.wallet_balance))
         delta = target - current
-        if not delta:
+        if abs(delta) <= self.DEMO_BALANCE_TOLERANCE:
             return before
-        amount = abs(delta)
+        amount = abs(delta).quantize(
+            self.DEMO_USDT_AMOUNT_STEP, rounding=ROUND_HALF_UP
+        )
+        funding_response: Dict[str, Any] = {}
+        funding_requested_at_ms = int(time.time() * 1000)
         await self._request(
             "POST",
             "/v5/account/demo-apply-money",
@@ -357,11 +446,116 @@ class BybitClient(ExecutionClient):
             },
             auth=True,
             retries=0,
+            response_metadata=funding_response,
         )
-        after = await self.get_account()
-        if abs(Decimal(str(after.wallet_balance)) - target) > Decimal("0.01"):
-            raise BybitError("Demo wallet readback does not match requested capital")
-        return after
+        funding_result = funding_response.get("result") or {}
+        if str(funding_result.get("orderStatus", "")).upper() == "FAIL":
+            result_code = funding_result.get("resultCode", "unknown")
+            result_message = str(funding_result.get("retMsg", "Unknown error"))
+            log.warning(
+                "DEMO_FUNDING_REJECTED result_code=%s result_message=%s trace_id=%s",
+                result_code,
+                result_message,
+                funding_response.get("trace_id", ""),
+            )
+            raise BybitError(
+                f"Bybit Demo funding rejected: resultCode={result_code} {result_message}"
+            )
+        # Bybit accepts fund requests before the wallet endpoint reflects them.
+        # Polling only reads the wallet; it never repeats the rate-limited request.
+        readbacks = []
+        for attempt in range(self.DEMO_BALANCE_READBACK_ATTEMPTS):
+            after = await self.get_account()
+            wallet_balance = Decimal(str(after.wallet_balance))
+            readbacks.append(wallet_balance)
+            if abs(wallet_balance - target) <= self.DEMO_BALANCE_TOLERANCE:
+                return after
+            if attempt < self.DEMO_BALANCE_READBACK_ATTEMPTS - 1:
+                await asyncio.sleep(self.DEMO_BALANCE_READBACK_INTERVAL_SEC)
+        positions = await self.get_positions()
+        transaction_log: Dict[str, Any] = {}
+        transaction_log_error = ""
+        try:
+            transaction_log = await self._request(
+                "GET",
+                "/v5/account/transaction-log",
+                params={
+                    "accountType": "UNIFIED",
+                    "currency": "USDT",
+                    "startTime": funding_requested_at_ms - 60_000,
+                    "endTime": int(time.time() * 1000),
+                    "limit": 10,
+                },
+                auth=True,
+            )
+        except BybitError as exc:
+            transaction_log_error = f"{type(exc).__name__}: {exc}"
+        log.warning(
+            "DEMO_WALLET_READBACK_MISMATCH target_usdt=%s before_wallet_usdt=%s "
+            "before_equity_usdt=%s before_available_usdt=%s before_used_margin_usdt=%s "
+            "readback_wallet_usdt=%s final_equity_usdt=%s final_available_usdt=%s "
+            "final_used_margin_usdt=%s open_position_count=%s adjustment=%s amount_usdt=%s",
+            target,
+            before.wallet_balance,
+            before.total_equity,
+            before.available_balance,
+            before.used_margin,
+            ",".join(format(value, "f") for value in readbacks),
+            after.total_equity,
+            after.available_balance,
+            after.used_margin,
+            len(positions),
+            "add" if delta > 0 else "reduce",
+            amount,
+        )
+        transaction_rows = transaction_log.get("list") or []
+        safe_transaction_rows = [
+            {
+                key: row.get(key, "")
+                for key in (
+                    "transactionTime", "type", "transSubType", "currency", "change",
+                    "cashFlow", "funding", "fee", "bonusChange", "cashBalance",
+                )
+            }
+            for row in transaction_rows[:10]
+            if isinstance(row, dict)
+        ]
+        root_cause_code, root_cause_evidence = self._demo_funding_root_cause_classification(
+            transaction_rows=transaction_rows,
+            transaction_log_error=transaction_log_error,
+            requested_at_ms=funding_requested_at_ms,
+            amount=amount,
+            adjustment="add" if delta > 0 else "reduce",
+        )
+        log.warning(
+            "DEMO_FUNDING_RESPONSE endpoint=/v5/account/demo-apply-money "
+            "http_status=%s ret_code=%s ret_msg=%s ret_ext_info=%s result=%s "
+            "server_time_ms=%s trace_id=%s rate_limit_status=%s "
+            "rate_limit_reset_timestamp=%s response_elapsed_ms=%s",
+            funding_response.get("http_status"),
+            funding_response.get("ret_code"),
+            funding_response.get("ret_msg"),
+            json.dumps(funding_response.get("ret_ext_info") or {}, sort_keys=True),
+            json.dumps(funding_response.get("result") or {}, sort_keys=True),
+            funding_response.get("server_time_ms"),
+            funding_response.get("trace_id"),
+            funding_response.get("rate_limit_status"),
+            funding_response.get("rate_limit_reset_timestamp"),
+            funding_response.get("response_elapsed_ms"),
+        )
+        log.warning(
+            "DEMO_FUNDING_TRANSACTION_LOG requested_at_ms=%s row_count=%s rows=%s error=%s",
+            funding_requested_at_ms,
+            len(safe_transaction_rows),
+            json.dumps(safe_transaction_rows, sort_keys=True),
+            transaction_log_error,
+        )
+        log.warning(
+            "DEMO_FUNDING_ROOT_CAUSE classification=%s evidence=%s",
+            root_cause_code,
+            root_cause_evidence,
+        )
+        raise BybitError("Demo wallet readback does not match requested capital")
 
     async def apply_demo_money(self, amount_usdt: Decimal | str | float) -> VenueAccount:
         """Compatibility wrapper: add virtual USDT to current Demo wallet."""

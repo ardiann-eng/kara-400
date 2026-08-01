@@ -193,11 +193,16 @@ def test_drill_credentials_refuse_partial_environment_pair():
         )
 
 
-def test_drill_credentials_fall_back_to_hidden_prompt_when_unset():
-    responses = iter(("prompt-key", "prompt-secret"))
+def test_drill_credentials_accept_one_hidden_comma_separated_prompt_when_unset():
     assert read_drill_credentials(
-        "demo", environ={}, prompt=lambda label: next(responses)
+        "demo", environ={}, prompt=lambda label: "prompt-key,prompt-secret"
     ) == ("prompt-key", "prompt-secret")
+
+
+@pytest.mark.parametrize("credential_pair", ("", "key", "key,secret,extra", ",secret", "key,"))
+def test_drill_credentials_refuse_invalid_hidden_comma_separated_prompt(credential_pair):
+    with pytest.raises(DrillSafetyError):
+        read_drill_credentials("demo", environ={}, prompt=lambda label: credential_pair)
 
 
 def test_default_evidence_path_is_environment_specific():

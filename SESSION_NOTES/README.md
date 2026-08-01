@@ -118,6 +118,19 @@
 - `2026-07-30_SINGLE_MESSAGE_BYBIT_CREDENTIAL_INPUT.md`
   - Input API Key dan API Secret Bybit dalam satu pesan `API_KEY,API_SECRET`, tetap dihapus langsung dan disimpan hanya setelah preflight serta konfirmasi.
 
+- `2026-07-30_DEMO_WALLET_READBACK_DELAY_FIX.md`
+  - Tunggu readback saldo Demo maksimum lima detik setelah satu perubahan dana virtual; tidak mengulang request dana yang dibatasi satu kali per menit.
+
+- `2026-07-30_DEMO_WALLET_MISMATCH_DIAGNOSTICS.md`
+  - Catat angka wallet Demo aman saat target gagal terbaca, tanpa credential, untuk membuktikan penyebab sebelum mengubah aturan saldo lagi.
+
+## 2026-08-01
+
+- `2026-08-01_DEMO_DRILL_COMMA_CREDENTIAL_INPUT.md`
+  - CLI drill Demo menerima input tersembunyi `API_KEY,API_SECRET` satu baris; order nyata tetap perlu command drill eksplisit.
+- `2026-08-01_DEMO_FUND_REQUEST_ACCEPTED_WITHOUT_BALANCE_MUTATION.md`
+  - Respons Bybit membuktikan `29.85` USDT ditolak karena presisi satu desimal; perbaikan local mengirim langkah `$0.10` dan membaca nested failure walau outer `retCode=0`.
+
 ## Reading Order
 
 - Baca note scalper exit dan fallback untuk perubahan entry serta time exit.

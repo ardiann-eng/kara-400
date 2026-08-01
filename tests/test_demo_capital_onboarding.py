@@ -1,4 +1,5 @@
 from decimal import Decimal
+import logging
 from types import SimpleNamespace
 import sys
 
@@ -36,6 +37,19 @@ def test_demo_preflight_http_403_explains_network_block_not_bad_credentials():
     assert "bukan bukti API Key atau API Secret salah" in text
     assert "tidak ada order dibuat" in text
     assert "credential baru dulu" in text
+
+
+def test_demo_delayed_wallet_readback_explains_retry_wait():
+    from notify.telegram import bybit_preflight_failure_message
+
+    text = bybit_preflight_failure_message(
+        BybitError("Demo wallet readback does not match requested capital"), "demo"
+    )
+
+    assert "belum diperbarui" in text
+    assert "minimal satu menit" in text
+    assert "API_KEY,API_SECRET" in text
+    assert "tidak ada order dibuat" in text
 
 
 @pytest.mark.asyncio
@@ -282,9 +296,171 @@ async def test_demo_balance_set_reduces_existing_wallet_to_requested_capital(mon
     assert calls == [("POST", "/v5/account/demo-apply-money", {
         "body": {
             "adjustType": 1,
-            "utaDemoApplyMoney": [{"coin": "USDT", "amountStr": "37.50"}],
-        }, "auth": True, "retries": 0
+            "utaDemoApplyMoney": [{"coin": "USDT", "amountStr": "37.5"}],
+        }, "auth": True, "retries": 0, "response_metadata": {}
     })]
+
+
+@pytest.mark.asyncio
+async def test_demo_balance_set_rounds_fractional_wallet_delta_to_usdt_cents(monkeypatch):
+    client = BybitClient(api_key="key", api_secret="secret", testnet=False, demo=True)
+    calls = []
+
+    async def request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return {}
+
+    balances = iter([
+        VenueAccount(32.62078288, 32.65415543, 32.62078288, 0, 0),
+        VenueAccount(62.47, 62.50415543, 62.47, 0, 0),
+    ])
+
+    async def account():
+        return next(balances)
+
+    monkeypatch.setattr(client, "_request", request)
+    monkeypatch.setattr(client, "get_account", account)
+
+    result = await client.set_demo_usdt_balance(Decimal("62.50"))
+
+    assert result.wallet_balance == 62.50415543
+    assert calls[0][2]["body"] == {
+        "adjustType": 0,
+        "utaDemoApplyMoney": [{"coin": "USDT", "amountStr": "29.8"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_demo_balance_rejects_nested_bybit_funding_failure_without_wallet_poll(
+    monkeypatch, caplog
+):
+    client = BybitClient(api_key="key", api_secret="secret", testnet=False, demo=True)
+    calls = []
+
+    async def request(method, path, **kwargs):
+        calls.append(path)
+        kwargs["response_metadata"].update({
+            "result": {
+                "orderStatus": "FAIL",
+                "resultCode": "3410020",
+                "retMsg": "USDT precision 1",
+            },
+            "trace_id": "safe-trace-id",
+        })
+        return {}
+
+    async def account():
+        return VenueAccount(32.62, 32.65415543, 32.62, 0, 0)
+
+    monkeypatch.setattr(client, "_request", request)
+    monkeypatch.setattr(client, "get_account", account)
+
+    with caplog.at_level(logging.WARNING, logger="kara.bybit_client"):
+        with pytest.raises(BybitError, match="resultCode=3410020"):
+            await client.set_demo_usdt_balance(Decimal("62.50"))
+
+    assert calls == ["/v5/account/demo-apply-money"]
+    assert "DEMO_FUNDING_REJECTED result_code=3410020" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_demo_balance_set_waits_for_delayed_wallet_readback_without_second_fund_request(monkeypatch):
+    client = BybitClient(api_key="key", api_secret="secret", testnet=False, demo=True)
+    calls, delays = [], []
+
+    async def request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return {}
+
+    balances = iter([
+        VenueAccount(100, 100, 100, 0, 0),
+        VenueAccount(100, 100, 100, 0, 0),
+        VenueAccount(62.5, 62.5, 62.5, 0, 0),
+    ])
+
+    async def account():
+        return next(balances)
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(client, "_request", request)
+    monkeypatch.setattr(client, "get_account", account)
+    monkeypatch.setattr("data.bybit_client.asyncio.sleep", sleep)
+
+    account_after = await client.set_demo_usdt_balance(Decimal("62.50"))
+
+    assert account_after.wallet_balance == 62.5
+    assert delays == [1.0]
+    assert [path for _, path, _ in calls] == ["/v5/account/demo-apply-money"]
+
+
+@pytest.mark.asyncio
+async def test_demo_balance_mismatch_logs_safe_wallet_diagnostics(monkeypatch, caplog):
+    client = BybitClient(api_key="secret-api-key", api_secret="secret-api-secret", testnet=False, demo=True)
+    calls = []
+
+    async def request(method, path, **kwargs):
+        calls.append(path)
+        if path == "/v5/account/demo-apply-money":
+            kwargs["response_metadata"].update({
+                "http_status": 200,
+                "ret_code": 0,
+                "ret_msg": "OK",
+                "ret_ext_info": {"reason": "demo"},
+                "result": {"accepted": True},
+                "server_time_ms": 1_754_058_698_864,
+                "trace_id": "trace-safe-id",
+                "rate_limit_status": "0",
+                "rate_limit_reset_timestamp": "1754058758864",
+                "response_elapsed_ms": 12.5,
+            })
+        if path == "/v5/position/list":
+            return {"list": []}
+        if path == "/v5/account/transaction-log":
+            return {"list": [{
+                "id": "must-not-log-id",
+                "transactionTime": "1754058698864",
+                "type": "TRANSFER",
+                "currency": "USDT",
+                "change": "0",
+                "cashBalance": "100",
+            }]}
+        return {}
+
+    balances = iter([VenueAccount(100, 100, 80, 20, 0)] * 7)
+
+    async def account():
+        return next(balances)
+
+    async def sleep(_delay):
+        pass
+
+    monkeypatch.setattr(client, "_request", request)
+    monkeypatch.setattr(client, "get_account", account)
+    monkeypatch.setattr("data.bybit_client.asyncio.sleep", sleep)
+
+    with caplog.at_level(logging.WARNING, logger="kara.bybit_client"):
+        with pytest.raises(BybitError, match="readback"):
+            await client.set_demo_usdt_balance(Decimal("62.50"))
+
+    assert calls.count("/v5/account/demo-apply-money") == 1
+    assert calls.count("/v5/position/list") == 1
+    assert calls.count("/v5/account/transaction-log") == 1
+    assert "target_usdt=62.50" in caplog.text
+    assert "before_wallet_usdt=100" in caplog.text
+    assert "open_position_count=0" in caplog.text
+    assert "DEMO_FUNDING_RESPONSE endpoint=/v5/account/demo-apply-money http_status=200 ret_code=0 ret_msg=OK" in caplog.text
+    assert 'ret_ext_info={"reason": "demo"}' in caplog.text
+    assert "trace_id=trace-safe-id" in caplog.text
+    assert 'result={"accepted": true}' in caplog.text
+    assert "rate_limit_status=0" in caplog.text
+    assert "DEMO_FUNDING_TRANSACTION_LOG" in caplog.text
+    assert '"cashBalance": "100"' in caplog.text
+    assert "must-not-log-id" not in caplog.text
+    assert "bybit_accepted_fund_request_without_usdt_ledger_record" in caplog.text
+    assert "secret-api-key" not in caplog.text
+    assert "secret-api-secret" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -292,7 +468,42 @@ async def test_demo_balance_set_reduces_existing_wallet_to_requested_capital(mon
 async def test_demo_fund_rejects_mainnet_and_testnet(testnet, demo):
     client = BybitClient(api_key="key", api_secret="secret", testnet=testnet, demo=demo)
     with pytest.raises(BybitError, match="only"):
-        await client.set_demo_usdt_balance("1")
+            await client.set_demo_usdt_balance("1")
+
+
+@pytest.mark.parametrize(
+    ("rows", "error", "expected"),
+    [
+        (
+            [{"currency": "USDT", "transactionTime": "1000", "change": "29.85"}],
+            "",
+            "ledger_records_requested_demo_fund_wallet_readback_stale",
+        ),
+        (
+            [{"currency": "USDT", "transactionTime": "1000", "change": "10"}],
+            "",
+            "ledger_records_different_usdt_change",
+        ),
+        (
+            [{"currency": "USDT", "transactionTime": "1000", "change": "-1"}],
+            "",
+            "ledger_has_no_requested_demo_fund_credit",
+        ),
+        ([], "BybitError: unsupported", "insufficient_evidence_transaction_log_unavailable"),
+        ([], "", "bybit_accepted_fund_request_without_usdt_ledger_record"),
+    ],
+)
+def test_demo_funding_root_cause_classifier_uses_observable_ledger_evidence(
+    rows, error, expected
+):
+    code, _ = BybitClient._demo_funding_root_cause_classification(
+        transaction_rows=rows,
+        transaction_log_error=error,
+        requested_at_ms=1000,
+        amount=Decimal("29.85"),
+        adjustment="add",
+    )
+    assert code == expected
 
 
 def test_top_100_requires_exact_active_bybit_metadata():
