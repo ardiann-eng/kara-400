@@ -60,10 +60,10 @@ class BybitClient(ExecutionClient):
     PROTECTION_UNCHANGED_CODE = 34040
     MAX_ORDER_LINK_ID_LENGTH = 45
     DEMO_APPLY_MONEY_MAX_USDT = Decimal("100000")
-    # Bybit Demo currently rejects USDT demo-fund amounts with more than one
-    # decimal place (resultCode 3410020), despite outer retCode=0.
-    DEMO_USDT_AMOUNT_STEP = Decimal("0.1")
-    DEMO_BALANCE_TOLERANCE = Decimal("0.05")
+    # Production attempts rejected 29.85 and 29.8 USDT with resultCode 3410020
+    # and "precision 1". This endpoint currently accepts whole-USDT amounts.
+    DEMO_USDT_AMOUNT_STEP = Decimal("1")
+    DEMO_BALANCE_TOLERANCE = Decimal("0.5")
     DEMO_BALANCE_READBACK_ATTEMPTS = 6
     DEMO_BALANCE_READBACK_INTERVAL_SEC = 1.0
 

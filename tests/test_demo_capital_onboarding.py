@@ -296,7 +296,7 @@ async def test_demo_balance_set_reduces_existing_wallet_to_requested_capital(mon
     assert calls == [("POST", "/v5/account/demo-apply-money", {
         "body": {
             "adjustType": 1,
-            "utaDemoApplyMoney": [{"coin": "USDT", "amountStr": "37.5"}],
+            "utaDemoApplyMoney": [{"coin": "USDT", "amountStr": "38"}],
         }, "auth": True, "retries": 0, "response_metadata": {}
     })]
 
@@ -326,7 +326,7 @@ async def test_demo_balance_set_rounds_fractional_wallet_delta_to_usdt_cents(mon
     assert result.wallet_balance == 62.50415543
     assert calls[0][2]["body"] == {
         "adjustType": 0,
-        "utaDemoApplyMoney": [{"coin": "USDT", "amountStr": "29.8"}],
+        "utaDemoApplyMoney": [{"coin": "USDT", "amountStr": "30"}],
     }
 
 
