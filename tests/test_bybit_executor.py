@@ -530,6 +530,29 @@ async def test_persisted_strategy_stop_is_restored_after_restart():
 
 
 @pytest.mark.asyncio
+async def test_load_persisted_positions_prefers_original_position_over_recovery_duplicates():
+    persistence = FakePersistence()
+    original = await make_executor(FakeClient()).open_position(make_signal())
+    original.position_id = "original"
+    original.strategy_source = "scalper"
+    recovery_one = original.model_copy(deep=True)
+    recovery_one.position_id = "recovery-one"
+    recovery_one.strategy_source = "exchange_recovery_unknown"
+    recovery_two = recovery_one.model_copy(deep=True)
+    recovery_two.position_id = "recovery-two"
+    for position in (recovery_one, original, recovery_two):
+        persistence.save_bybit_position(
+            "chat", position, "BTCUSDT", "open_protected"
+        )
+
+    restarted = make_executor(FakeClient(), persistence=persistence)
+    restarted.load_persisted_positions()
+
+    assert [position.position_id for position in restarted.open_positions] == ["original"]
+    assert set(persistence.rows) == {"original"}
+
+
+@pytest.mark.asyncio
 async def test_restart_accepts_matching_exchange_hard_stop_without_reinstall():
     persistence = FakePersistence()
     client = FakeClient()

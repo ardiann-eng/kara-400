@@ -130,6 +130,8 @@
   - CLI drill Demo menerima input tersembunyi `API_KEY,API_SECRET` satu baris; order nyata tetap perlu command drill eksplisit.
 - `2026-08-01_DEMO_FUND_REQUEST_ACCEPTED_WITHOUT_BALANCE_MUTATION.md`
   - Respons Bybit membuktikan `29.85` USDT ditolak karena presisi satu desimal; perbaikan local mengirim langkah `$0.10` dan membaca nested failure walau outer `retCode=0`.
+- `2026-08-01_DUPLICATE_USER_SESSION_UNKNOWN_POSITION_RACE.md`
+  - Aktivasi Demo saat scanner paralel membuat empat session Bybit yatim; posisi KARA salah dianggap asing dan ditutup. Registry per-user atomik serta deduplikasi posisi startup ditambah lokal.
 
 ## Reading Order
 

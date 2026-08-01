@@ -155,7 +155,38 @@ class BybitExecutor(BaseExecutor):
     def load_persisted_positions(self) -> None:
         if not self.persistence:
             return
-        for item in self.persistence.load_bybit_positions(self.chat_id):
+        rows = self.persistence.load_bybit_positions(self.chat_id)
+        selected = {}
+        duplicates = []
+        for item in rows:
+            position = item["position"]
+            key = (item["symbol"], position.side)
+            current = selected.get(key)
+            if current is None:
+                selected[key] = item
+                continue
+            current_position = current["position"]
+            current_is_recovery = (
+                current_position.strategy_source == "exchange_recovery_unknown"
+            )
+            candidate_is_recovery = (
+                position.strategy_source == "exchange_recovery_unknown"
+            )
+            if current_is_recovery and not candidate_is_recovery:
+                duplicates.append(current)
+                selected[key] = item
+            else:
+                duplicates.append(item)
+        for item in duplicates:
+            duplicate = item["position"]
+            log.warning(
+                "Removing duplicate persisted Bybit position symbol=%s side=%s source=%s",
+                item["symbol"],
+                duplicate.side.value,
+                duplicate.strategy_source,
+            )
+            self.persistence.remove_bybit_position(duplicate.position_id)
+        for item in selected.values():
             position = item["position"]
             self._positions[position.position_id] = position
             self._position_symbols[position.position_id] = item["symbol"]

@@ -235,6 +235,8 @@ async def test_demo_onboarding_sets_requested_virtual_balance_then_activates(mon
             return SimpleNamespace(executor=SimpleNamespace(open_positions=[]))
         async def ensure_bybit_public_client(self): pass
         async def close_user_session(self, chat_id): pass
+        async def replace_user_session(self, chat_id):
+            return SimpleNamespace(executor=SimpleNamespace(open_positions=[]))
 
     bot = KaraTelegram.__new__(KaraTelegram)
     bot.bot_app = BotApp()

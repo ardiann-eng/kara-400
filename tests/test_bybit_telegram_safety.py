@@ -591,6 +591,10 @@ async def test_live_confirm_bootstraps_metadata_and_closes_old_ws_and_rest(monke
             self.sessions[chat_id] = SimpleNamespace()
             return self.sessions[chat_id]
 
+        async def replace_user_session(self, chat_id):
+            await self.close_user_session(chat_id)
+            return await self.get_session(chat_id)
+
     query = FakeQuery()
     query.data = "bybit_live_confirm"
     update = SimpleNamespace(
@@ -643,8 +647,11 @@ async def test_failed_reactivation_restores_previous_live_user_state(monkeypatch
 
         async def get_session(self, chat_id):
             self.attempts += 1
-            if self.attempts == 1:
-                return self.sessions[chat_id]
+            return self.sessions[chat_id]
+
+        async def replace_user_session(self, chat_id):
+            self.attempts += 1
+            self.sessions.pop(chat_id, None)
             if self.attempts == 2:
                 raise RuntimeError("new private session failed")
             restored = SimpleNamespace(executor=ReconcilingExecutor())

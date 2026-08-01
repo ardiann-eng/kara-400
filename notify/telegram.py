@@ -3167,8 +3167,7 @@ class KaraTelegram:
                     await self.bot_app.ensure_bybit_public_client()
                 user_db.update_user(user)
                 if self.bot_app:
-                    await self.bot_app.close_user_session(chat_id)
-                    await self.bot_app.get_session(chat_id)
+                    await self.bot_app.replace_user_session(chat_id)
             except Exception as e:
                 if self.bot_app:
                     try:
@@ -3188,7 +3187,7 @@ class KaraTelegram:
                 user_db.update_user(user)
                 if self.bot_app and previous["bot_mode"] == BotMode.LIVE:
                     try:
-                        await self.bot_app.get_session(chat_id)
+                        await self.bot_app.replace_user_session(chat_id)
                     except Exception:
                         log.exception("Failed to restore previous live session for %s", chat_id)
                 await query.edit_message_text(

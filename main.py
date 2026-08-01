@@ -40,6 +40,7 @@ from core.startup_validation import validate_bybit_preflight
 from data.bybit_client import BybitClient
 from execution.bybit_executor import BybitExecutor
 from core.bybit_session_lifecycle import BybitSessionLifecycle
+from core.session_registry import SessionRegistry
 
 # ──────────────────────────────────────────────
 # LOGGING SETUP
@@ -121,6 +122,7 @@ class KaraBot:
 
         # Multi-user session store (chat_id -> UserSession)
         self.sessions: Dict[str, UserSession] = {}
+        self._session_registry = SessionRegistry(self.sessions)
 
         # Semaphor for parallel scanning (Task 4)
         self.scan_sem   = asyncio.Semaphore(5)
@@ -719,44 +721,49 @@ class KaraBot:
             log.info("Bybit public metadata ready (testnet=%s)", config.BYBIT_TESTNET)
         return client
 
-    async def close_user_session(self, chat_id: str) -> Optional[UserSession]:
-        session = self.sessions.pop(str(chat_id), None)
-        if not session:
-            return None
-        await self._bybit_lifecycle.close_session(session)
+    async def _build_user_session(self, user) -> UserSession:
+        if user.config.bot_mode == BotMode.LIVE:
+            await self.ensure_bybit_public_client()
+        session = UserSession(
+            user,
+            mode_manager=self.mode_mgr,
+            hl_client=self.hl_client,
+            bybit_client=self.bybit_client,
+            bybit_registry=(
+                self.bybit_client.symbol_registry if self.bybit_client else None
+            ),
+            persistence=user_db,
+            alert_sink=lambda message, cid=str(user.chat_id): self.telegram.send_text(
+                message, target_chat_id=cid
+            ),
+        )
+        if hasattr(session.executor, 'load_from_db'):
+            session.executor.load_from_db(user.chat_id)
+        try:
+            await session.initialize()
+        except Exception:
+            await self._bybit_lifecycle.close_session(session)
+            raise
         return session
 
+    async def close_user_session(self, chat_id: str) -> Optional[UserSession]:
+        return await self._session_registry.close(
+            str(chat_id), close=self._bybit_lifecycle.close_session
+        )
+
+    async def replace_user_session(self, chat_id: str) -> Optional[UserSession]:
+        """Close and rebuild one user session without exposing an empty registry gap."""
+        return await self._session_registry.replace(
+            str(chat_id),
+            load_user=user_db.get_user,
+            build=self._build_user_session,
+            close=self._bybit_lifecycle.close_session,
+        )
+
     async def get_session(self, chat_id: str) -> Optional[UserSession]:
-            chat_id = str(chat_id)
-            if chat_id not in self.sessions:
-                user = user_db.get_user(chat_id)
-                if user:
-                    if user.config.bot_mode == BotMode.LIVE:
-                        await self.ensure_bybit_public_client()
-                    session = UserSession(
-                        user,
-                        mode_manager=self.mode_mgr,
-                        hl_client=self.hl_client,
-                        bybit_client=self.bybit_client,
-                        bybit_registry=(
-                            self.bybit_client.symbol_registry
-                            if self.bybit_client else None
-                        ),
-                        persistence=user_db,
-                        alert_sink=lambda message, cid=str(user.chat_id): self.telegram.send_text(
-                            message, target_chat_id=cid
-                        ),
-                    )
-                    # Restore persisted state (balance + open positions) from DB
-                    if hasattr(session.executor, 'load_from_db'):
-                        session.executor.load_from_db(user.chat_id)
-                    try:
-                        await session.initialize()
-                    except Exception:
-                        await self._bybit_lifecycle.close_session(session)
-                        raise
-                    self.sessions[chat_id] = session
-            return self.sessions.get(chat_id)
+        return await self._session_registry.get_or_create(
+            str(chat_id), load_user=user_db.get_user, build=self._build_user_session
+        )
 
     async def _broadcast_heartbeat(self):
         """Dashboard heartbeat - handles real-time updates for the web UI."""
